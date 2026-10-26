@@ -228,7 +228,10 @@ pub fn extract_zip_into(
         if file.is_dir() {
             continue;
         }
-        let name = file.name().map_err(|e| InstallError::Zip(e.to_string()))?.into_owned();
+        let name = file
+            .name()
+            .map_err(|e| InstallError::Zip(e.to_string()))?
+            .into_owned();
         // 危险条目：立即失败，已写入的部分由 Drop 清理
         safe_join(tx.staging_dir(), &name)?;
     }
@@ -240,7 +243,10 @@ pub fn extract_zip_into(
         if file.is_dir() {
             continue;
         }
-        let name = file.name().map_err(|e| InstallError::Zip(e.to_string()))?.into_owned();
+        let name = file
+            .name()
+            .map_err(|e| InstallError::Zip(e.to_string()))?
+            .into_owned();
         let mut buf = Vec::with_capacity(file.size() as usize);
         io::copy(&mut file, &mut buf)?;
         tx.place_file(&name, &buf)?;
