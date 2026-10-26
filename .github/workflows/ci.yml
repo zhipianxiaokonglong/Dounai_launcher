@@ -33,6 +33,16 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      # tauri::generate_context!() 在编译期嵌入 ../dist 的前端资源，
+      # 必须先构建产物再跑 cargo（否则 proc macro panicked）。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - name: Build frontend (dist/ required by generate_context)
+        run: |
+          npm ci
+          npm run build
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
