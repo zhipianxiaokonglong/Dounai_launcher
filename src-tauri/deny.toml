@@ -5,11 +5,14 @@
 #  - bans：禁止重复依赖与特定不受欢迎的 crate。
 
 [advisories]
-# 有漏洞的依赖直接失败，不允许"仅警告"
-vulnerability = "deny"
-unmaintained = "warn"
+# cargo-deny 0.16+ 已移除 vulnerability/unmaintained/unsound/notice 字段，
+# 所有漏洞类 advisory 默认即失败；这里只配置「unmaintained/unsound 的生效范围」。
+# unmaintained = "workspace"：仅直接依赖的 unmaintained 会失败，
+#   传递依赖（Linux/D-Bus 平台的 proc-macro-error/zbus_names/zvariant/glib 等）不阻断。
+# 个别需要放行的 advisory 用 ignore 字段显式列出。
+unmaintained = "workspace"
+unsound = "workspace"
 yanked = "deny"
-notice = "warn"
 ignore = []
 
 [bans]
