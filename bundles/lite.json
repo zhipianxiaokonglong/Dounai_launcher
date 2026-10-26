@@ -1,0 +1,9 @@
+{
+  "bundle_id": "lite",
+  "name": "轻量版",
+  "description": "最小可用 + 语音层；推荐 1 个小体积本地模型（默认不勾选）。",
+  "modules": ["dounai-input", "omninexus", "dounai-ui", "dounai-memory-reserved", "moodvoice"],
+  "model_packs": [],
+  "recommended_only": ["faster-whisper-tiny"],
+  "optional_modules": []
+}

@@ -1,0 +1,40 @@
+{
+  "module_id": "moodvoice",
+  "name": "输出表达层 · MoodVoice",
+  "version": "1.0.0",
+  "category": "optional",
+  "entry": {
+    "type": "command",
+    "command": "python -m emotional_tts serve",
+    "working_dir": "output",
+    "env": {
+      "EMOTION_TTS_PORT": "8103",
+      "EMOTION_TTS_DATA_DIR": "{data_dir}/moodvoice",
+      "EMOTION_TTS_ROOT": "{repo}/output"
+    },
+    "health": { "url": "http://127.0.0.1:8103/api/health", "timeout_ms": 3000 }
+  },
+  "compat": { "app_version": ">=0.1.0" },
+  "dependencies": [
+    { "name": "Python", "version": ">=3.11", "type": "runtime" },
+    { "name": "fastapi", "version": ">=0.115", "type": "library" },
+    { "name": "uvicorn", "version": ">=0.32", "type": "library" },
+    { "name": "edge-tts", "version": ">=7,<8", "type": "library" }
+  ],
+  "model_packs": [
+    {
+      "id": "gpt-sovits",
+      "name": "GPT-SoVITS（本地 TTS）",
+      "size_mb": 3584,
+      "hardware_req": { "gpu": "required", "ram_mb": 8192, "disk_mb": 4096 },
+      "privacy": "offline",
+      "recommended": false
+    }
+  ],
+  "permissions": {
+    "network": [],
+    "filesystem": ["{data_dir}/moodvoice", "{repo}/output"],
+    "devices": []
+  },
+  "signature": { "algo": "SHA-256 + Ed25519", "value": "" }
+}

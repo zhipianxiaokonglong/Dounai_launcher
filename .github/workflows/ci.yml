@@ -1,0 +1,108 @@
+name: ci
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+jobs:
+  # ---------------------------------------------------------------
+  # 前端：类型检查 + 单元测试 + 构建
+  # ---------------------------------------------------------------
+  frontend:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - name: Install
+        run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Unit tests
+        run: npm test
+      - name: Build
+        run: npm run build
+
+  # ---------------------------------------------------------------
+  # Rust：格式 + clippy + 测试 + 依赖审计
+  # ---------------------------------------------------------------
+  rust:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Format check
+        working-directory: src-tauri
+        run: cargo fmt --all -- --check
+
+      - name: Clippy（静态扫描，警告即失败）
+        working-directory: src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Tests
+        working-directory: src-tauri
+        run: cargo test --all-targets
+
+      # 安全不变量 fuzz。CI 是干净环境，不会遇到本地
+      # 增量编译缓存导致的行为失真（见 docs/TESTING.md）。
+      - name: Fuzz invariants
+        working-directory: src-tauri
+        run: cargo test --test fuzz_invariants -- --nocapture
+
+      # 依赖审计：漏洞与 yanked 检查
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Dependency audit
+        working-directory: src-tauri
+        run: cargo audit
+
+      # 许可证与重复依赖检查（供应链卫生）
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+
+      - name: Deny check
+        working-directory: src-tauri
+        run: cargo deny check advisories bans
+
+  # ---------------------------------------------------------------
+  # Reserved 插件：Python 契约测试
+  # ---------------------------------------------------------------
+  reserved:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install fastapi uvicorn pytest httpx
+          pip install -e reserved/memory --no-deps
+      - name: Contract tests
+        run: python -m pytest reserved/memory/tests -q
+
+  # ---------------------------------------------------------------
+  # 密钥扫描：仓库不得含有任何凭据
+  # ---------------------------------------------------------------
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

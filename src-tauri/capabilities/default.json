@@ -1,0 +1,11 @@
+{
+  "identifier": "default",
+  "description": "启动器最小权限集：只开放窗口显示与焦点，不放开文件系统、Shell 与任意网络",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-set-focus"
+  ]
+}

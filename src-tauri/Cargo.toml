@@ -1,0 +1,42 @@
+[package]
+name = "dounai-launcher"
+version = "0.1.0"
+description = "Dounai launcher: install, environment and module management"
+edition = "2021"
+license = "GPL-3.0-or-later"
+
+[lib]
+name = "dounai_launcher"
+path = "src/lib.rs"
+
+[[bin]]
+name = "dounai-launcher"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+hex = "0.4"
+thiserror = "2"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+tempfile = "3"
+walkdir = "2"
+ed25519-dalek = { version = "3.0.0", features = ["rand_core"] }
+base64 = "0.23.1"
+tauri = { version = "2.12.5", features = [] }
+tauri-plugin-single-instance = "2.5.4"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+
+[dev-dependencies]
+tempfile = "3"
+zip = { version = "2", features = ["deflate"] }
+
+[build-dependencies]
+tauri-build = { version = "2.7.4", features = [] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

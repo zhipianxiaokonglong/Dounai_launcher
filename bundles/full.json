@@ -1,0 +1,9 @@
+{
+  "bundle_id": "full",
+  "name": "完整体验",
+  "description": "全部功能模块。本地模型为推荐勾选项，默认不勾。",
+  "modules": ["dounai-input", "omninexus", "dounai-ui", "dounai-memory-reserved", "moodvoice"],
+  "model_packs": [],
+  "recommended_only": ["faster-whisper-small", "faster-whisper-tiny", "ollama-llama3.2"],
+  "optional_modules": []
+}

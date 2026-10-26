@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Dounai 启动器</title>
+    <link rel="stylesheet" href="./styles/app.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <div class="topbar__brand">
+          <span class="topbar__logo">◈</span>
+          <span class="topbar__title">Dounai 启动器</span>
+        </div>
+        <div class="topbar__actions">
+          <button id="btn-refresh" class="btn btn--ghost" title="重新检测环境">检测环境</button>
+          <span id="env-pill" class="pill" data-tone="idle">未检测</span>
+        </div>
+      </header>
+
+      <nav class="tabs" role="tablist">
+        <button class="tab is-active" data-tab="modules" role="tab">模块</button>
+        <button class="tab" data-tab="bundles" role="tab">套装</button>
+        <button class="tab" data-tab="env" role="tab">环境</button>
+      </nav>
+
+      <main class="content">
+        <!-- 模块管理：ComfyUI Manager 式卡片 -->
+        <section id="panel-modules" class="panel">
+          <div class="toolbar">
+            <input id="search" class="input" type="search" placeholder="搜索模块…" />
+            <select id="filter-category" class="select">
+              <option value="">全部分类</option>
+              <option value="core">core</option>
+              <option value="optional">optional</option>
+              <option value="reserved">reserved</option>
+            </select>
+            <label class="toggle">
+              <input id="only-missing" type="checkbox" />
+              <span>只看缺失依赖</span>
+            </label>
+          </div>
+          <div id="module-grid" class="grid"></div>
+          <p id="modules-empty" class="empty" hidden>没有匹配的模块。</p>
+        </section>
+
+        <!-- 一键套装：PCL2 式预设 -->
+        <section id="panel-bundles" class="panel" hidden>
+          <div id="bundle-list" class="bundle-list"></div>
+          <div id="plan" class="plan" hidden>
+            <h3 class="plan__title">安装计划</h3>
+            <div id="plan-body" class="plan__body"></div>
+            <div id="plan-recos" class="plan__recos"></div>
+            <div class="plan__actions">
+              <button id="btn-execute" class="btn btn--primary">开始安装</button>
+              <button id="btn-cancel" class="btn btn--ghost">取消</button>
+            </div>
+            <pre id="plan-log" class="log" hidden></pre>
+          </div>
+
+          <!-- 本地安装：离线机器也能装模块（本地离线版的落地方式） -->
+          <div class="plan" style="margin-top:18px">
+            <h3 class="plan__title">从本地文件安装</h3>
+            <p class="card__desc" style="margin:0 0 12px">
+              适用于离线环境或自建包。选择 zip 后会先算哈希再安装；
+              哈希与签名任一不通过都会被拒绝，不会解压任何内容。
+            </p>
+            <div class="toolbar">
+              <input id="local-zip" type="file" accept=".zip" class="input" />
+              <input id="local-id" class="input" placeholder="模块 id（如 dounai-input）" />
+              <select id="local-category" class="select">
+                <option value="optional">optional</option>
+                <option value="core">core</option>
+                <option value="experimental">experimental</option>
+              </select>
+              <button id="btn-local-install" class="btn btn--primary">校验并安装</button>
+            </div>
+            <pre id="local-log" class="log" hidden></pre>
+          </div>
+        </section>
+
+        <!-- 环境管理 -->
+        <section id="panel-env" class="panel" hidden>
+          <div id="env-body" class="env"></div>
+        </section>
+      </main>
+    </div>
+    <script type="module" src="./src/ui/main.ts"></script>
+  </body>
+</html>

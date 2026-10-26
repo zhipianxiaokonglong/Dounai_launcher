@@ -1,0 +1,10 @@
+{
+  "bundle_id": "offline",
+  "name": "本地离线版",
+  "description": "全部模块 + 本地 LLM/TTS/embedding 模型权重。须用户显式选择，不默认提供。",
+  "modules": ["dounai-input", "omninexus", "dounai-ui", "dounai-memory-reserved", "moodvoice"],
+  "model_packs": ["faster-whisper-small", "ollama-llama3.2"],
+  "recommended_only": [],
+  "optional_modules": [],
+  "requires_explicit_consent": true
+}

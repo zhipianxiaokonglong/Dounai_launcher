@@ -1,0 +1,47 @@
+{
+  "module_id": "dounai-input",
+  "name": "输入接入层 · Dounai Input",
+  "version": "0.1.0",
+  "category": "core",
+  "entry": {
+    "type": "command",
+    "command": "dounai-input serve",
+    "working_dir": "input",
+    "env": {
+      "DOUNAI_PORT": "8101",
+      "DOUNAI_DATA_DIR": "{data_dir}/input"
+    },
+    "health": { "url": "http://127.0.0.1:8101/healthz", "timeout_ms": 3000 }
+  },
+  "compat": { "app_version": ">=0.1.0" },
+  "dependencies": [
+    { "name": "Python", "version": ">=3.11,<3.13", "type": "runtime" },
+    { "name": "fastapi", "version": ">=0.115", "type": "library" },
+    { "name": "uvicorn", "version": ">=0.32", "type": "library" },
+    { "name": "pydantic", "version": ">=2.9", "type": "library" }
+  ],
+  "model_packs": [
+    {
+      "id": "faster-whisper-small",
+      "name": "faster-whisper small（本地语音转写）",
+      "size_mb": 466,
+      "hardware_req": { "gpu": "optional", "ram_mb": 2048, "disk_mb": 600 },
+      "privacy": "offline",
+      "recommended": true
+    },
+    {
+      "id": "faster-whisper-tiny",
+      "name": "faster-whisper tiny（轻量转写）",
+      "size_mb": 75,
+      "hardware_req": { "gpu": "none", "ram_mb": 1024, "disk_mb": 150 },
+      "privacy": "offline",
+      "recommended": true
+    }
+  ],
+  "permissions": {
+    "network": [],
+    "filesystem": ["{data_dir}/input", "{repo}/input"],
+    "devices": ["microphone", "camera"]
+  },
+  "signature": { "algo": "SHA-256 + Ed25519", "value": "" }
+}

@@ -1,0 +1,34 @@
+{
+  "module_id": "dounai-memory-reserved",
+  "name": "本地记忆扩展插件（Reserved · 默认禁用）",
+  "version": "0.1.0",
+  "category": "reserved",
+  "entry": {
+    "type": "plugin",
+    "command": "python -m dounai_memory_reserved",
+    "working_dir": "reserved/memory",
+    "env": {
+      "DOUNAI_MEMORY_ENABLED": "0",
+      "DOUNAI_MEMORY_PORT": "8104"
+    },
+    "health": { "url": "http://127.0.0.1:8104/health", "timeout_ms": 2000 }
+  },
+  "compat": { "app_version": ">=0.1.0" },
+  "dependencies": [
+    { "name": "Python", "version": ">=3.11", "type": "runtime" },
+    { "name": "fastapi", "version": ">=0.115", "type": "library" }
+  ],
+  "model_packs": [],
+  "permissions": {
+    "network": [],
+    "filesystem": ["{data_dir}/memory"],
+    "devices": []
+  },
+  "reserved": {
+    "default_enabled": false,
+    "removable": false,
+    "contract_version": "1.0",
+    "note": "契约冻结；禁止实现真实记忆管线；验收走 mock。"
+  },
+  "signature": { "algo": "SHA-256 + Ed25519", "value": "" }
+}

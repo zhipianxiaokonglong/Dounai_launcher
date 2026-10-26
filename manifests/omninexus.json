@@ -1,0 +1,40 @@
+{
+  "module_id": "omninexus",
+  "name": "LLM 编排核心 · OmniNexus",
+  "version": "0.1.0",
+  "category": "core",
+  "entry": {
+    "type": "command",
+    "command": "python -m omninexus",
+    "working_dir": "OmniNexus",
+    "env": {
+      "OMNI_PORT": "8102",
+      "OMNI_DATA_DIR": "{data_dir}/omninexus"
+    },
+    "health": { "url": "http://127.0.0.1:8102/v1/healthz", "timeout_ms": 3000 }
+  },
+  "compat": { "app_version": ">=0.1.0" },
+  "dependencies": [
+    { "name": "Python", "version": ">=3.11", "type": "runtime" },
+    { "name": "fastapi", "version": ">=0.115", "type": "library" },
+    { "name": "uvicorn", "version": ">=0.32", "type": "library" },
+    { "name": "jinja2", "version": ">=3.1", "type": "library" },
+    { "name": "pyyaml", "version": ">=6.0", "type": "library" }
+  ],
+  "model_packs": [
+    {
+      "id": "ollama-llama3.2",
+      "name": "Llama 3.2（Ollama 本地模型）",
+      "size_mb": 2013,
+      "hardware_req": { "gpu": "optional", "ram_mb": 8192, "disk_mb": 2500 },
+      "privacy": "offline",
+      "recommended": false
+    }
+  ],
+  "permissions": {
+    "network": [],
+    "filesystem": ["{data_dir}/omninexus", "{repo}/OmniNexus"],
+    "devices": []
+  },
+  "signature": { "algo": "SHA-256 + Ed25519", "value": "" }
+}

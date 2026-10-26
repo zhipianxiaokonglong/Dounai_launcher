@@ -1,0 +1,23 @@
+{
+  "name": "dounai-launcher",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Dounai 启动器：安装、环境与模块管理",
+  "license": "GPL-3.0-or-later",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10",
+    "vitest": "^2.1.4"
+  },
+  "dependencies": {
+    "@tauri-apps/cli": "^2.12.4"
+  }
+}

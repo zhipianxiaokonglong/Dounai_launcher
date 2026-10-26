@@ -1,0 +1,36 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Dounai Launcher",
+  "version": "0.1.0",
+  "identifier": "com.dounai.launcher",
+  "build": {
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Dounai 启动器",
+        "width": 980,
+        "height": 720,
+        "minWidth": 760,
+        "minHeight": 560,
+        "visible": false,
+        "center": true,
+        "resizable": true
+      }
+    ],
+    "withGlobalTauri": true,
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/icon.png"],
+    "shortDescription": "Dounai 启动器",
+    "longDescription": "Dounai 的安装、环境与模块管理中心。",
+    "copyright": "GPL-3.0-or-later"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "bundle_id": "minimal",
+  "name": "最小可用（默认）",
+  "description": "只装跑起来必需的东西：启动器 + 输入/模型/UI 核心 + 运行依赖。不含任何模型权重。",
+  "modules": ["dounai-input", "omninexus", "dounai-ui", "dounai-memory-reserved"],
+  "model_packs": [],
+  "recommended_only": [],
+  "optional_modules": ["moodvoice"]
+}
