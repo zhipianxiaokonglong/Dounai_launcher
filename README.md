@@ -176,6 +176,7 @@ cd reserved/memory && pytest    # Reserved 插件：24 项
 | 文档 | 内容 |
 |---|---|
 | [用户文档](docs/USER_GUIDE.md) | 安装、套装、界面、常见问题 |
+| [**模块运行（启动/停止）设计**](docs/RUNNING.md) | **v0.2.0 设计稿：启动/停止命令、健康检查、一键启动、验收标准** |
 | [出网白名单](docs/ALLOWLIST.md) | 允许访问的域名与自查方法 |
 | [安全策略](SECURITY.md) | 漏洞披露、SLA、已实现防线、已知限制 |
 | [验收总表](docs/ACCEPTANCE.md) | 逐项结论与证据 |
