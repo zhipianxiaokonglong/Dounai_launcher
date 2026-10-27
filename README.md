@@ -43,6 +43,7 @@ Dounai 由多个独立模块组成（输入接入、LLM 编排、语音输出、
 
 | 功能 | 说明 |
 |---|---|
+| **启动/停止** | **拉起、停止单个模块；一键启动整套；健康检查；进程退出自动回落** |
 | 依赖安装 | 多源下载、失败重试、断点续传、哈希校验、失败自动回滚 |
 | 环境管理 | 检测 Python / Node / uv / 显卡 / 磁盘，给出体检结论与处理建议 |
 | 模块管理 | 卡片式界面，查看依赖与权限，支持启用/停用/卸载 |
@@ -143,6 +144,7 @@ src-tauri/src/
   download.rs        下载（续传/镜像/校验）
   signature.rs       manifest 验签
   trust.rs           信任策略（按构建类型）
+  runtime.rs         模块启停：进程表、健康检查、退出监听
   state.rs           模块状态管理
   catalog.rs         联网清单与白名单
   env_probe.rs       环境探测
@@ -159,8 +161,8 @@ docs/                用户文档、验收、交接、测试说明
 ## 测试
 
 ```powershell
-cd src-tauri && cargo test      # Rust：151 项
-npm test                        # 前端：52 项
+cd src-tauri && cargo test      # Rust：177 项
+npm test                        # 前端：57 项
 cd reserved/memory && pytest    # Reserved 插件：24 项
 ```
 

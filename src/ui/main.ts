@@ -21,6 +21,10 @@ import {
   installModule,
   refreshCatalog,
   purgeLocalData,
+  startModule,
+  stopModule,
+  startAll,
+  stopAll,
   trustInfo,
   BridgeUnavailableError,
   type ModuleView,
@@ -260,6 +264,7 @@ function renderModules(): void {
         <div style="display:flex;flex-direction:column;gap:4px;align-items:flex-end">
           ${categoryBadge(m)}
           ${stateBadge(m)}
+          ${runBadge(m)}
         </div>
       </div>
       <div class="card__desc">${escapeHtml(describeEntry(m))}</div>
@@ -290,6 +295,9 @@ function renderModules(): void {
       if (act === "detail") showModuleDetail(id);
       if (act === "toggle") void handleToggle(id);
       if (act === "uninstall") void handleUninstall(id);
+      if (act === "start") void handleStartStop(id, "start");
+      if (act === "stop") void handleStartStop(id, "stop");
+      if (act === "restart") void handleStartStop(id, "restart");
     });
   });
 }
@@ -302,24 +310,135 @@ function renderModules(): void {
  * 但**以后端为准**（前端禁用只是体验优化）。
  */
 function renderActionButtons(m: ModuleManifest, installed: boolean): string {
-  const locked = m.category === "core" || m.category === "reserved";
-  const lockLabel = m.category === "reserved" ? "不可卸载（Reserved）" : "不可卸载（核心）";
-
-  if (locked) {
-    return `<button class="btn" disabled>${lockLabel}</button>`;
-  }
+  // 启动/停止与「能否卸载」是两件不同的事，不能混在一个按钮里：
+  // v0.1.0 对 core/reserved 直接返回「不可卸载」，
+  // 于是核心模块连启动入口都没有——这正是"启动器不能启动"的根因。
   if (!installed) {
-    return `<button class="btn" disabled>未安装</button>`;
+    return '<button class="btn" disabled>未安装</button>';
   }
 
   const st = moduleStateOf(m.module_id);
+  const running = st?.run === "running" || st?.run === "starting";
+  const failed = st?.run === "failed";
   const enabled = st?.enabled ?? true;
-  return `
-    <button class="btn" data-act="toggle" data-id="${m.module_id}">
-      ${enabled ? "停用" : "启用"}
-    </button>
-    <button class="btn" data-act="uninstall" data-id="${m.module_id}">卸载</button>
-  `;
+
+  const parts: string[] = [];
+
+  if (running) {
+    parts.push(`<button class="btn" data-act="stop" data-id="${m.module_id}">停止</button>`);
+  } else if (failed) {
+    parts.push(`<button class="btn" data-act="restart" data-id="${m.module_id}">重试</button>`);
+  } else if (!enabled) {
+    parts.push('<button class="btn" disabled title="已停用，先启用">启动</button>');
+  } else {
+    parts.push(
+      `<button class="btn btn--primary" data-act="start" data-id="${m.module_id}">启动</button>`,
+    );
+  }
+
+  // 卸载权限来自分类，与运行状态无关
+  const locked = m.category === "core" || m.category === "reserved";
+  if (locked) {
+    const label = m.category === "reserved" ? "不可卸载（Reserved）" : "不可卸载（核心）";
+    parts.push(`<button class="btn" disabled>${label}</button>`);
+  } else {
+    parts.push(
+      `<button class="btn" data-act="toggle" data-id="${m.module_id}">${enabled ? "停用" : "启用"}</button>`,
+      `<button class="btn" data-act="uninstall" data-id="${m.module_id}">卸载</button>`,
+    );
+  }
+
+  return parts.join("\n");
+}
+
+/** 运行状态徽标（与「已安装」徽标分开：能不能装 ≠ 在不在跑）。 */
+function runBadge(m: ModuleManifest): string {
+  const st = moduleStateOf(m.module_id);
+  if (!st || st.install !== "installed") return "";
+  switch (st.run) {
+    case "running":
+      return '<span class="badge badge--ok" title="进程运行中">● 运行中</span>';
+    case "starting":
+      return '<span class="badge badge--warn">◐ 启动中</span>';
+    case "failed":
+      return `<span class="badge badge--missing" title="${escapeHtml(st.last_error ?? "启动失败")}">● 启动失败</span>`;
+    default:
+      return '<span class="badge">○ 已停止</span>';
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* 启停操作                                                            */
+/* ------------------------------------------------------------------ */
+
+/** 启动 / 停止 / 重试，失败原因直接显示在日志区。 */
+async function handleStartStop(
+  moduleId: string,
+  action: "start" | "stop" | "restart",
+): Promise<void> {
+  const m = state.modules.get(moduleId);
+  if (!m) return;
+
+  try {
+    if (action === "stop") {
+      await stopModule(moduleId);
+    } else {
+      if (action === "restart") {
+        await stopModule(moduleId).catch(() => undefined);
+      }
+      await startModule(moduleId);
+    }
+  } catch (error) {
+    // 启动失败必须说清原因：未安装 / 已停用 / 健康检查失败 / 工作目录越界
+    el.planLog.hidden = false;
+    el.planLog.textContent = `启动「${m.name}」失败：${describeError(error)}`;
+  }
+
+  await loadModuleStates();
+  renderModules();
+}
+
+/** 一键启动整套：逐模块报告，失败不阻塞其余。 */
+async function handleStartAll(): Promise<void> {
+  if (!isDesktop()) {
+    maintLog("需要桌面端才能启动模块。");
+    return;
+  }
+  maintLog("正在按顺序启动…");
+  try {
+    const results = await startAll();
+    const lines = ["启动结果："];
+    for (const r of results) {
+      const mark = r.run === "running" ? "✓" : "✗";
+      const extra = r.last_error ? ` — ${r.last_error}` : "";
+      lines.push(`  ${mark} ${r.module_id}: ${r.run}${extra}`);
+    }
+    const ok = results.filter((r) => r.run === "running").length;
+    lines.push("", `成功 ${ok} / 共 ${results.length}`);
+    maintLog(lines.join("\n"));
+    await loadModuleStates();
+    renderModules();
+  } catch (error) {
+    maintLog(`一键启动失败：${describeError(error)}`);
+  }
+}
+
+/** 全部停止。 */
+async function handleStopAll(): Promise<void> {
+  if (!isDesktop()) {
+    maintLog("需要桌面端才能停止模块。");
+    return;
+  }
+  try {
+    const results = await stopAll();
+    const lines = [`已停止 ${results.length} 个模块：`];
+    for (const r of results) lines.push(`  · ${r.module_id} → ${r.run}`);
+    maintLog(lines.join("\n"));
+    await loadModuleStates();
+    renderModules();
+  } catch (error) {
+    maintLog(`全部停止失败：${describeError(error)}`);
+  }
 }
 
 /** 启用/停用模块（调用真实命令）。 */
@@ -624,6 +743,14 @@ function renderEnv(): void {
         </span>
       </div>
       <div class="env__row">
+        <span class="env__name">一键启动 Dounai</span>
+        <span class="env__detail">按顺序拉起输入层 → 模型层 → 语音层 → 悬浮窗；单个失败不影响其余</span>
+        <span class="env__state">
+          <button class="btn btn--primary" id="btn-start-all">启动</button>
+          <button class="btn" id="btn-stop-all">全部停止</button>
+        </span>
+      </div>
+      <div class="env__row">
         <span class="env__name">刷新模块清单</span>
         <span class="env__detail">从白名单内的源拉取最新模块列表</span>
         <span class="env__state">
@@ -634,6 +761,8 @@ function renderEnv(): void {
     `,
   );
 
+  document.getElementById("btn-start-all")?.addEventListener("click", () => void handleStartAll());
+  document.getElementById("btn-stop-all")?.addEventListener("click", () => void handleStopAll());
   document.getElementById("btn-purge")?.addEventListener("click", () => void handlePurge());
   document.getElementById("btn-catalog")?.addEventListener("click", () => void handleCatalog());
 }

@@ -22,6 +22,19 @@ export interface ModuleView {
   path: string;
   run: ModuleRunState;
   last_error: string | null;
+  /** 运行中时的进程号 */
+  pid: number | null;
+  /** 最近一次健康检查是否通过 */
+  healthy: boolean;
+}
+
+/** 启停命令返回的运行快照。 */
+export interface RunView {
+  module_id: string;
+  run: ModuleRunState;
+  pid: number | null;
+  last_error: string | null;
+  healthy: boolean;
 }
 
 export interface CatalogEntry {
@@ -106,6 +119,28 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
   const invoke = getInvoke();
   if (!invoke) throw new BridgeUnavailableError();
   return (await invoke(cmd, args)) as T;
+}
+
+/* ------------------------------------------------------------------ */
+/* 模块运行（启动 / 停止）                                             */
+/* ------------------------------------------------------------------ */
+
+export async function startModule(moduleId: string): Promise<RunView> {
+  return call<RunView>("start_module", { moduleId });
+}
+
+export async function stopModule(moduleId: string): Promise<RunView> {
+  return call<RunView>("stop_module", { moduleId });
+}
+
+/** 一键启动：按依赖顺序拉起所有已启用模块。 */
+export async function startAll(): Promise<RunView[]> {
+  return call<RunView[]>("start_all");
+}
+
+/** 全部停止。 */
+export async function stopAll(): Promise<RunView[]> {
+  return call<RunView[]>("stop_all");
 }
 
 /* ------------------------------------------------------------------ */

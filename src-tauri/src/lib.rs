@@ -13,6 +13,7 @@ pub mod download;
 pub mod env_probe;
 pub mod http_client;
 pub mod install;
+pub mod runtime;
 pub mod security;
 pub mod signature;
 pub mod state;
@@ -24,6 +25,10 @@ pub use catalog::{
 };
 pub use download::{download, DownloadError, DownloadOptions, DownloadReport, HttpFetcher};
 pub use install::{extract_zip_into, InstallError, InstallReport, InstallTransaction};
+pub use runtime::{
+    check_working_dir, resolve_placeholders, split_command, EntrySpec, ProcessManager, RunView,
+    StartError,
+};
 pub use security::{is_safe_filename, safe_join, sha256_hex, verify_sha256, PathError};
 pub use signature::{canonical_payload, verify_manifest, SignatureError, SUPPORTED_ALGO};
 pub use state::{Category, InstallState, ModuleState, RunState, StateError, StateStore};

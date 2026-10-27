@@ -14,6 +14,7 @@ use tauri::State;
 
 use crate::catalog::{fetch_catalog, Allowlist, CatalogEntry, CatalogResult};
 use crate::install::{extract_zip_into, InstallTransaction};
+use crate::runtime::ProcessManager;
 use crate::state::{Category, InstallState, ModuleState, RunState, StateStore};
 use crate::trust::{TrustPolicy, TrustVerdict};
 use crate::{sha256_hex, verify_sha256};
@@ -28,6 +29,8 @@ pub struct AppState {
     allowlist: Allowlist,
     /// manifest 信任策略（决定未签名模块能否安装）
     trust: TrustPolicy,
+    /// 进程表：管理由启动器拉起的子进程（内存态，不持久化）
+    processes: ProcessManager,
 }
 
 impl AppState {
@@ -52,11 +55,130 @@ impl AppState {
             store: Mutex::new(store),
             allowlist,
             trust,
+            processes: ProcessManager::default(),
         })
     }
 
     pub fn trust_policy(&self) -> &TrustPolicy {
         &self.trust
+    }
+
+    /// 进程表引用。
+    pub fn processes(&self) -> &ProcessManager {
+        &self.processes
+    }
+
+    /// 模块安装根（`{data_root}/modules/{module_id}`）。
+    pub fn module_root(&self, module_id: &str) -> Result<PathBuf, String> {
+        self.module_dir(module_id)
+    }
+
+    pub fn data_root(&self) -> &Path {
+        &self.data_root
+    }
+
+    /// 读取已安装模块的 manifest 并组装成可执行的入口规格。
+    ///
+    /// 这是「只执行 manifest 声明的入口」的落点：命令与工作目录
+    /// 全部来自安装时已验签的文件，不接受前端传入。
+    fn entry_spec(&self, module_id: &str) -> Result<crate::runtime::EntrySpec, String> {
+        let root = self.module_root(module_id)?;
+
+        // manifest 随包安装时落在模块根下；找不到就说明这个包没带 manifest
+        let manifest_path = ["manifest.json", "dounai-manifest.json"]
+            .iter()
+            .map(|n| root.join(n))
+            .find(|p| p.exists())
+            .ok_or_else(|| format!("模块 {module_id} 缺少 manifest.json，无法解析启动入口"))?;
+
+        let text = std::fs::read_to_string(&manifest_path)
+            .map_err(|e| format!("读取 manifest 失败：{e}"))?;
+        let m: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| format!("manifest 不是合法 JSON：{e}"))?;
+
+        let entry = m
+            .get("entry")
+            .ok_or_else(|| "manifest 缺少 entry 段".to_string())?;
+        let entry_type = entry
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("command");
+        let command = entry.get("command").and_then(|v| v.as_str()).unwrap_or("");
+        let working_raw = entry
+            .get("working_dir")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let data_dir = self.data_root.join("data").join(module_id);
+        let app_local = self.data_root.clone();
+
+        let command = crate::runtime::resolve_placeholders(command, &root, &data_dir, &app_local);
+        let working =
+            crate::runtime::resolve_placeholders(working_raw, &root, &data_dir, &app_local);
+        let working_dir = crate::runtime::check_working_dir(&root, &working)
+            .map_err(|e| e.to_string())?
+            .to_string_lossy()
+            .to_string();
+
+        // 环境变量同样替换占位符
+        let mut env = Vec::new();
+        if let Some(obj) = entry.get("env").and_then(|v| v.as_object()) {
+            for (k, v) in obj {
+                if let Some(s) = v.as_str() {
+                    env.push((
+                        k.clone(),
+                        crate::runtime::resolve_placeholders(s, &root, &data_dir, &app_local),
+                    ));
+                }
+            }
+        }
+
+        let health = entry.get("health");
+        let health_url = health
+            .and_then(|h| h.get("url"))
+            .and_then(|v| v.as_str())
+            .map(|s| crate::runtime::resolve_placeholders(s, &root, &data_dir, &app_local));
+        let health_timeout_ms = health
+            .and_then(|h| h.get("timeout_ms"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(3000);
+
+        Ok(crate::runtime::EntrySpec {
+            module_id: module_id.to_string(),
+            entry_type: entry_type.to_string(),
+            command,
+            working_dir,
+            env,
+            health_url,
+            health_timeout_ms,
+        })
+    }
+
+    /// 启动前的状态校验（未安装/已停用/入口不可执行）。
+    fn precheck_start(&self, module_id: &str) -> Result<crate::runtime::EntrySpec, String> {
+        let category = {
+            let store = self.store.lock().map_err(|_| "状态锁不可用")?;
+            let st = store
+                .get(module_id)
+                .ok_or_else(|| format!("模块 {module_id} 未安装，无法启动"))?;
+            if st.install != InstallState::Installed {
+                return Err(format!("模块 {module_id} 未安装完成，无法启动"));
+            }
+            if !st.enabled {
+                return Err(format!("模块 {module_id} 已停用，请先启用再启动"));
+            }
+            st.path.is_empty()
+        };
+        let _ = category;
+
+        let spec = self.entry_spec(module_id)?;
+        if spec.entry_type != "command" {
+            return Err(format!(
+                "模块 {module_id} 的入口类型是 {}，不支持作为进程启动",
+                spec.entry_type
+            ));
+        }
+        Ok(spec)
     }
 
     /// 把模块 id 解析为安装目录，并确保结果仍在 data_root 内。
@@ -89,6 +211,120 @@ impl AppState {
     pub fn store_for_test(&self) -> &Mutex<StateStore> {
         &self.store
     }
+
+    /// 供测试使用：直接改状态库并落盘（模拟用户在 UI 上操作后的状态）。
+    ///
+    /// 注意：`AppState` 构造时把状态文件读进内存，之后再改磁盘文件是**看不到**的，
+    /// 因此测试必须走这个入口，否则会出现"文件改了但行为没变"的假象。
+    pub fn set_state_for_test(
+        &self,
+        module_id: &str,
+        version: &str,
+        category: Category,
+        enabled: Option<bool>,
+    ) -> Result<(), String> {
+        let mut store = self.store.lock().map_err(|_| "状态锁不可用")?;
+        store
+            .mark_installed(module_id, version, "x", category)
+            .map_err(|e| e.to_string())?;
+        if let Some(v) = enabled {
+            store
+                .set_enabled(module_id, v, category)
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* 模块运行（启动 / 停止）                                             */
+/* ------------------------------------------------------------------ */
+
+#[tauri::command]
+pub fn start_module(
+    state: State<AppState>,
+    module_id: String,
+) -> Result<crate::runtime::RunView, String> {
+    start_module_inner(&state, &module_id)
+}
+
+/// 启动单个模块（与 Tauri 解耦，便于测试）。
+pub fn start_module_inner(
+    state: &AppState,
+    module_id: &str,
+) -> Result<crate::runtime::RunView, String> {
+    // 已在跑：幂等返回，不重复拉起
+    if state.processes().is_active(module_id) {
+        return Ok(state.processes().view(module_id));
+    }
+    let spec = state.precheck_start(module_id)?;
+    state.processes().start(&spec).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn stop_module(state: State<AppState>, module_id: String) -> crate::runtime::RunView {
+    state.processes().stop(&module_id)
+}
+
+/// 一键启动：按固定依赖顺序逐个拉起，任一失败不阻塞其余。
+///
+/// 顺序来自实际启动约束（上游先起，悬浮窗最后）。只启动
+/// `installed` 且 `enabled` 的模块；`reserved` 永远不参与。
+pub fn start_order(state: &AppState) -> Vec<String> {
+    // 固定顺序：输入层 → 模型层 → 语音层 → 总装
+    const ORDER: &[&str] = &["dounai-input", "omninexus", "moodvoice", "dounai-ui"];
+
+    let installed: Vec<String> = match state.store.lock() {
+        Ok(store) => store
+            .all()
+            .iter()
+            .filter(|(_, st)| st.install == InstallState::Installed && st.enabled)
+            .map(|(id, _)| id.clone())
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+
+    // 先按固定顺序，再把不在清单里的已安装模块追加到末尾（保持确定性）
+    let mut ordered: Vec<String> = ORDER
+        .iter()
+        .filter(|id| installed.contains(&id.to_string()))
+        .map(|id| id.to_string())
+        .collect();
+    let mut rest: Vec<String> = installed
+        .into_iter()
+        .filter(|id| !ORDER.contains(&id.as_str()))
+        .collect();
+    rest.sort();
+    ordered.append(&mut rest);
+    ordered
+}
+
+#[tauri::command]
+pub fn start_all(state: State<AppState>) -> Vec<crate::runtime::RunView> {
+    start_all_inner(&state)
+}
+
+pub fn start_all_inner(state: &AppState) -> Vec<crate::runtime::RunView> {
+    let mut out = Vec::new();
+    for id in start_order(state) {
+        // 单个失败不阻断其余：与降级哲学一致
+        match start_module_inner(state, &id) {
+            Ok(v) => out.push(v),
+            Err(e) => out.push(crate::runtime::RunView {
+                module_id: id,
+                run: "failed".into(),
+                pid: None,
+                last_error: Some(e),
+                healthy: false,
+            }),
+        }
+    }
+    out
+}
+
+#[tauri::command]
+pub fn stop_all(state: State<AppState>) -> Vec<crate::runtime::RunView> {
+    state.processes().stop_all()
 }
 
 /* ------------------------------------------------------------------ */
@@ -104,24 +340,48 @@ pub struct ModuleView {
     pub path: String,
     pub run: RunState,
     pub last_error: Option<String>,
+    /// 运行中时的进程号（未运行为 null）
+    pub pid: Option<u32>,
+    /// 最近一次健康检查是否通过
+    pub healthy: bool,
 }
 
-fn to_view(id: &str, st: &ModuleState) -> ModuleView {
+fn to_view(id: &str, st: &ModuleState, pm: &ProcessManager) -> ModuleView {
+    // 运行态以进程表为准，而不是状态文件里的内存字段：
+    // 后者在启动器重启后一律是 Stopped，但进程可能还活着，
+    // 因此统一从进程表取真实快照并回收已退出进程。
+    let rv = pm.view(id);
     ModuleView {
         module_id: id.to_string(),
         install: st.install,
         enabled: st.enabled,
         version: st.version.clone(),
         path: st.path.clone(),
-        run: st.run,
-        last_error: st.last_error.clone(),
+        run: parse_run(&rv.run),
+        last_error: rv.last_error.or_else(|| st.last_error.clone()),
+        pid: rv.pid,
+        healthy: rv.healthy,
+    }
+}
+
+fn parse_run(s: &str) -> RunState {
+    match s {
+        "starting" => RunState::Starting,
+        "running" => RunState::Running,
+        "failed" => RunState::Failed,
+        _ => RunState::Stopped,
     }
 }
 
 #[tauri::command]
 pub fn list_module_states(state: State<AppState>) -> Result<Vec<ModuleView>, String> {
     let store = state.store.lock().map_err(|_| "状态锁不可用")?;
-    Ok(store.all().iter().map(|(id, st)| to_view(id, st)).collect())
+    let pm = state.processes();
+    Ok(store
+        .all()
+        .iter()
+        .map(|(id, st)| to_view(id, st, pm))
+        .collect())
 }
 
 #[derive(Debug, Deserialize)]
@@ -157,6 +417,17 @@ pub struct UninstallRequest {
 pub fn uninstall_module(state: State<AppState>, request: UninstallRequest) -> Result<(), String> {
     let category = Category::parse(&request.category)
         .ok_or_else(|| format!("未知分类：{}", request.category))?;
+
+    // 卸载前必须先停止：进程还开着就删目录，Windows 上会因文件占用失败，
+    // 而且会留下"目录已删、进程还在跑"的错乱状态。
+    if state.processes().is_active(&request.module_id) {
+        return Err(format!(
+            "模块 {} 正在运行，请先停止再卸载",
+            request.module_id
+        ));
+    }
+    // 已退出但仍在进程表里留了失败记录的，也一并清掉
+    state.processes().stop(&request.module_id);
 
     let dir = state.module_dir(&request.module_id)?;
     let mut store = state.store.lock().map_err(|_| "状态锁不可用")?;
