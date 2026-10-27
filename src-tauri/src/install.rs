@@ -27,6 +27,8 @@ pub enum InstallError {
     HashMismatch { expected: String, actual: String },
     #[error("回滚失败，需要人工处理：{0}")]
     RollbackFailed(String),
+    #[error("压缩包含符号链接条目，已拒绝安装：{0}")]
+    UnsafeSymlink(String),
 }
 
 /// 安装结果摘要。
@@ -200,6 +202,17 @@ fn now_millis() -> u128 {
         .unwrap_or(0)
 }
 
+/// 判断条目是否是符号链接。
+///
+/// `unix_mode()` 只在 Unix 打包的包里才有值，`None` 视为普通文件。
+/// 文件类型位于 mode 的高 4 位，符号链接为 `0o120000`。
+pub fn is_symlink_entry(mode: Option<u32>) -> bool {
+    match mode {
+        Some(m) => m & 0o170000 == 0o120000,
+        None => false,
+    }
+}
+
 /// 从压缩包字节解压到事务的临时目录（防路径穿越）。
 ///
 /// 任一危险条目都会让**整个安装失败**，不做部分解压。
@@ -247,6 +260,19 @@ pub fn extract_zip_into(
             .name()
             .map_err(|e| InstallError::Zip(e.to_string()))?
             .into_owned();
+
+        // 符号链接一律拒绝。
+        //
+        // 为什么必须显式拒绝，而不是"反正落盘是普通文件所以无所谓"：
+        // 当前用 fs::write 写文件，symlink 条目会退化成"内容为链接目标"的
+        // 普通文件——结果确实安全，但那是**依赖实现的巧合**，不是设计保证。
+        // 一旦将来为保留可执行位而改用按 mode 落盘，这些条目就会真的创建
+        // 符号链接，配合 `..` 或绝对目标即可让后续写入逃出安装目录。
+        // 主动拒绝能让这类包在解压阶段就失败，而不是留下语义错误的文件。
+        if is_symlink_entry(file.unix_mode()) {
+            return Err(InstallError::UnsafeSymlink(name));
+        }
+
         let mut buf = Vec::with_capacity(file.size() as usize);
         io::copy(&mut file, &mut buf)?;
         tx.place_file(&name, &buf)?;
@@ -411,6 +437,47 @@ mod tests {
         tx.rollback().unwrap();
         // 第二次调用不应报错
         tx.rollback().unwrap();
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn is_symlink_entry_detects_mode() {
+        // 符号链接：文件类型位 0o120000
+        assert!(is_symlink_entry(Some(0o120777)));
+        assert!(is_symlink_entry(Some(0o120000)));
+        // 普通文件与可执行文件不是符号链接
+        assert!(!is_symlink_entry(Some(0o100644)));
+        assert!(!is_symlink_entry(Some(0o100755)));
+        // 目录不是符号链接
+        assert!(!is_symlink_entry(Some(0o040755)));
+        // 无 mode（Windows 打包）视为普通文件
+        assert!(!is_symlink_entry(None));
+    }
+
+    #[test]
+    fn rejects_symlink_entry() {
+        let root = tmp_root("symlink");
+        let dest = root.join("mod");
+
+        // 构造含真实符号链接条目的包（混合一个正常条目，验证整体拒绝）
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(io::Cursor::new(&mut buf));
+            let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default();
+            w.start_file("good.txt", opts).unwrap();
+            w.write_all(b"ok").unwrap();
+            w.add_symlink("evil-link", "/etc/passwd", opts).unwrap();
+            w.finish().unwrap();
+        }
+
+        let tx = InstallTransaction::begin(&dest).unwrap();
+        let err = extract_zip_into(&tx, &buf, None).unwrap_err();
+        assert!(
+            matches!(err, InstallError::UnsafeSymlink(_)),
+            "符号链接应被拒绝，实际 {err:?}"
+        );
+        drop(tx);
+        assert!(!dest.exists(), "被拒绝时不应产生任何安装结果");
         fs::remove_dir_all(&root).ok();
     }
 }
