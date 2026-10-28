@@ -119,6 +119,28 @@ v0.1.0 只有「装、配、修、卸」，「跑」完全没有——启动器�
 
 ---
 
+### 1.7 启动器 · 本地模块（手动添加）
+
+用户反馈：用 `git clone` 拉到本地的模块，启动器完全看不见——卡片只来自内置清单。
+本版增加手动登记能力。
+
+| # | 验收项 | 条目 | 结论 | 证据 |
+|---|---|---|---|---|
+| LM1 | 扫描目录能列出含 manifest 的模块，忽略模型权重目录 | 扫描 | 通过 | `scan_finds_manifest_dirs_one_level_deep`（2 个模块 + 1 个权重目录，权重被忽略） |
+| LM2 | 登记后模块标记为「本地目录」且可启动 | 添加 | 通过 | `add_registers_linked_module_and_marks_it_installed`、`linked_module_can_start_using_registered_path` |
+| LM3 | **卸载/解除登记都不删除用户文件** | 安全 | 通过 | 3 项测试：`uninstall_linked_module_keeps_user_files`、`remove_local_module_unregisters_without_deleting`、`purge_does_not_touch_linked_module_directory` |
+| LM4 | 无 manifest 时提示"这是模型权重不是模块" | 易用 | 通过 | `add_rejects_directory_without_manifest`（断言提示含"模型权重"） |
+| LM5 | 签名仍按信任策略校验，发布版拒绝未签名 | 安全 | 通过 | `add_rejects_unsigned_under_strict_policy` |
+| LM6 | 已被受管安装的同名模块不可被本地目录顶替 | 安全 | 通过 | `add_rejects_managed_module_takeover` |
+| LM7 | 链接模块的 `working_dir` 仍限制在该模块根内 | 安全 | 通过 | `linked_module_working_dir_still_confined` |
+| LM8 | UI 提供扫描/添加入口，链接模块显示「解除登记」 | UI | 通过 | 桩渲染验证：扫描出 2 个候选、徽标显示「本地目录」、按钮为「解除登记」 |
+
+**安全取舍（如实说明）**：本地模块执行的是用户指定目录里的代码，
+不在启动器数据根内。补偿措施：必须有合法 manifest、签名按策略校验、
+`working_dir` 限制在该根内、卸载绝不删文件。
+
+---
+
 ## 2. 接口契约一致性（冻结基线）
 
 | # | 契约 | 结论 | 证据 |
@@ -212,14 +234,14 @@ v0.1.0 只有「装、配、修、卸」，「跑」完全没有——启动器�
 
 | 类别 | 总项 | 通过 | 转人工 | 待复核 |
 |---|---|---|---|---|
-| 功能清单（含模块运行 RUN1–RUN13） | 39 | 29 | 2 | 8 |
+| 功能清单（含 RUN1–RUN13 与 LM1–LM8） | 47 | 37 | 2 | 8 |
 | 接口契约 | 6 | 6 | 0 | 0 |
 | 隐私红线 | 6 | 3 | 3 | 0 |
 | 安全门槛 | 8 | 8 | 0 | 0 |
 | 独立运行 | 6 | 3 | 0 | 3 |
 | 仓库干净 | 6 | 6 | 0 | 0 |
 | 文档完整 | 7 | 7 | 0 | 0 |
-| **合计** | **78** | **62** | **5** | **11** |
+| **合计** | **86** | **70** | **5** | **11** |
 
 > 校验方式：对本文件逐行匹配结论标注后计数，62 + 5 + 11 = 78。
 > 若修改任何一行结论，必须同步本表，否则视为文档缺陷。

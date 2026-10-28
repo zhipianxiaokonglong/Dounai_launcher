@@ -21,6 +21,9 @@ import {
   installModule,
   refreshCatalog,
   purgeLocalData,
+  scanLocalModules,
+  addLocalModule,
+  removeLocalModule,
   startModule,
   stopModule,
   startAll,
@@ -265,6 +268,7 @@ function renderModules(): void {
           ${categoryBadge(m)}
           ${stateBadge(m)}
           ${runBadge(m)}
+          ${linkBadge(m)}
         </div>
       </div>
       <div class="card__desc">${escapeHtml(describeEntry(m))}</div>
@@ -298,6 +302,7 @@ function renderModules(): void {
       if (act === "start") void handleStartStop(id, "start");
       if (act === "stop") void handleStartStop(id, "stop");
       if (act === "restart") void handleStartStop(id, "restart");
+      if (act === "unlink") void handleUnlink(id);
     });
   });
 }
@@ -337,6 +342,14 @@ function renderActionButtons(m: ModuleManifest, installed: boolean): string {
   }
 
   // 卸载权限来自分类，与运行状态无关
+  // 链接模块的文件属于用户：只能「解除登记」，不能删文件
+  if (st?.linked) {
+    parts.push(
+      `<button class="btn" data-act="unlink" data-id="${m.module_id}">解除登记</button>`,
+    );
+    return parts.join("\n");
+  }
+
   const locked = m.category === "core" || m.category === "reserved";
   if (locked) {
     const label = m.category === "reserved" ? "不可卸载（Reserved）" : "不可卸载（核心）";
@@ -352,6 +365,13 @@ function renderActionButtons(m: ModuleManifest, installed: boolean): string {
 }
 
 /** 运行状态徽标（与「已安装」徽标分开：能不能装 ≠ 在不在跑）。 */
+/** 外部链接标记：文件在用户自己目录里，启动器不拥有。 */
+function linkBadge(m: ModuleManifest): string {
+  const st = moduleStateOf(m.module_id);
+  if (!st || !st.linked) return "";
+  return `<span class="badge badge--warn" title="${escapeHtml(st.path)}">本地目录</span>`;
+}
+
 function runBadge(m: ModuleManifest): string {
   const st = moduleStateOf(m.module_id);
   if (!st || st.install !== "installed") return "";
@@ -364,6 +384,127 @@ function runBadge(m: ModuleManifest): string {
       return `<span class="badge badge--missing" title="${escapeHtml(st.last_error ?? "启动失败")}">● 启动失败</span>`;
     default:
       return '<span class="badge">○ 已停止</span>';
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* 本地模块：扫描 / 添加 / 解除登记                                    */
+/* ------------------------------------------------------------------ */
+
+function localMsg(text: string): void {
+  const node = document.getElementById("local-msg");
+  if (!node) return;
+  node.hidden = false;
+  node.textContent = text;
+}
+
+function localPathValue(): string {
+  const input = document.getElementById("local-path") as HTMLInputElement | null;
+  return input?.value.trim() ?? "";
+}
+
+/** 扫描候选模块并列出，点击某项填入路径。 */
+async function handleScan(): Promise<void> {
+  const box = document.getElementById("scan-results");
+  if (!box) return;
+  const root = localPathValue();
+  if (!root) {
+    localMsg("请先填写要扫描的目录（可以是包含多个模块的上级目录）。");
+    return;
+  }
+  if (!isDesktop()) {
+    localMsg("需要桌面端才能扫描本地目录。");
+    return;
+  }
+
+  localMsg("扫描中…");
+  box.innerHTML = "";
+  try {
+    const list = await scanLocalModules(root);
+    if (list.length === 0) {
+      localMsg(
+        "没有找到含 manifest.json 的模块目录。\n" +
+          "如果你拉取的是模型权重（.gguf / .safetensors 等），它不是可添加的模块。",
+      );
+      return;
+    }
+
+    localMsg(`找到 ${list.length} 个候选，点击即可填入路径。`);
+    for (const item of list) {
+      const row = document.createElement("div");
+      row.className = "step";
+      row.style.cursor = "pointer";
+      row.innerHTML = `
+        <span>${item.registered ? "✅" : "📦"}</span>
+        <span>${escapeHtml(item.name)}</span>
+        <span class="badge badge--optional">${escapeHtml(item.category)}</span>
+        ${item.signed ? '<span class="badge badge--ok">已签名</span>' : '<span class="badge badge--warn">未签名</span>'}
+        ${item.registered ? '<span class="badge badge--ok">已登记</span>' : ""}
+        <span class="step__reason">${escapeHtml(item.path)}</span>
+      `;
+      row.addEventListener("click", () => {
+        const input = document.getElementById("local-path") as HTMLInputElement | null;
+        if (input) input.value = item.path;
+        localMsg(`已填入：${item.path}，点「添加」登记。`);
+      });
+      box.appendChild(row);
+    }
+  } catch (error) {
+    localMsg(`扫描失败：${describeError(error)}`);
+  }
+}
+
+/** 添加本地模块。 */
+async function handleAddLocal(): Promise<void> {
+  const path = localPathValue();
+  if (!path) {
+    localMsg("请填写模块目录路径。");
+    return;
+  }
+  if (!isDesktop()) {
+    localMsg("需要桌面端才能添加本地模块。");
+    return;
+  }
+
+  localMsg("正在校验并登记…");
+  try {
+    const view = await addLocalModule(path);
+    localMsg(
+      [
+        `已登记：${view.module_id}`,
+        `  版本：${view.version}`,
+        `  路径：${view.path}`,
+        "",
+        "可以在卡片上点「启动」了。",
+        "注意：卸载/解除登记都不会删除该目录里的文件。",
+      ].join("\n"),
+    );
+    await loadModuleStates();
+    renderModules();
+  } catch (error) {
+    localMsg(`添加失败：${describeError(error)}`);
+  }
+}
+
+/** 解除本地模块登记（不删文件）。 */
+async function handleUnlink(moduleId: string): Promise<void> {
+  const m = state.modules.get(moduleId);
+  const name = m?.name ?? moduleId;
+  if (
+    !confirm(
+      `解除「${name}」的登记？\n\n` +
+        "只是让启动器不再管理它，目录里的文件不会被删除。",
+    )
+  ) {
+    return;
+  }
+  try {
+    await removeLocalModule(moduleId);
+    await loadModuleStates();
+    renderModules();
+    localMsg(`已解除登记：${name}`);
+  } catch (error) {
+    localMsg(`解除登记失败：${describeError(error)}`);
   }
 }
 
@@ -917,6 +1058,8 @@ el.filterCategory.addEventListener("change", renderModules);
 el.onlyMissing.addEventListener("change", renderModules);
 
 document.getElementById("btn-local-install")?.addEventListener("click", () => void handleLocalInstall());
+document.getElementById("btn-scan")?.addEventListener("click", () => void handleScan());
+document.getElementById("btn-add-local")?.addEventListener("click", () => void handleAddLocal());
 
 el.btnCancel.addEventListener("click", () => {
   el.plan.hidden = true;

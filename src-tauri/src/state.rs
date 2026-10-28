@@ -59,6 +59,14 @@ pub struct ModuleState {
     /// 已安装路径
     #[serde(default)]
     pub path: String,
+    /// 是否为「外部链接」模块。
+    ///
+    /// `true` 表示文件在用户自己指定的目录里（例如 git clone 下来的仓库），
+    /// 启动器只登记路径、不拥有这些文件。关键差异：
+    /// - 卸载时**只解除登记，不删文件**（删掉用户的源码目录是不可接受的）；
+    /// - `path` 就是模块根，而不是 `{data_root}/modules/{id}`。
+    #[serde(default)]
+    pub linked: bool,
     /// 运行状态（不持久化为 Running，进程重启后一律视为 Stopped）
     #[serde(default, skip_serializing)]
     pub run: RunState,
@@ -222,7 +230,30 @@ impl StateStore {
         entry.install = InstallState::Installed;
         entry.version = version.to_string();
         entry.path = path.to_string();
+        // 走启动器安装的模块一律是受管模块，清掉可能残留的链接标记
+        entry.linked = false;
         // reserved 类安装后必须保持禁用
+        entry.enabled = category != Category::Reserved;
+        entry.last_error = None;
+        self.save()
+    }
+
+    /// 登记一个外部链接模块（文件由用户自己管理）。
+    ///
+    /// 与 mark_installed 的区别只在 linked 标记：
+    /// 卸载这类模块时**不能删文件**，否则会摧毁用户自己的源码目录。
+    pub fn mark_linked(
+        &mut self,
+        module_id: &str,
+        version: &str,
+        path: &str,
+        category: Category,
+    ) -> Result<(), StateError> {
+        let entry = self.modules.entry(module_id.to_string()).or_default();
+        entry.install = InstallState::Installed;
+        entry.version = version.to_string();
+        entry.path = path.to_string();
+        entry.linked = true;
         entry.enabled = category != Category::Reserved;
         entry.last_error = None;
         self.save()

@@ -28,6 +28,23 @@
       <main class="content">
         <!-- 模块管理：ComfyUI Manager 式卡片 -->
         <section id="panel-modules" class="panel">
+          <!-- 手动添加本地模块：给"已经 clone 到本地但启动器看不见"的情况用 -->
+          <div class="plan" style="margin:0 0 14px">
+            <h3 class="plan__title">手动添加本地模块</h3>
+            <p class="card__desc" style="margin:0 0 10px">
+              已经用 git clone 或手工下载把模块放到本地？填目录路径即可登记。
+              <strong>不会复制文件</strong>，只登记路径；卸载时也<strong>不会删除你的文件</strong>。
+              目录里需要有 <code>manifest.json</code>。
+            </p>
+            <div class="toolbar" style="margin-bottom:0">
+              <input id="local-path" class="input" placeholder="模块目录路径，如 D:\code\dounai-input" />
+              <button id="btn-scan" class="btn">扫描</button>
+              <button id="btn-add-local" class="btn btn--primary">添加</button>
+            </div>
+            <div id="scan-results" class="plan__body" style="margin-top:10px"></div>
+            <pre id="local-msg" class="log" hidden></pre>
+          </div>
+
           <div class="toolbar">
             <input id="search" class="input" type="search" placeholder="搜索模块…" />
             <select id="filter-category" class="select">

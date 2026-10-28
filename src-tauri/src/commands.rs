@@ -68,9 +68,30 @@ impl AppState {
         &self.processes
     }
 
-    /// 模块安装根（`{data_root}/modules/{module_id}`）。
+    /// 模块根目录。
+    ///
+    /// 受管模块在 `{data_root}/modules/{module_id}`；
+    /// **外部链接模块**（用户自己 clone / 下载的目录）用登记时记录的路径。
+    /// 两种情况下后续的 `working_dir` 校验都把该根当作边界，
+    /// 因此链接模块并不会让进程跑到根之外。
     pub fn module_root(&self, module_id: &str) -> Result<PathBuf, String> {
+        if let Ok(store) = self.store.lock() {
+            if let Some(st) = store.get(module_id) {
+                if st.linked && !st.path.is_empty() {
+                    return Ok(PathBuf::from(&st.path));
+                }
+            }
+        }
         self.module_dir(module_id)
+    }
+
+    /// 模块是否为外部链接（文件由用户管理）。
+    pub fn is_linked(&self, module_id: &str) -> bool {
+        self.store
+            .lock()
+            .ok()
+            .and_then(|s| s.get(module_id).map(|st| st.linked))
+            .unwrap_or(false)
     }
 
     pub fn data_root(&self) -> &Path {
@@ -344,6 +365,8 @@ pub struct ModuleView {
     pub pid: Option<u32>,
     /// 最近一次健康检查是否通过
     pub healthy: bool,
+    /// 是否为外部链接模块（文件在用户自己的目录里）
+    pub linked: bool,
 }
 
 fn to_view(id: &str, st: &ModuleState, pm: &ProcessManager) -> ModuleView {
@@ -361,6 +384,7 @@ fn to_view(id: &str, st: &ModuleState, pm: &ProcessManager) -> ModuleView {
         last_error: rv.last_error.or_else(|| st.last_error.clone()),
         pid: rv.pid,
         healthy: rv.healthy,
+        linked: st.linked,
     }
 }
 
@@ -415,6 +439,11 @@ pub struct UninstallRequest {
 
 #[tauri::command]
 pub fn uninstall_module(state: State<AppState>, request: UninstallRequest) -> Result<(), String> {
+    uninstall_module_inner(&state, request)
+}
+
+/// 卸载的实际实现（与 Tauri 解耦，便于测试链接模块不删文件这一关键行为）。
+pub fn uninstall_module_inner(state: &AppState, request: UninstallRequest) -> Result<(), String> {
     let category = Category::parse(&request.category)
         .ok_or_else(|| format!("未知分类：{}", request.category))?;
 
@@ -429,14 +458,24 @@ pub fn uninstall_module(state: State<AppState>, request: UninstallRequest) -> Re
     // 已退出但仍在进程表里留了失败记录的，也一并清掉
     state.processes().stop(&request.module_id);
 
-    let dir = state.module_dir(&request.module_id)?;
+    // 链接模块的文件属于用户，卸载只解除登记。
+    // 删掉用户自己 clone 的源码目录是不可接受的破坏性操作。
+    let linked = state.is_linked(&request.module_id);
+    let dir = if linked {
+        None
+    } else {
+        Some(state.module_dir(&request.module_id)?)
+    };
+
     let mut store = state.store.lock().map_err(|_| "状态锁不可用")?;
     store
         .uninstall(&request.module_id, category)
         .map_err(|e| e.to_string())?;
 
-    if request.remove_files && dir.exists() {
-        std::fs::remove_dir_all(&dir).map_err(|e| format!("删除安装目录失败：{e}"))?;
+    if let Some(dir) = dir {
+        if request.remove_files && dir.exists() {
+            std::fs::remove_dir_all(&dir).map_err(|e| format!("删除安装目录失败：{e}"))?;
+        }
     }
     Ok(())
 }
@@ -617,6 +656,281 @@ pub fn refresh_catalog(state: State<AppState>, catalog_url: String) -> CatalogRe
         allowlist: state.allowlist.hosts(),
         reason,
     }
+}
+
+/* ------------------------------------------------------------------ */
+/* 本地模块：扫描与手动添加                                            */
+/* ------------------------------------------------------------------ */
+
+/// 扫描到的候选模块。
+#[derive(Debug, Serialize)]
+pub struct ScanCandidate {
+    pub path: String,
+    pub module_id: String,
+    pub name: String,
+    pub version: String,
+    pub category: String,
+    /// manifest 是否带非空签名
+    pub signed: bool,
+    /// 是否已被登记过
+    pub registered: bool,
+}
+
+/// manifest 候选文件名（安装包与源码仓库两种约定都支持）。
+const MANIFEST_NAMES: [&str; 2] = ["manifest.json", "dounai-manifest.json"];
+
+fn find_manifest(dir: &Path) -> Option<PathBuf> {
+    MANIFEST_NAMES
+        .iter()
+        .map(|n| dir.join(n))
+        .find(|p| p.exists())
+}
+
+/// 在给定目录下扫描含 manifest 的子目录（含自身），最多两层。
+///
+/// 为什么要扫描而不是让用户逐个试：用户把仓库 clone 到一个大目录后，
+/// 往往不记得哪个子目录才是模块根。扫描把候选列出来，减少盲目试错。
+#[tauri::command]
+pub fn scan_local_modules(
+    state: State<AppState>,
+    root: String,
+) -> Result<Vec<ScanCandidate>, String> {
+    scan_local_modules_inner(&state, &root)
+}
+
+pub fn scan_local_modules_inner(
+    state: &AppState,
+    root: &str,
+) -> Result<Vec<ScanCandidate>, String> {
+    let root_path = PathBuf::from(root.trim());
+    if !root_path.is_dir() {
+        return Err(format!("目录不存在或不是目录：{}", root_path.display()));
+    }
+
+    let mut out = Vec::new();
+    let mut budget = 200usize;
+
+    // 自身 + 一层子目录（再深容易把整个磁盘扫一遍）
+    let mut dirs: Vec<PathBuf> = vec![root_path.clone()];
+    if let Ok(entries) = std::fs::read_dir(&root_path) {
+        for e in entries.flatten() {
+            if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                dirs.push(e.path());
+            }
+        }
+    }
+
+    for dir in dirs {
+        if budget == 0 {
+            break;
+        }
+        budget -= 1;
+
+        let Some(manifest_path) = find_manifest(&dir) else {
+            continue;
+        };
+        let Ok(text) = std::fs::read_to_string(&manifest_path) else {
+            continue;
+        };
+        let Ok(m) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+
+        let module_id = m
+            .get("module_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if module_id.is_empty() {
+            continue;
+        }
+
+        let signed = m
+            .get("signature")
+            .and_then(|s| s.get("value"))
+            .and_then(|v| v.as_str())
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false);
+
+        let registered = state
+            .store
+            .lock()
+            .map(|s| s.get(&module_id).is_some())
+            .unwrap_or(false);
+
+        out.push(ScanCandidate {
+            path: dir.to_string_lossy().to_string(),
+            module_id: module_id.clone(),
+            name: m
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&module_id)
+                .to_string(),
+            version: m
+                .get("version")
+                .and_then(|v| v.as_str())
+                .unwrap_or("0.0.0")
+                .to_string(),
+            category: m
+                .get("category")
+                .and_then(|v| v.as_str())
+                .unwrap_or("optional")
+                .to_string(),
+            signed,
+            registered,
+        });
+    }
+
+    out.sort_by(|a, b| a.module_id.cmp(&b.module_id));
+    Ok(out)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AddLocalModuleRequest {
+    /// 模块目录（绝对路径，或相对启动器工作目录）
+    pub path: String,
+}
+
+/// 把一个已存在于本地的目录登记为模块。
+///
+/// 与「从 zip 安装」的区别：**不复制文件**，只登记路径。
+/// 这是刻意取舍——用户 clone 的是自己的仓库，模型目录可能有几十 GB，
+/// 复制一份既浪费空间，也会让"改了源码但要重新导入"变成日常困扰。
+///
+/// 安全代价与补偿：
+/// - 代价：执行的是用户指定目录里的代码，不在启动器数据根内；
+/// - 补偿 1：必须存在 `manifest.json`，且 `module_id` 通过文件名校验；
+/// - 补偿 2：**签名按当前信任策略校验**，发布版仍会拒绝未签名模块；
+/// - 补偿 3：`working_dir` 被限制在该模块根内，仍然越不出去；
+/// - 补偿 4：卸载只解除登记，**绝不删除用户文件**。
+#[tauri::command]
+pub fn add_local_module(
+    state: State<AppState>,
+    request: AddLocalModuleRequest,
+) -> Result<ModuleView, String> {
+    add_local_module_inner(&state, &request.path)
+}
+
+pub fn add_local_module_inner(state: &AppState, raw_path: &str) -> Result<ModuleView, String> {
+    let trimmed = raw_path.trim().trim_matches('"');
+    if trimmed.is_empty() {
+        return Err("请填写模块目录路径".to_string());
+    }
+
+    let dir = PathBuf::from(trimmed);
+    if !dir.exists() {
+        return Err(format!("目录不存在：{}", dir.display()));
+    }
+    if !dir.is_dir() {
+        return Err(format!("不是目录：{}", dir.display()));
+    }
+    // 规范化：存绝对路径，避免启动器换工作目录后解析失败
+    let dir = dir
+        .canonicalize()
+        .map_err(|e| format!("无法解析路径：{e}"))?;
+
+    let manifest_path = find_manifest(&dir).ok_or_else(|| {
+        format!(
+            "{} 下没有 manifest.json 或 dounai-manifest.json。\n\
+             如果你拉取的是模型权重而不是模块，它不是可添加的模块——\
+             模型权重应放在模块自己的数据目录里，由模块读取。",
+            dir.display()
+        )
+    })?;
+
+    let text =
+        std::fs::read_to_string(&manifest_path).map_err(|e| format!("读取 manifest 失败：{e}"))?;
+    let manifest: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("manifest 不是合法 JSON：{e}"))?;
+
+    let module_id = manifest
+        .get("module_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if module_id.is_empty() {
+        return Err("manifest 缺少 module_id".to_string());
+    }
+    // 复用与受管模块相同的 id 规则，防止 id 本身带路径分隔符
+    if !module_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+        || module_id.contains("..")
+        || !crate::security::is_safe_filename(&module_id)
+    {
+        return Err(format!("manifest 的 module_id 不合法：{module_id}"));
+    }
+
+    // 签名：沿用当前信任策略（发布版拒绝未签名）
+    let _verdict = crate::trust::evaluate(&manifest, state.trust_policy())
+        .map_err(|e| format!("拒绝添加：{e}"))?;
+
+    let category = manifest
+        .get("category")
+        .and_then(|v| v.as_str())
+        .and_then(Category::parse)
+        .unwrap_or(Category::Optional);
+    let version = manifest
+        .get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0.0.0");
+
+    // 已被启动器安装过的受管模块，不允许直接改成本地链接（会让文件归属混乱）
+    {
+        let store = state.store.lock().map_err(|_| "状态锁不可用")?;
+        if let Some(st) = store.get(&module_id) {
+            if st.install == InstallState::Installed && !st.linked {
+                return Err(format!(
+                    "模块 {module_id} 已由启动器安装（{}），请先卸载再改为本地目录",
+                    st.path
+                ));
+            }
+        }
+    }
+
+    let path_str = dir.to_string_lossy().to_string();
+    {
+        let mut store = state.store.lock().map_err(|_| "状态锁不可用")?;
+        store
+            .mark_linked(&module_id, version, &path_str, category)
+            .map_err(|e| e.to_string())?;
+    }
+
+    // 返回登记后的视图
+    let store = state.store.lock().map_err(|_| "状态锁不可用")?;
+    let st = store
+        .get(&module_id)
+        .ok_or_else(|| "登记后读取状态失败".to_string())?;
+    let pm = state.processes();
+    Ok(to_view(&module_id, st, pm))
+}
+
+/// 解除本地模块登记（不删除文件）。
+#[tauri::command]
+pub fn remove_local_module(state: State<AppState>, module_id: String) -> Result<(), String> {
+    remove_local_module_inner(&state, &module_id)
+}
+
+pub fn remove_local_module_inner(state: &AppState, module_id: &str) -> Result<(), String> {
+    if state.processes().is_active(module_id) {
+        return Err(format!("模块 {module_id} 正在运行，请先停止"));
+    }
+    state.processes().stop(module_id);
+
+    let mut store = state.store.lock().map_err(|_| "状态锁不可用")?;
+    let st = store
+        .get(module_id)
+        .ok_or_else(|| format!("模块 {module_id} 未登记"))?;
+    if !st.linked {
+        return Err(format!(
+            "模块 {module_id} 由启动器安装，请用「卸载」而不是「解除登记」"
+        ));
+    }
+    store
+        .purge(&[module_id.to_string()])
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /* ------------------------------------------------------------------ */

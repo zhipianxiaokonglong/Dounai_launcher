@@ -365,7 +365,8 @@ impl ProcessManager {
             Ok(g) => {
                 let mut items: Vec<(u64, String)> = g
                     .values()
-                    .filter(|p| p.pid != 0)
+                    // 不按 pid 过滤：已退出但留在表里的记录也要清掉，
+                    // 否则这些记录会永久占位，list() 一直显示"启动失败"。
                     .map(|p| (p.start_seq, p.module_id.clone()))
                     .collect();
                 // 启动越晚越先停

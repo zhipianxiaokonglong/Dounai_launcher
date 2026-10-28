@@ -26,6 +26,8 @@ export interface ModuleView {
   pid: number | null;
   /** 最近一次健康检查是否通过 */
   healthy: boolean;
+  /** 是否为外部链接模块（文件在用户自己的目录里） */
+  linked: boolean;
 }
 
 /** 启停命令返回的运行快照。 */
@@ -167,6 +169,36 @@ export async function uninstallModule(
   await call("uninstall_module", {
     request: { module_id: moduleId, category, remove_files: removeFiles },
   });
+}
+
+/* ------------------------------------------------------------------ */
+/* 本地模块（手动添加）                                                */
+/* ------------------------------------------------------------------ */
+
+/** 扫描到的候选模块。 */
+export interface ScanCandidate {
+  path: string;
+  module_id: string;
+  name: string;
+  version: string;
+  category: string;
+  signed: boolean;
+  registered: boolean;
+}
+
+/** 在给定目录下扫描含 manifest 的模块（自身 + 一层子目录）。 */
+export async function scanLocalModules(root: string): Promise<ScanCandidate[]> {
+  return call<ScanCandidate[]>("scan_local_modules", { root });
+}
+
+/** 把一个已存在的本地目录登记为模块（不复制文件）。 */
+export async function addLocalModule(path: string): Promise<ModuleView> {
+  return call<ModuleView>("add_local_module", { request: { path } });
+}
+
+/** 解除本地模块登记（不删除文件）。 */
+export async function removeLocalModule(moduleId: string): Promise<void> {
+  await call("remove_local_module", { moduleId });
 }
 
 /* ------------------------------------------------------------------ */
