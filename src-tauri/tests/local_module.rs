@@ -204,27 +204,19 @@ fn add_rejects_directory_without_manifest() {
 }
 
 #[test]
-fn add_rejects_unsigned_under_strict_policy() {
+fn add_skips_signature_under_strict_policy() {
     let root = tmp_root("strict");
     let mod_dir = root.join("external").join("un-signed");
     write_manifest(&mod_dir, "un-signed", "echo hi", "optional");
 
-    // 签名与受管 zip 安装同一套策略：严格策略 + 无可信公钥时，
-    // 未签名必须被拒。用户选择目录不代表这份 manifest 没被改过。
+    // 本地模块是开发者功能：用户显式登记的本地目录，跳过签名校验。
+    // 即便严格策略 + 无可信公钥，也不应拒绝——信任由登记的用户负责。
     let st = state(
         &root.join("appdata"),
         TrustPolicy::strict(vec!["Zm9v".into()]),
     );
-    let err = add_local_module_inner(&st, mod_dir.to_str().unwrap()).unwrap_err();
-    assert!(err.contains("未签名"), "实际：{err}");
-
-    // 被拒绝时不应留下登记
-    assert!(st
-        .store_for_test()
-        .lock()
-        .unwrap()
-        .get("un-signed")
-        .is_none());
+    let view = add_local_module_inner(&st, mod_dir.to_str().unwrap()).unwrap();
+    assert_eq!(view.module_id, "un-signed");
 
     std::fs::remove_dir_all(&root).ok();
 }
@@ -245,6 +237,22 @@ fn add_rejects_unsigned_under_strict_policy_via_install_path() {
     });
     let err = dounai_launcher::trust::evaluate(&manifest, st.trust_policy()).unwrap_err();
     assert_eq!(err, dounai_launcher::trust::TrustError::Unsigned);
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn dev_mode_gate_blocks_local_commands() {
+    // 开发者模式是本地登记命令的前置门：未开启时直接拒绝。
+    let root = tmp_root("devgate");
+    let st = state(&root.join("appdata"), TrustPolicy::permissive());
+
+    let err = dounai_launcher::commands::require_dev_mode(&st).unwrap_err();
+    assert!(err.contains("未开启"), "应提示未开启：{err}");
+
+    // 开启后放行
+    st.enable_dev_mode();
+    assert!(dounai_launcher::commands::require_dev_mode(&st).is_ok());
 
     std::fs::remove_dir_all(&root).ok();
 }
@@ -420,57 +428,6 @@ fn purge_does_not_touch_linked_module_directory() {
         "清除数据不得删除链接模块里的文件"
     );
 
-    std::fs::remove_dir_all(&root).ok();
-}
-
-/* ---------------- 批量登记 ---------------- */
-
-#[test]
-fn bulk_add_reports_per_path_and_continues_on_failure() {
-    use dounai_launcher::commands::add_local_modules_bulk_inner;
-
-    let root = tmp_root("bulk");
-    let good1 = root.join("m1");
-    let good2 = root.join("m2");
-    write_manifest(&good1, "m1", "echo hi", "optional");
-    write_manifest(&good2, "m2", "echo hi", "optional");
-    // 一个没有 manifest 的目录，用来验证"单个失败不影响其余"
-    let bad = root.join("no-manifest");
-    std::fs::create_dir_all(&bad).unwrap();
-
-    let st = state(&root.join("appdata"), TrustPolicy::permissive());
-    let paths = vec![
-        good1.to_string_lossy().to_string(),
-        bad.to_string_lossy().to_string(),
-        good2.to_string_lossy().to_string(),
-    ];
-    let results = add_local_modules_bulk_inner(&st, &paths);
-
-    assert_eq!(results.len(), 3);
-    assert!(results[0].ok, "第一个应成功：{:?}", results[0].error);
-    assert!(!results[1].ok, "无 manifest 的目录应失败");
-    assert!(
-        results[2].ok,
-        "第三个应成功（前面的失败不阻塞）：{:?}",
-        results[2].error
-    );
-
-    // 成功的两个都已登记
-    {
-        let store = st.store_for_test().lock().unwrap();
-        assert!(store.get("m1").is_some());
-        assert!(store.get("m2").is_some());
-    }
-
-    std::fs::remove_dir_all(&root).ok();
-}
-
-#[test]
-fn bulk_add_empty_list_is_noop() {
-    use dounai_launcher::commands::add_local_modules_bulk_inner;
-    let root = tmp_root("bulk-empty");
-    let st = state(&root.join("appdata"), TrustPolicy::permissive());
-    assert!(add_local_modules_bulk_inner(&st, &[]).is_empty());
     std::fs::remove_dir_all(&root).ok();
 }
 

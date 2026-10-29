@@ -266,6 +266,23 @@ export async function trustInfo(): Promise<TrustInfo> {
   return call<TrustInfo>("trust_info");
 }
 
+/* ------------------------------------------------------------------ */
+/* 开发者模式（隐藏入口开启）                                          */
+/* ------------------------------------------------------------------ */
+
+export interface DevModeInfo {
+  enabled: boolean;
+}
+
+/** 查询开发者模式是否已开启。 */
+export async function devModeStatus(): Promise<DevModeInfo> {
+  return call<DevModeInfo>("dev_mode_status");
+}
+
+/** 开启开发者模式（只进不退，本次会话内生效）。 */
+export async function enableDevMode(): Promise<DevModeInfo> {
+  return call<DevModeInfo>("enable_dev_mode");
+}
 
 /* ------------------------------------------------------------------ */
 /* 清单与环境                                                          */

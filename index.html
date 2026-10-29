@@ -28,8 +28,9 @@
       <main class="content">
         <!-- 模块管理：ComfyUI Manager 式卡片 -->
         <section id="panel-modules" class="panel">
-          <!-- 手动添加本地模块：给"已经 clone 到本地但启动器看不见"的情况用 -->
-          <div id="local-module-panel" class="plan" style="margin:0 0 14px">
+          <!-- 手动添加本地模块：给"已经 clone 到本地但启动器看不见"的情况用。
+               默认隐藏，需通过隐藏入口开启。 -->
+          <div id="local-module-panel" class="plan" style="margin:0 0 14px" hidden>
             <h3 class="plan__title">手动添加本地模块</h3>
             <p class="card__desc" style="margin:0 0 10px">
               已经用 git clone 或手工下载把模块放到本地？填目录路径即可登记。
