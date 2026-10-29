@@ -130,14 +130,18 @@ v0.1.0 只有「装、配、修、卸」，「跑」完全没有——启动器�
 | LM2 | 登记后模块标记为「本地目录」且可启动 | 添加 | 通过 | `add_registers_linked_module_and_marks_it_installed`、`linked_module_can_start_using_registered_path` |
 | LM3 | **卸载/解除登记都不删除用户文件** | 安全 | 通过 | 3 项测试：`uninstall_linked_module_keeps_user_files`、`remove_local_module_unregisters_without_deleting`、`purge_does_not_touch_linked_module_directory` |
 | LM4 | 无 manifest 时提示"这是模型权重不是模块" | 易用 | 通过 | `add_rejects_directory_without_manifest`（断言提示含"模型权重"） |
-| LM5 | 签名仍按信任策略校验，发布版拒绝未签名 | 安全 | 通过 | `add_rejects_unsigned_under_strict_policy` |
+| LM5 | 本地登记通道**按开发者设计跳过验签**（zip 安装通道仍验签） | 安全 | 通过 | `add_skips_signature_under_strict_policy`（严格策略下仍允许登记）；对照 `add_rejects_unsigned_under_strict_policy_via_install_path`（zip 通道拒绝未签名） |
 | LM6 | 已被受管安装的同名模块不可被本地目录顶替 | 安全 | 通过 | `add_rejects_managed_module_takeover` |
 | LM7 | 链接模块的 `working_dir` 仍限制在该模块根内 | 安全 | 通过 | `linked_module_working_dir_still_confined` |
-| LM8 | UI 提供扫描/添加入口，链接模块显示「解除登记」 | UI | 通过 | 桩渲染验证：扫描出 2 个候选、徽标显示「本地目录」、按钮为「解除登记」 |
+| LM8 | 本地登记入口**默认隐藏**，连点标题 5 次开启；开启前所有登记命令被拒 | UI / 安全 | 转人工 | 代码层：`dev_mode_gate_blocks_local_commands`（未开启即拒绝）；交互层：5 次点击与面板显隐需人工点按确认 |
 
 **安全取舍（如实说明）**：本地模块执行的是用户指定目录里的代码，
-不在启动器数据根内。补偿措施：必须有合法 manifest、签名按策略校验、
-`working_dir` 限制在该根内、卸载绝不删文件。
+不在启动器数据根内，且该通道**不做签名校验**（本地开发不会签名，强制验签会让功能不可用）。
+剩余防线：必须有合法 manifest 与 `module_id` 校验、`working_dir` 限制在该根内、
+同名受管模块不可顶替、卸载绝不删文件；入口默认隐藏，命令层由 `require_dev_mode` 前置拒绝。
+
+> 需要明白的边界：5 次点击与"开发者自己指定目录"都**不构成安全边界**，
+> 它们是使用意图的表达，不是攻击面收敛。真正的供应链防线在 zip 安装通道与软件源。
 
 ---
 
@@ -234,14 +238,14 @@ v0.1.0 只有「装、配、修、卸」，「跑」完全没有——启动器�
 
 | 类别 | 总项 | 通过 | 转人工 | 待复核 |
 |---|---|---|---|---|
-| 功能清单（含 RUN1–RUN13 与 LM1–LM8） | 47 | 37 | 2 | 8 |
+| 功能清单（含 RUN1–RUN13 与 LM1–LM8） | 47 | 36 | 3 | 8 |
 | 接口契约 | 6 | 6 | 0 | 0 |
 | 隐私红线 | 6 | 3 | 3 | 0 |
 | 安全门槛 | 8 | 8 | 0 | 0 |
 | 独立运行 | 6 | 3 | 0 | 3 |
 | 仓库干净 | 6 | 6 | 0 | 0 |
 | 文档完整 | 7 | 7 | 0 | 0 |
-| **合计** | **86** | **70** | **5** | **11** |
+| **合计** | **86** | **69** | **6** | **11** |
 
 > 校验方式：对本文件逐行匹配结论标注后计数，62 + 5 + 11 = 78。
 > 若修改任何一行结论，必须同步本表，否则视为文档缺陷。
