@@ -21,6 +21,9 @@ import {
   installModule,
   refreshCatalog,
   purgeLocalData,
+  vendorOverview,
+  setVendorKey,
+  clearVendorKey,
   scanLocalModules,
   addLocalModule,
   addLocalModulesBulk,
@@ -34,6 +37,7 @@ import {
   enableDevMode,
   BridgeUnavailableError,
   type ModuleView,
+  type VendorLayer,
   type RustEnvReport,
   type TrustInfo,
 } from "../bridge.js";
@@ -93,6 +97,7 @@ const state = {
   trust: null as TrustInfo | null,
   /** 开发者模式（隐藏入口开启，本次会话内生效） */
   devMode: false,
+  vendorLayers: [] as VendorLayer[],
   /** 最近一次扫描出的本地模块候选 */
   scanCandidates: [] as Array<{ path: string; name: string; module_id: string }>,
 };
@@ -1139,6 +1144,21 @@ el.onlyMissing.addEventListener("change", renderModules);
 
 document.getElementById("btn-local-install")?.addEventListener("click", () => void handleLocalInstall());
 document.getElementById("btn-scan")?.addEventListener("click", () => void handleScan());
+document
+  .getElementById("btn-vendor-refresh")
+  ?.addEventListener("click", () => void loadVendors());
+document.getElementById("vendor-layers")?.addEventListener("click", (event) => {
+  const node = (event.target as HTMLElement).closest("[data-vk-save], [data-vk-clear]");
+  if (!node) return;
+  const layer = node.getAttribute("data-layer") ?? "";
+  const env = node.getAttribute("data-env") ?? "";
+  if (node.hasAttribute("data-vk-save")) {
+    const inputId = node.getAttribute("data-input") ?? "";
+    void handleSaveVendorKey(layer, env, inputId);
+  } else {
+    void handleClearVendorKey(layer, env);
+  }
+});
 document.getElementById("btn-add-local")?.addEventListener("click", () => void handleAddLocal());
 
 el.btnCancel.addEventListener("click", () => {
@@ -1189,10 +1209,12 @@ document.querySelectorAll(".tab").forEach((tab) => {
     const target = (tab as HTMLElement).dataset.tab ?? "modules";
     document.querySelectorAll(".tab").forEach((t) => t.classList.remove("is-active"));
     tab.classList.add("is-active");
-    for (const name of ["modules", "bundles", "env"]) {
+    for (const name of ["modules", "bundles", "vendors", "env"]) {
       const panel = document.getElementById(`panel-${name}`);
       if (panel) panel.hidden = name !== target;
     }
+    // 切到厂商页时按需拉取（避免启动即访问本机端口）
+    if (target === "vendors") void loadVendors();
   });
 });
 
@@ -1255,6 +1277,177 @@ function wireDevModeEntry(): void {
       void handleEnableDevMode();
     }
   });
+}
+
+/* ------------------------------------------------------------------ */
+/* 厂商密钥                                                            */
+/* ------------------------------------------------------------------ */
+
+function vendorMsg(text: string): void {
+  const node = document.getElementById("vendor-msg");
+  if (!node) return;
+  node.hidden = false;
+  node.textContent = text;
+}
+
+function esc(s: string): string {
+  return s.replace(/[&<>"']/g, (ch) => {
+    const map: Record<string, string> = {
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;",
+    };
+    return map[ch] ?? ch;
+  });
+}
+
+/** 渲染三层厂商状态与密钥输入框。 */
+function renderVendors(): void {
+  const box = document.getElementById("vendor-layers");
+  if (!box) return;
+
+  const hint = document.getElementById("vendor-hint");
+  if (hint) {
+    const ready = state.vendorLayers.filter((l) => l.running).length;
+    hint.textContent =
+      state.vendorLayers.length === 0
+        ? "尚未读取"
+        : `${ready}/${state.vendorLayers.length} 层正在运行（只有运行中的层才能读到厂商清单）`;
+  }
+
+  if (state.vendorLayers.length === 0) {
+    box.innerHTML = '<p class="empty">还没有数据，点上方「刷新厂商状态」。</p>';
+    return;
+  }
+
+  box.innerHTML = state.vendorLayers
+    .map((layer) => {
+      const head = `
+        <div class="plan__title" style="display:flex;gap:8px;align-items:center">
+          ${esc(layer.label)}
+          <span class="badge badge--optional">${esc(layer.module_id)}</span>
+          ${layer.installed ? '<span class="badge badge--ok">已安装</span>' : '<span class="badge badge--warn">未安装</span>'}
+          ${layer.running ? '<span class="badge badge--ok">运行中</span>' : '<span class="badge badge--warn">未运行</span>'}
+        </div>`;
+
+      if (layer.error) {
+        return `<div class="plan" style="margin-bottom:12px">${head}
+          <p class="card__desc" style="margin:8px 0 0">${esc(layer.error)}</p>
+        </div>`;
+      }
+
+      const rows = layer.providers
+        .map((p) => {
+          const status = p.ready
+            ? '<span class="badge badge--ok">可用</span>'
+            : '<span class="badge badge--warn">缺配置</span>';
+          const missing = p.missing
+            .map((env) => {
+              const saved = p.saved.includes(env);
+              const id = `vk-${layer.module_id}-${p.id}-${env}`;
+              return `
+                <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
+                  <code>${esc(env)}</code>
+                  ${saved ? '<span class="badge badge--ok">已保存</span>' : ""}
+                  <input class="input" id="${esc(id)}" type="password" placeholder="粘贴密钥"
+                         style="max-width:260px" />
+                  <button class="btn btn--primary" data-vk-save="1"
+                          data-layer="${esc(layer.module_id)}"
+                          data-env="${esc(env)}"
+                          data-input="${esc(id)}">保存</button>
+                  ${saved
+                    ? `<button class="btn" data-vk-clear="1"
+                         data-layer="${esc(layer.module_id)}"
+                         data-env="${esc(env)}">清除</button>`
+                    : ""}
+                </div>`;
+            })
+            .join("");
+
+          return `<div style="border-top:1px solid rgba(0,0,0,.08);padding:10px 0">
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <strong>${esc(p.label)}</strong>
+              <span class="badge badge--optional">${esc(p.id)}</span>
+              <span class="badge badge--optional">${esc(p.privacy)}</span>
+              ${status}
+            </div>
+            ${
+              p.missing.length > 0
+                ? missing
+                : p.ready
+                  ? '<p class="card__desc" style="margin:6px 0 0">无需额外配置。</p>'
+                  : '<p class="card__desc" style="margin:6px 0 0">此厂商当前不可用，但原因不是缺密钥（可能需要安装本地模型或启动本地服务）。</p>'
+            }
+          </div>`;
+        })
+        .join("");
+
+      return `<div class="plan" style="margin-bottom:12px">${head}
+        <div style="margin-top:10px">${rows || '<p class="card__desc">该层没有返回任何厂商。</p>'}</div>
+      </div>`;
+    })
+    .join("");
+}
+
+/** 读取三层厂商状态。 */
+async function loadVendors(): Promise<void> {
+  if (!isDesktop()) {
+    vendorMsg("需要桌面端才能读取厂商状态。");
+    return;
+  }
+  vendorMsg("正在读取三层厂商状态…");
+  try {
+    state.vendorLayers = await vendorOverview();
+    renderVendors();
+    const failed = state.vendorLayers.filter((l) => l.error);
+    vendorMsg(
+      failed.length === 0
+        ? "已读取。"
+        : `已读取。${failed.length} 层暂不可读：${failed
+            .map((l) => `${l.label}（${l.error ?? "未知"}）`)
+            .join("；")}`,
+    );
+  } catch (error) {
+    vendorMsg(`读取失败：${describeError(error)}`);
+  }
+}
+
+/** 保存一个密钥并提示重启。 */
+async function handleSaveVendorKey(
+  moduleId: string,
+  envName: string,
+  inputId: string,
+): Promise<void> {
+  const input = document.getElementById(inputId) as HTMLInputElement | null;
+  const value = input?.value ?? "";
+  if (!value.trim()) {
+    vendorMsg(`请先填写 ${envName} 的值。`);
+    return;
+  }
+  try {
+    state.vendorLayers = await setVendorKey(moduleId, envName, value.trim());
+    if (input) input.value = "";
+    renderVendors();
+    vendorMsg(
+      `已保存 ${envName}。\n\n密钥不会回显；请到「环境」页停止再启动该模块，重新启动时才会注入。`,
+    );
+  } catch (error) {
+    vendorMsg(`保存失败：${describeError(error)}`);
+  }
+}
+
+/** 清除一个密钥。 */
+async function handleClearVendorKey(moduleId: string, envName: string): Promise<void> {
+  if (!confirm(`清除已保存的 ${envName}？\n\n模块重启后将不再收到该变量。`)) return;
+  try {
+    state.vendorLayers = await clearVendorKey(moduleId, envName);
+    renderVendors();
+    vendorMsg(`已清除 ${envName}。`);
+  } catch (error) {
+    vendorMsg(`清除失败：${describeError(error)}`);
+  }
 }
 
 /* ------------------------------------------------------------------ */

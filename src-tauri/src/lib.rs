@@ -18,6 +18,7 @@ pub mod security;
 pub mod signature;
 pub mod state;
 pub mod trust;
+pub mod vendor_keys;
 
 pub use catalog::{
     fetch_catalog, parse_catalog, Allowlist, AllowlistError, CatalogEntry, CatalogFetcher,

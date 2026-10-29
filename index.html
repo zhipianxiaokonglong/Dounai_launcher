@@ -22,6 +22,7 @@
       <nav class="tabs" role="tablist">
         <button class="tab is-active" data-tab="modules" role="tab">模块</button>
         <button class="tab" data-tab="bundles" role="tab">套装</button>
+        <button class="tab" data-tab="vendors" role="tab">厂商</button>
         <button class="tab" data-tab="env" role="tab">环境</button>
       </nav>
 
@@ -101,6 +102,29 @@
         </section>
 
         <!-- 环境管理 -->
+        <!-- 厂商：三层密钥的统一配置入口。
+             三个上游各自用环境变量读密钥、格式互不相同，这里做统一管理。 -->
+        <section id="panel-vendors" class="panel" hidden>
+          <div class="plan" style="margin:0 0 14px">
+            <h3 class="plan__title">第三方厂商与密钥</h3>
+            <p class="card__desc" style="margin:0 0 10px">
+              三个上游（输入 / 模型 / 语音）各自从<strong>环境变量</strong>读取密钥，
+              但配置方式互不相同。这里统一保存一份，<strong>启动模块时自动注入</strong>——
+              不会往你的代码目录里写任何文件。
+            </p>
+            <p class="card__desc" style="margin:0 0 10px">
+              密钥只保存在本机启动器数据目录，<strong>不会显示回界面</strong>，
+              也不会写进日志。保存后需要<strong>重启对应模块</strong>才生效。
+            </p>
+            <div class="toolbar" style="margin-bottom:0">
+              <button id="btn-vendor-refresh" class="btn">刷新厂商状态</button>
+              <span class="card__desc" id="vendor-hint"></span>
+            </div>
+            <pre id="vendor-msg" class="log" hidden></pre>
+          </div>
+          <div id="vendor-layers"></div>
+        </section>
+
         <section id="panel-env" class="panel" hidden>
           <div id="env-body" class="env"></div>
         </section>

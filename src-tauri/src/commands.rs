@@ -31,6 +31,10 @@ pub struct AppState {
     trust: TrustPolicy,
     /// 进程表：管理由启动器拉起的子进程（内存态，不持久化）
     processes: ProcessManager,
+    /// 厂商密钥仓库：唯一副本，启动模块时注入为进程环境变量。
+    ///
+    /// 值只在 Rust 侧使用，**不返回给前端**（见 vendor_keys 模块文档）。
+    vendors: Mutex<crate::vendor_keys::VendorStore>,
     /// 开发者模式：通过隐藏入口（连续点击标题）开启。
     ///
     /// 开启后可用「本地模块登记」（scan/add/remove），且该通道跳过签名校验——
@@ -56,12 +60,16 @@ impl AppState {
         std::fs::create_dir_all(&data_root).map_err(|e| e.to_string())?;
         let state_path = data_root.join("modules-state.json");
         let store = StateStore::open(&state_path).map_err(|e| e.to_string())?;
+        // 先打开密钥库：data_root 随后会被移进结构体
+        let vendors =
+            crate::vendor_keys::VendorStore::open(&data_root).map_err(|e| e.to_string())?;
         Ok(Self {
             data_root,
             store: Mutex::new(store),
             allowlist,
             trust,
             processes: ProcessManager::default(),
+            vendors: Mutex::new(vendors),
             dev_mode: Mutex::new(false),
         })
     }
@@ -99,6 +107,14 @@ impl AppState {
             .ok()
             .and_then(|s| s.get(module_id).map(|st| st.linked))
             .unwrap_or(false)
+    }
+
+    /// 供测试使用：读取入口规格（验证厂商密钥是否注入 env）。
+    pub fn entry_spec_for_test(
+        &self,
+        module_id: &str,
+    ) -> Result<crate::runtime::EntrySpec, String> {
+        self.entry_spec(module_id)
     }
 
     pub fn data_root(&self) -> &Path {
@@ -158,6 +174,18 @@ impl AppState {
                         crate::runtime::resolve_placeholders(s, &root, &data_dir, &app_local),
                     ));
                 }
+            }
+        }
+
+        // 注入启动器保存的厂商密钥。
+        //
+        // 三个上游都从**进程环境变量**读密钥（输入层甚至不读 .env），
+        // 所以在这里注入是唯一既不改上游、也不往用户仓库写文件的做法。
+        // 同名变量以启动器保存的为准：它是配置的唯一来源。
+        if let Ok(store) = self.vendors.lock() {
+            for (k, v) in store.env_for(module_id) {
+                env.retain(|(ek, _): &(String, String)| ek != &k);
+                env.push((k, v));
             }
         }
 
@@ -290,8 +318,47 @@ pub fn start_module_inner(
 }
 
 #[tauri::command]
-pub fn stop_module(state: State<AppState>, module_id: String) -> crate::runtime::RunView {
-    state.processes().stop(&module_id)
+pub fn stop_module(
+    state: State<AppState>,
+    module_id: String,
+) -> Result<crate::runtime::RunView, String> {
+    stop_module_inner(&state, &module_id)
+}
+
+/// 停止模块。
+///
+/// 除了从进程表里停掉，还要处理一种真实情况：**启动器重启后，
+/// 之前拉起的模块成了孤儿**（进程表是内存态）。此时直接 stop 会什么都没做，
+/// 界面却显示「已停止」——用户以为停了，实际服务还在跑，于是"改了密钥重启"根本没生效。
+/// 所以这里先探测健康端点：进程表里没有、但服务活着，就明确报错并给出处置办法。
+pub fn stop_module_inner(
+    state: &AppState,
+    module_id: &str,
+) -> Result<crate::runtime::RunView, String> {
+    let in_table = state.processes().is_active(module_id);
+    if !in_table {
+        if let Some(alive) = module_service_alive(state, module_id) {
+            if alive {
+                return Err(format!(
+                    "模块 {module_id} 不是由本启动器启动的（进程表里没有它），无法停止。\n\
+                     请到任务管理器结束该进程，或重启系统后由启动器统一拉起。"
+                ));
+            }
+        }
+    }
+    Ok(state.processes().stop(module_id))
+}
+
+/// 该模块的服务是否还活着（按 manifest 的健康端点探测）。
+///
+/// 没有健康端点的模块（如悬浮窗）返回 None，调用方按"未知"处理。
+fn module_service_alive(state: &AppState, module_id: &str) -> Option<bool> {
+    let spec = state.entry_spec(module_id).ok()?;
+    let url = spec.health_url?;
+    Some(crate::runtime::http_ok(
+        &url,
+        std::time::Duration::from_millis(600),
+    ))
 }
 
 /// 一键启动：按固定依赖顺序逐个拉起，任一失败不阻塞其余。
@@ -1060,6 +1127,152 @@ pub fn add_local_modules_bulk(
         }
     }
     Ok(results)
+}
+
+/* ------------------------------------------------------------------ */
+/* 厂商密钥（三层统一入口）                                            */
+/* ------------------------------------------------------------------ */
+
+#[derive(Debug, Deserialize)]
+pub struct SetVendorKeyRequest {
+    /// 层（模块 id）：dounai-input / omninexus / moodvoice
+    pub module_id: String,
+    /// 环境变量名，如 DASHSCOPE_API_KEY
+    pub env_name: String,
+    pub value: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ClearVendorKeyRequest {
+    pub module_id: String,
+    pub env_name: String,
+}
+
+/// 三层各自的厂商状态（**不含任何密钥值**）。
+#[tauri::command]
+pub fn vendor_overview(state: State<AppState>) -> Vec<crate::vendor_keys::LayerView> {
+    vendor_overview_inner(&state)
+}
+
+pub fn vendor_overview_inner(state: &AppState) -> Vec<crate::vendor_keys::LayerView> {
+    use crate::vendor_keys::{
+        base_from_health_url, http_get_local, parse_catalog, LayerView, LAYERS,
+    };
+
+    let mut out = Vec::new();
+    for spec in LAYERS {
+        let installed = state
+            .store
+            .lock()
+            .ok()
+            .and_then(|s| {
+                s.get(spec.module_id)
+                    .map(|st| st.install == InstallState::Installed)
+            })
+            .unwrap_or(false);
+        let mut view = LayerView {
+            module_id: spec.module_id.to_string(),
+            label: spec.label.to_string(),
+            installed,
+            running: false,
+            providers: Vec::new(),
+            error: None,
+        };
+
+        if !installed {
+            view.error = Some("尚未安装/登记该层模块".to_string());
+            out.push(view);
+            continue;
+        }
+
+        // 从 manifest 的健康地址推出服务根，再拼各层的清单路径
+        let health_url = match state.entry_spec(spec.module_id) {
+            Ok(e) => e.health_url,
+            Err(e) => {
+                view.error = Some(e);
+                out.push(view);
+                continue;
+            }
+        };
+        let Some(health_url) = health_url else {
+            view.error = Some("该模块没有健康端点，无法查询厂商清单".to_string());
+            out.push(view);
+            continue;
+        };
+
+        // 存活判定：进程表 **或** 健康端点。
+        //
+        // 只看进程表会误报——启动器重启后内存里的进程表是空的，
+        // 但上游可能仍在运行（用户也可能自己起的）。健康端点才是事实来源。
+        let in_table = state.processes().is_active(spec.module_id);
+        let alive =
+            in_table || crate::runtime::http_ok(&health_url, std::time::Duration::from_millis(800));
+        view.running = alive;
+        if !alive {
+            view.error =
+                Some("模块未运行（进程表与健康端点都不可达），启动后才能读取厂商清单".to_string());
+            out.push(view);
+            continue;
+        }
+
+        let Some(base) = base_from_health_url(&health_url) else {
+            view.error = Some(format!("健康地址格式不支持：{health_url}"));
+            out.push(view);
+            continue;
+        };
+        let url = format!("{base}{}", spec.catalog_path);
+        let saved = state
+            .vendors
+            .lock()
+            .map(|v| v.saved_names(spec.module_id))
+            .unwrap_or_default();
+
+        match http_get_local(&url, std::time::Duration::from_millis(1500)) {
+            Ok(body) => match parse_catalog(spec.module_id, &body, &saved) {
+                Ok(list) => view.providers = list,
+                Err(e) => view.error = Some(e),
+            },
+            Err(e) => view.error = Some(format!("读取厂商清单失败：{e}")),
+        }
+
+        out.push(view);
+    }
+    out
+}
+
+/// 保存一个厂商密钥并返回最新总览。
+///
+/// 保存后需要**重启对应模块**才生效——上游只在启动时读环境变量。
+#[tauri::command]
+pub fn set_vendor_key(
+    state: State<AppState>,
+    request: SetVendorKeyRequest,
+) -> Result<Vec<crate::vendor_keys::LayerView>, String> {
+    set_vendor_key_inner(&state, &request)?;
+    Ok(vendor_overview_inner(&state))
+}
+
+pub fn set_vendor_key_inner(state: &AppState, request: &SetVendorKeyRequest) -> Result<(), String> {
+    let mut store = state.vendors.lock().map_err(|_| "密钥库锁不可用")?;
+    store.set(&request.module_id, &request.env_name, &request.value)
+}
+
+/// 清除一个厂商密钥并返回最新总览。
+#[tauri::command]
+pub fn clear_vendor_key(
+    state: State<AppState>,
+    request: ClearVendorKeyRequest,
+) -> Result<Vec<crate::vendor_keys::LayerView>, String> {
+    clear_vendor_key_inner(&state, &request)?;
+    Ok(vendor_overview_inner(&state))
+}
+
+pub fn clear_vendor_key_inner(
+    state: &AppState,
+    request: &ClearVendorKeyRequest,
+) -> Result<(), String> {
+    let mut store = state.vendors.lock().map_err(|_| "密钥库锁不可用")?;
+    store.clear(&request.module_id, &request.env_name)
 }
 
 /* ------------------------------------------------------------------ */

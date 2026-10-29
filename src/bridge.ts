@@ -312,6 +312,56 @@ export async function hashFile(path: string): Promise<string> {
 }
 
 /* ------------------------------------------------------------------ */
+/* 厂商密钥（三层统一入口）                                            */
+/* ------------------------------------------------------------------ */
+
+export interface VendorProvider {
+  id: string;
+  label: string;
+  ready: boolean;
+  /** 还需要哪些环境变量（只有名字，不含值） */
+  missing: string[];
+  /** 其中已由启动器保存的 */
+  saved: string[];
+  privacy: string;
+}
+
+export interface VendorLayer {
+  module_id: string;
+  label: string;
+  installed: boolean;
+  running: boolean;
+  providers: VendorProvider[];
+  error: string | null;
+}
+
+/** 读取三层厂商状态（不含任何密钥值）。 */
+export async function vendorOverview(): Promise<VendorLayer[]> {
+  return call<VendorLayer[]>("vendor_overview");
+}
+
+/** 保存一个厂商密钥（值不会被回读）。 */
+export async function setVendorKey(
+  moduleId: string,
+  envName: string,
+  value: string,
+): Promise<VendorLayer[]> {
+  return call<VendorLayer[]>("set_vendor_key", {
+    request: { module_id: moduleId, env_name: envName, value },
+  });
+}
+
+/** 清除一个厂商密钥。 */
+export async function clearVendorKey(
+  moduleId: string,
+  envName: string,
+): Promise<VendorLayer[]> {
+  return call<VendorLayer[]>("clear_vendor_key", {
+    request: { module_id: moduleId, env_name: envName },
+  });
+}
+
+/* ------------------------------------------------------------------ */
 /* 数据清除                                                            */
 /* ------------------------------------------------------------------ */
 

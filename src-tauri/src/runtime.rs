@@ -478,7 +478,7 @@ fn normalize(p: &Path) -> PathBuf {
 /// 极简 HTTP GET：只判 2xx 且响应体非空。
 ///
 /// 不用 reqwest 是为了让健康检查不依赖 TLS 栈，也便于在单测里指向本地死端口。
-fn http_ok(url: &str, timeout: Duration) -> bool {
+pub fn http_ok(url: &str, timeout: Duration) -> bool {
     use std::io::{Read, Write};
     let Some(rest) = url.strip_prefix("http://") else {
         // https 健康端点交给 reqwest 太重；当前上游全是 http://127.0.0.1
