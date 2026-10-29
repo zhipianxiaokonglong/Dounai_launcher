@@ -70,6 +70,16 @@ fn main() {
             dounai_launcher::commands::trust_info,
             dounai_launcher::commands::hash_file,
             dounai_launcher::commands::purge_local_data,
+            dounai_launcher::commands::start_module,
+            dounai_launcher::commands::stop_module,
+            dounai_launcher::commands::start_all,
+            dounai_launcher::commands::stop_all,
+            dounai_launcher::commands::scan_local_modules,
+            dounai_launcher::commands::add_local_module,
+            dounai_launcher::commands::add_local_modules_bulk,
+            dounai_launcher::commands::remove_local_module,
+            dounai_launcher::commands::dev_mode_status,
+            dounai_launcher::commands::enable_dev_mode,
             dounai_launcher::env_probe::probe_environment,
         ])
         .run(tauri::generate_context!())

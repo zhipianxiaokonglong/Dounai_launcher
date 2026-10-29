@@ -200,7 +200,8 @@ impl ProcessManager {
             return Ok(self.view(&spec.module_id));
         }
 
-        let (program, args) = split_command(&spec.command)?;
+        let (mut program, args) = split_command(&spec.command)?;
+        program = normalize_program_separators(&program);
         let mut cmd = Command::new(&program);
         cmd.args(&args);
         if !spec.working_dir.is_empty() {
@@ -420,6 +421,22 @@ pub fn resolve_placeholders(raw: &str, repo: &Path, data_dir: &Path, app_local: 
         .replace("{app_local}", &app_local.to_string_lossy())
 }
 
+/// 把程序路径的分隔符归一化（Windows 上 `/` → `\`）。
+///
+/// Windows 的 `CreateProcessW` 对「\ / 混合分隔符」的路径解析不稳定，
+/// 可能偶发 `ERROR_INVALID_NAME`（os error 123）。manifest 里常见的
+/// `{repo}/src-tauri/...` 经占位符替换后会变成混合分隔符，这里统一修正。
+/// 对无分隔符的裸命令（python / uv / cmd…）是无操作；其他平台原样返回。
+pub fn normalize_program_separators(program: &str) -> String {
+    #[cfg(windows)]
+    {
+        if program.contains('/') {
+            return program.replace('/', "\\");
+        }
+    }
+    program.to_string()
+}
+
 /// 校验工作目录是否落在模块根内。
 ///
 /// 复用 `security.rs` 的判定习惯：先看是否为空（空=模块根），
@@ -584,6 +601,31 @@ mod tests {
         assert!(!got.contains("{repo}"));
         assert!(!got.contains("{data_dir}"));
         assert!(!got.contains("{app_local}"));
+    }
+
+    #[test]
+    fn program_separators_are_normalized() {
+        // Windows：/ 归一化为 \；其余平台原样返回
+        #[cfg(windows)]
+        {
+            let mixed = normalize_program_separators("E:\\Dounai-ai\\Dounai/src-tauri/dounai.exe");
+            assert!(!mixed.contains('/'), "不应残留正斜杠：{mixed}");
+            assert!(mixed.contains("\\"), "应保留反斜杠：{mixed}");
+            assert!(
+                mixed.contains("src-tauri\\dounai.exe"),
+                "目录分隔应统一：{mixed}"
+            );
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(
+                normalize_program_separators("E:\\Dounai-ai\\Dounai/src-tauri/dounai.exe"),
+                "E:\\Dounai-ai\\Dounai/src-tauri/dounai.exe"
+            );
+        }
+        // 裸命令 no-op
+        assert_eq!(normalize_program_separators("python"), "python");
+        assert_eq!(normalize_program_separators("uv"), "uv");
     }
 
     #[test]

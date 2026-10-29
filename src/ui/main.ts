@@ -23,12 +23,15 @@ import {
   purgeLocalData,
   scanLocalModules,
   addLocalModule,
+  addLocalModulesBulk,
   removeLocalModule,
   startModule,
   stopModule,
   startAll,
   stopAll,
   trustInfo,
+  devModeStatus,
+  enableDevMode,
   BridgeUnavailableError,
   type ModuleView,
   type RustEnvReport,
@@ -88,6 +91,10 @@ const state = {
   envReport: null as RustEnvReport | null,
   /** 信任策略（发布版 fail-closed 时用于提示） */
   trust: null as TrustInfo | null,
+  /** 开发者模式（隐藏入口开启，本次会话内生效） */
+  devMode: false,
+  /** 最近一次扫描出的本地模块候选 */
+  scanCandidates: [] as Array<{ path: string; name: string; module_id: string }>,
 };
 
 /** HTML 转义：manifest 与套装文件属于外部输入，一律按纯文本渲染，防注入。 */
@@ -398,6 +405,14 @@ function localMsg(text: string): void {
   node.textContent = text;
 }
 
+/** 模块页操作反馈（启停/登记等），对用户始终可见。 */
+function opMsg(text: string): void {
+  const node = document.getElementById("op-msg");
+  if (!node) return;
+  node.hidden = false;
+  node.textContent = text;
+}
+
 function localPathValue(): string {
   const input = document.getElementById("local-path") as HTMLInputElement | null;
   return input?.value.trim() ?? "";
@@ -421,6 +436,11 @@ async function handleScan(): Promise<void> {
   box.innerHTML = "";
   try {
     const list = await scanLocalModules(root);
+    state.scanCandidates = list.map((item) => ({
+      path: item.path,
+      name: item.name,
+      module_id: item.module_id,
+    }));
     if (list.length === 0) {
       localMsg(
         "没有找到含 manifest.json 的模块目录。\n" +
@@ -429,7 +449,28 @@ async function handleScan(): Promise<void> {
       return;
     }
 
-    localMsg(`找到 ${list.length} 个候选，点击即可填入路径。`);
+    const pending = list.filter((item) => !item.registered);
+    localMsg(
+      `找到 ${list.length} 个候选（${pending.length} 个未登记）。` +
+        (pending.length > 0 ? "点击某项填入路径，或点「全部登记」批量添加。" : "全部已登记。"),
+    );
+
+    // 批量登记入口：一次登记所有未登记候选
+    if (pending.length > 0) {
+      const bulkBar = document.createElement("div");
+      bulkBar.className = "toolbar";
+      bulkBar.style.marginBottom = "8px";
+      bulkBar.innerHTML = `
+        <button id="btn-bulk-add" class="btn btn--primary">
+          全部登记（${pending.length} 个）
+        </button>
+      `;
+      box.appendChild(bulkBar);
+      bulkBar
+        .querySelector("#btn-bulk-add")
+        ?.addEventListener("click", () => void handleBulkAddLocal());
+    }
+
     for (const item of list) {
       const row = document.createElement("div");
       row.className = "step";
@@ -451,6 +492,35 @@ async function handleScan(): Promise<void> {
     }
   } catch (error) {
     localMsg(`扫描失败：${describeError(error)}`);
+  }
+}
+
+/** 批量登记扫描到的所有未登记候选。 */
+async function handleBulkAddLocal(): Promise<void> {
+  const paths = state.scanCandidates.map((c) => c.path);
+  if (paths.length === 0) {
+    localMsg("没有待登记的候选，请先扫描。");
+    return;
+  }
+
+  localMsg(`正在批量登记 ${paths.length} 个模块…`);
+  try {
+    const results = await addLocalModulesBulk(paths);
+    const ok = results.filter((r) => r.ok);
+    const failed = results.filter((r) => !r.ok);
+    const lines = [
+      `批量登记完成：成功 ${ok.length}，失败 ${failed.length}`,
+      "",
+      ...ok.map((r) => `  ✅ ${r.module_id}`),
+      ...failed.map((r) => `  ❌ ${r.path}：${r.error ?? "未知错误"}`),
+      "",
+      "提示：卸载/解除登记都不会删除目录里的文件。",
+    ];
+    localMsg(lines.join("\n"));
+    await loadModuleStates();
+    renderModules();
+  } catch (error) {
+    localMsg(`批量登记失败：${describeError(error)}`);
   }
 }
 
@@ -512,27 +582,37 @@ async function handleUnlink(moduleId: string): Promise<void> {
 /* 启停操作                                                            */
 /* ------------------------------------------------------------------ */
 
-/** 启动 / 停止 / 重试，失败原因直接显示在日志区。 */
+/** 启动 / 停止 / 重试，结果与失败原因直接显示在模块页反馈区。 */
 async function handleStartStop(
   moduleId: string,
   action: "start" | "stop" | "restart",
 ): Promise<void> {
   const m = state.modules.get(moduleId);
   if (!m) return;
+  const name = m.name;
 
   try {
     if (action === "stop") {
-      await stopModule(moduleId);
+      const view = await stopModule(moduleId);
+      opMsg(`已停止：${name}（${view.run}）`);
     } else {
       if (action === "restart") {
         await stopModule(moduleId).catch(() => undefined);
       }
-      await startModule(moduleId);
+      opMsg(`正在启动 ${name}…（等待健康检查）`);
+      const view = await startModule(moduleId);
+      if (view.run === "running") {
+        const pid = view.pid ? `（PID ${view.pid}）` : "";
+        opMsg(`✅ 启动成功：${name}${pid} · 状态 ${view.run}`);
+      } else if (view.run === "failed") {
+        opMsg(`❌ 启动失败：${name} — ${view.last_error ?? "未知原因"}`);
+      } else {
+        opMsg(`启动中：${name} · 状态 ${view.run}`);
+      }
     }
   } catch (error) {
     // 启动失败必须说清原因：未安装 / 已停用 / 健康检查失败 / 工作目录越界
-    el.planLog.hidden = false;
-    el.planLog.textContent = `启动「${m.name}」失败：${describeError(error)}`;
+    opMsg(`❌ 启动「${name}」失败：${describeError(error)}`);
   }
 
   await loadModuleStates();
@@ -1117,6 +1197,67 @@ document.querySelectorAll(".tab").forEach((tab) => {
 });
 
 /* ------------------------------------------------------------------ */
+/* 本地模块登记开关（隐藏入口开启，本次会话内生效）                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 本地模块登记会读取用户指定的任意目录并登记为可执行模块，
+ * 因此做成隐藏入口而非开关按钮：连续点击标题多次是低发现率、无歧义的意图表达。
+ * 本段不向用户展示任何提示文案。
+ */
+const DEV_MODE_CLICK_TARGET = 5;
+let devModeClicks = 0;
+let devModeClickTimer: number | null = null;
+
+function renderDevMode(): void {
+  // 登记区块仅开启后显示，未开启时完全不可见。
+  const panel = document.getElementById("local-module-panel");
+  if (panel) panel.hidden = !state.devMode;
+}
+
+/** 从 Rust 读取登记开关状态（浏览器模式下保持关闭）。 */
+async function loadDevMode(): Promise<void> {
+  try {
+    const info = await devModeStatus();
+    state.devMode = info.enabled;
+  } catch {
+    state.devMode = false;
+  }
+  renderDevMode();
+}
+
+/** 开启本地模块登记并刷新 UI。 */
+async function handleEnableDevMode(): Promise<void> {
+  if (!isDesktop()) return;
+  try {
+    const info = await enableDevMode();
+    state.devMode = info.enabled;
+    renderDevMode();
+  } catch {
+    // 静默失败：隐藏入口本就要求不打扰普通用户
+  }
+}
+
+/** 标题隐藏入口：在限定时间内连续点击达到阈值即触发。 */
+function wireDevModeEntry(): void {
+  const title = document.getElementById("brand-title");
+  if (!title) return;
+  title.addEventListener("click", () => {
+    devModeClicks += 1;
+    if (devModeClickTimer !== null) {
+      window.clearTimeout(devModeClickTimer);
+    }
+    devModeClickTimer = window.setTimeout(() => {
+      devModeClicks = 0;
+    }, 2000);
+    if (devModeClicks >= DEV_MODE_CLICK_TARGET) {
+      devModeClicks = 0;
+      void handleEnableDevMode();
+    }
+  });
+}
+
+/* ------------------------------------------------------------------ */
 /* 启动                                                                */
 /* ------------------------------------------------------------------ */
 
@@ -1125,6 +1266,8 @@ async function boot(): Promise<void> {
   await loadBundles();
   await loadModuleStates();
   await loadTrustInfo();
+  loadDevMode();
+  wireDevModeEntry();
   renderModules();
   renderBundles();
   renderEnv();

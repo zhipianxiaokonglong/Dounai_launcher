@@ -99,6 +99,61 @@ fn scan_finds_manifest_dirs_one_level_deep() {
 }
 
 #[test]
+fn scan_recurses_into_nested_repo_layout() {
+    // 用户常把模块 clone 在 `repo/modules/xxx` 多级结构里，必须递归才能扫到。
+    let root = tmp_root("scan-deep");
+    let all = root.join("all");
+    write_manifest(
+        &all.join("modules").join("mod-x"),
+        "mod-x",
+        "echo x",
+        "core",
+    );
+    write_manifest(
+        &all.join("tools").join("nested").join("mod-y"),
+        "mod-y",
+        "echo y",
+        "optional",
+    );
+
+    let st = state(&root.join("appdata"), TrustPolicy::permissive());
+    let found = scan_local_modules_inner(&st, all.to_str().unwrap()).unwrap();
+
+    let ids: Vec<&str> = found.iter().map(|c| c.module_id.as_str()).collect();
+    assert_eq!(ids, vec!["mod-x", "mod-y"], "递归应找到嵌套模块");
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn scan_skips_huge_build_dirs_and_does_not_drill_into_modules() {
+    // 模块仓库里常有大到爆炸的构建/依赖目录（node_modules / target / .venv…）。
+    // 它们不能当模块，也不该递归进去（会把预算吃光、漏掉后续目录）。
+    let root = tmp_root("scan-skips");
+    let workspace = root.join("workspace");
+    let dounai = workspace.join("Dounai");
+    write_manifest(&dounai, "mod-dounai", "echo d", "core");
+    // 巨型目录：模拟 node_modules 里有上千个子目录
+    for i in 0..1200 {
+        std::fs::create_dir_all(dounai.join("node_modules").join(format!("pkg{i:04}"))).unwrap();
+    }
+    // 另一个模块在巨型目录之后（预算不该被 Dounai 吃光）
+    write_manifest(&workspace.join("OmniNexus"), "mod-omni", "echo o", "core");
+
+    let st = state(&root.join("appdata"), TrustPolicy::permissive());
+    let found = scan_local_modules_inner(&st, workspace.to_str().unwrap()).unwrap();
+
+    let ids: Vec<&str> = found.iter().map(|c| c.module_id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["mod-dounai", "mod-omni"],
+        "应找到全部模块：巨型目录被跳过、模块目录不下钻、预算未耗尽"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
 fn scan_rejects_missing_directory() {
     let root = tmp_root("scan-missing");
     let st = state(&root.join("appdata"), TrustPolicy::permissive());
@@ -149,18 +204,55 @@ fn add_rejects_directory_without_manifest() {
 }
 
 #[test]
-fn add_rejects_unsigned_under_strict_policy() {
+fn add_skips_signature_under_strict_policy() {
     let root = tmp_root("strict");
     let mod_dir = root.join("external").join("un-signed");
     write_manifest(&mod_dir, "un-signed", "echo hi", "optional");
 
-    // 严格策略 + 无可信公钥 → 未签名必须被拒
+    // 本地模块是开发者功能：用户显式登记的本地目录，跳过签名校验。
+    // 即便严格策略 + 无可信公钥，也不应拒绝——信任由登记的用户负责。
     let st = state(
         &root.join("appdata"),
         TrustPolicy::strict(vec!["Zm9v".into()]),
     );
-    let err = add_local_module_inner(&st, mod_dir.to_str().unwrap()).unwrap_err();
-    assert!(err.contains("未签名"), "实际：{err}");
+    let view = add_local_module_inner(&st, mod_dir.to_str().unwrap()).unwrap();
+    assert_eq!(view.module_id, "un-signed");
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn add_rejects_unsigned_under_strict_policy_via_install_path() {
+    // 对照：受管 zip 安装链路仍受信任策略约束——签名校验只对
+    // 「远程/zip 安装」保留，本地登记通道不适用。见 precheck_install 测试。
+    let root = tmp_root("managed");
+    let st = state(
+        &root.join("appdata"),
+        TrustPolicy::strict(vec!["Zm9v".into()]),
+    );
+    let manifest = json!({
+        "module_id": "x",
+        "version": "1.0.0",
+        "signature": { "algo": "SHA-256 + Ed25519", "value": "" }
+    });
+    let err = dounai_launcher::trust::evaluate(&manifest, st.trust_policy()).unwrap_err();
+    assert_eq!(err, dounai_launcher::trust::TrustError::Unsigned);
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn dev_mode_gate_blocks_local_commands() {
+    // 开发者模式是本地登记命令的前置门：未开启时直接拒绝。
+    let root = tmp_root("devgate");
+    let st = state(&root.join("appdata"), TrustPolicy::permissive());
+
+    let err = dounai_launcher::commands::require_dev_mode(&st).unwrap_err();
+    assert!(err.contains("未开启"), "应提示未开启：{err}");
+
+    // 开启后放行
+    st.enable_dev_mode();
+    assert!(dounai_launcher::commands::require_dev_mode(&st).is_ok());
 
     std::fs::remove_dir_all(&root).ok();
 }

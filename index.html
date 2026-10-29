@@ -11,7 +11,7 @@
       <header class="topbar">
         <div class="topbar__brand">
           <span class="topbar__logo">◈</span>
-          <span class="topbar__title">Dounai 启动器</span>
+          <span class="topbar__title" id="brand-title">Dounai 启动器</span>
         </div>
         <div class="topbar__actions">
           <button id="btn-refresh" class="btn btn--ghost" title="重新检测环境">检测环境</button>
@@ -28,8 +28,9 @@
       <main class="content">
         <!-- 模块管理：ComfyUI Manager 式卡片 -->
         <section id="panel-modules" class="panel">
-          <!-- 手动添加本地模块：给"已经 clone 到本地但启动器看不见"的情况用 -->
-          <div class="plan" style="margin:0 0 14px">
+          <!-- 手动添加本地模块：给"已经 clone 到本地但启动器看不见"的情况用。
+               默认隐藏，需通过隐藏入口开启。 -->
+          <div id="local-module-panel" class="plan" style="margin:0 0 14px" hidden>
             <h3 class="plan__title">手动添加本地模块</h3>
             <p class="card__desc" style="margin:0 0 10px">
               已经用 git clone 或手工下载把模块放到本地？填目录路径即可登记。
@@ -58,6 +59,8 @@
               <span>只看缺失依赖</span>
             </label>
           </div>
+          <!-- 启停 / 批量登记等操作的即时反馈（对用户可见，而不是藏进套装页） -->
+          <pre id="op-msg" class="log" hidden></pre>
           <div id="module-grid" class="grid"></div>
           <p id="modules-empty" class="empty" hidden>没有匹配的模块。</p>
         </section>

@@ -196,6 +196,18 @@ export async function addLocalModule(path: string): Promise<ModuleView> {
   return call<ModuleView>("add_local_module", { request: { path } });
 }
 
+/** 批量登记本地模块（一次登记多个，逐个汇报成败）。 */
+export interface BulkAddResult {
+  module_id: string;
+  path: string;
+  ok: boolean;
+  error: string | null;
+}
+
+export async function addLocalModulesBulk(paths: string[]): Promise<BulkAddResult[]> {
+  return call<BulkAddResult[]>("add_local_modules_bulk", { request: { paths } });
+}
+
 /** 解除本地模块登记（不删除文件）。 */
 export async function removeLocalModule(moduleId: string): Promise<void> {
   await call("remove_local_module", { moduleId });
@@ -252,6 +264,24 @@ export async function downloadPackage(req: {
 /** 查询当前信任策略（UI 用它提示"未签名模块能否安装"）。 */
 export async function trustInfo(): Promise<TrustInfo> {
   return call<TrustInfo>("trust_info");
+}
+
+/* ------------------------------------------------------------------ */
+/* 开发者模式（隐藏入口开启）                                          */
+/* ------------------------------------------------------------------ */
+
+export interface DevModeInfo {
+  enabled: boolean;
+}
+
+/** 查询开发者模式是否已开启。 */
+export async function devModeStatus(): Promise<DevModeInfo> {
+  return call<DevModeInfo>("dev_mode_status");
+}
+
+/** 开启开发者模式（只进不退，本次会话内生效）。 */
+export async function enableDevMode(): Promise<DevModeInfo> {
+  return call<DevModeInfo>("enable_dev_mode");
 }
 
 /* ------------------------------------------------------------------ */
