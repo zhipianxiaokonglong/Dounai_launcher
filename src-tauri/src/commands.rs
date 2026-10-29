@@ -31,12 +31,6 @@ pub struct AppState {
     trust: TrustPolicy,
     /// 进程表：管理由启动器拉起的子进程（内存态，不持久化）
     processes: ProcessManager,
-    /// 开发者模式：通过隐藏入口（连续点击标题）开启。
-    ///
-    /// 开启后可用「本地模块登记」（scan/add/remove），且该通道跳过签名校验——
-    /// 语义是「用户显式指定的本地目录，信任由用户自己负责」。
-    /// 仅内存态，重启即恢复关闭。
-    dev_mode: Mutex<bool>,
 }
 
 impl AppState {
@@ -62,7 +56,6 @@ impl AppState {
             allowlist,
             trust,
             processes: ProcessManager::default(),
-            dev_mode: Mutex::new(false),
         })
     }
 
@@ -702,7 +695,6 @@ pub fn scan_local_modules(
     state: State<AppState>,
     root: String,
 ) -> Result<Vec<ScanCandidate>, String> {
-    require_dev_mode(&state)?;
     scan_local_modules_inner(&state, &root)
 }
 
@@ -869,8 +861,7 @@ pub struct AddLocalModuleRequest {
 /// 这是刻意取舍——用户 clone 的是自己的仓库，模型目录可能有几十 GB，
 /// 复制一份既浪费空间，也会让"改了源码但要重新导入"变成日常困扰。
 ///
-/// **开发者功能**：必须先通过隐藏入口（连续点击标题 5 次）开启开发者模式，
-/// 否则 `require_dev_mode` 会拒绝。此通道**跳过签名校验**（见 inner 内注释）。
+/// 签名按信任策略校验（见 inner 内注释），与受管 zip 安装一致。
 ///
 /// 安全边界：
 /// - 必须是用户显式指定的目录（不是被诱骗填 URL / 任意路径）；
@@ -882,7 +873,6 @@ pub fn add_local_module(
     state: State<AppState>,
     request: AddLocalModuleRequest,
 ) -> Result<ModuleView, String> {
-    require_dev_mode(&state)?;
     add_local_module_inner(&state, &request.path)
 }
 
@@ -937,12 +927,14 @@ pub fn add_local_module_inner(state: &AppState, raw_path: &str) -> Result<Module
         return Err(format!("manifest 的 module_id 不合法：{module_id}"));
     }
 
-    // 开发者模式语义：用户显式指定的本地目录，信任由用户负责。
-    // 这里**不做签名校验**（与受管 zip 安装不同）——本地模块是开发者
-    // 自己 clone / 写的代码，强制签名只会挡住合法用法；
-    // 该能力本身已由 require_dev_mode 门收敛到开发者模式内。
-    // 剩余防线保留：manifest 必须存在且 module_id 合法（上方校验）、
-    // working_dir 仍被限制在模块根内、卸载只解除登记不删文件。
+    // 签名：与受管 zip 安装同一套信任策略。
+    //
+    // 为什么不能"本地目录就免检"：manifest 决定启动什么命令、开哪些权限，
+    // 一个被篡改的 manifest 可以把恶意命令伪装成正常模块。用户选择目录
+    // 只说明"这些文件是我放的"，不说明"这份 manifest 没被改过"。
+    // 调试构建允许未签名（便于开发），发布构建必须验签通过。
+    let _verdict = crate::trust::evaluate(&manifest, state.trust_policy())
+        .map_err(|e| format!("拒绝添加：{e}"))?;
 
     let category = manifest
         .get("category")
@@ -987,7 +979,6 @@ pub fn add_local_module_inner(state: &AppState, raw_path: &str) -> Result<Module
 /// 解除本地模块登记（不删除文件）。
 #[tauri::command]
 pub fn remove_local_module(state: State<AppState>, module_id: String) -> Result<(), String> {
-    require_dev_mode(&state)?;
     remove_local_module_inner(&state, &module_id)
 }
 
@@ -1033,18 +1024,21 @@ pub struct BulkAddLocalModulesRequest {
 
 /// 一次登记多个本地目录（配合扫描结果使用，避免逐个手动添加）。
 ///
-/// 语义与单条 `add_local_module` 完全一致（跳过签名、只登记路径、不复制文件），
+/// 语义与单条 `add_local_module` 完全一致（同样验签、只登记路径、不复制文件），
 /// 只是循环执行并**逐条汇报成败**——一个失败不影响其余。
-/// 同样受开发者模式门限制。
 #[tauri::command]
 pub fn add_local_modules_bulk(
     state: State<AppState>,
     request: BulkAddLocalModulesRequest,
 ) -> Result<Vec<BulkAddResult>, String> {
-    require_dev_mode(&state)?;
-    let mut results = Vec::with_capacity(request.paths.len());
-    for p in &request.paths {
-        match add_local_module_inner(&state, p) {
+    Ok(add_local_modules_bulk_inner(&state, &request.paths))
+}
+
+/// 批量登记的实际实现（与 Tauri 解耦，便于测试"单个失败不影响其余"）。
+pub fn add_local_modules_bulk_inner(state: &AppState, paths: &[String]) -> Vec<BulkAddResult> {
+    let mut results = Vec::with_capacity(paths.len());
+    for p in paths {
+        match add_local_module_inner(state, p) {
             Ok(view) => results.push(BulkAddResult {
                 module_id: view.module_id,
                 path: view.path,
@@ -1059,7 +1053,7 @@ pub fn add_local_modules_bulk(
             }),
         }
     }
-    Ok(results)
+    results
 }
 
 /* ------------------------------------------------------------------ */
@@ -1268,62 +1262,6 @@ pub fn trust_info(state: State<AppState>) -> TrustInfo {
     }
 }
 
-/* ------------------------------------------------------------------ */
-/* 开发者模式（隐藏入口开启）                                          */
-/* ------------------------------------------------------------------ */
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DevModeInfo {
-    pub enabled: bool,
-}
-
-impl AppState {
-    /// 读取开发者模式状态。
-    pub fn dev_mode(&self) -> bool {
-        match self.dev_mode.lock() {
-            Ok(guard) => *guard,
-            // 锁中毒时按最保守处理：视为未开启
-            Err(_) => false,
-        }
-    }
-
-    /// 开启开发者模式（只进不退，本次会话内生效）。
-    pub fn enable_dev_mode(&self) -> bool {
-        if let Ok(mut guard) = self.dev_mode.lock() {
-            *guard = true;
-        }
-        true
-    }
-}
-
-#[tauri::command]
-pub fn dev_mode_status(state: State<AppState>) -> DevModeInfo {
-    DevModeInfo {
-        enabled: state.dev_mode(),
-    }
-}
-
-#[tauri::command]
-pub fn enable_dev_mode(state: State<AppState>) -> DevModeInfo {
-    state.enable_dev_mode();
-    DevModeInfo { enabled: true }
-}
-
-/// 本地模块登记类命令的前置门：未开启开发者模式时一律拒绝。
-///
-/// 为什么需要这道门：`scan/add/remove local` 会读取用户指定的任意目录、
-/// 并把其中内容登记为可执行模块。在普通用户手里这是一个有风险的能力
-/// （被诱骗登记恶意目录 = 让启动器执行其中的代码），因此收进开发者模式，
-/// 由用户通过隐藏入口显式打开。
-pub fn require_dev_mode(state: &AppState) -> Result<(), String> {
-    if state.dev_mode() {
-        Ok(())
-    } else {
-        Err("本地模块登记未开启。".to_string())
-    }
-}
-
-/* ------------------------------------------------------------------ */
 /* 工具                                                                */
 /* ------------------------------------------------------------------ */
 

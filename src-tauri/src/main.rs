@@ -78,8 +78,6 @@ fn main() {
             dounai_launcher::commands::add_local_module,
             dounai_launcher::commands::add_local_modules_bulk,
             dounai_launcher::commands::remove_local_module,
-            dounai_launcher::commands::dev_mode_status,
-            dounai_launcher::commands::enable_dev_mode,
             dounai_launcher::env_probe::probe_environment,
         ])
         .run(tauri::generate_context!())

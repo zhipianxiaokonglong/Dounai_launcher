@@ -30,8 +30,6 @@ import {
   startAll,
   stopAll,
   trustInfo,
-  devModeStatus,
-  enableDevMode,
   BridgeUnavailableError,
   type ModuleView,
   type RustEnvReport,
@@ -91,9 +89,7 @@ const state = {
   envReport: null as RustEnvReport | null,
   /** 信任策略（发布版 fail-closed 时用于提示） */
   trust: null as TrustInfo | null,
-  /** 开发者模式（隐藏入口开启，本次会话内生效） */
-  devMode: false,
-  /** 最近一次扫描出的本地模块候选 */
+    /** 最近一次扫描出的本地模块候选 */
   scanCandidates: [] as Array<{ path: string; name: string; module_id: string }>,
 };
 
@@ -524,6 +520,32 @@ async function handleBulkAddLocal(): Promise<void> {
   }
 }
 
+/**
+ * 首次使用本地模块登记时的风险确认（只提示一次，本次会话内记住）。
+ *
+ * 为什么不在界面上永久挂一条警告：常驻警告会被读成"背景噪音"而忽略；
+ * 在真正要用的那一次拦住、说清楚后果，才更可能被读到。
+ */
+let localRiskAcknowledged = false;
+
+function confirmLocalRiskOnce(): boolean {
+  if (localRiskAcknowledged) return true;
+  const ok = confirm(
+    [
+      "即将添加本地模块，请先确认你了解这些：",
+      "",
+      "1. 启动器会执行该目录里 manifest 声明的命令——等同于运行你提供的程序；",
+      "2. 只添加你自己 clone、或从可信来源下载的目录，不要添加来路不明的包；",
+      "3. manifest 会按当前签名策略校验：",
+      "   · 发布版（安全模式）拒绝未签名模块；",
+      "   · 调试版允许未签名（环境页可查当前策略）；",
+      "4. 登记不会复制文件，卸载也不会删除你的文件。",
+    ].join("\n"),
+  );
+  if (ok) localRiskAcknowledged = true;
+  return ok;
+}
+
 /** 添加本地模块。 */
 async function handleAddLocal(): Promise<void> {
   const path = localPathValue();
@@ -533,6 +555,11 @@ async function handleAddLocal(): Promise<void> {
   }
   if (!isDesktop()) {
     localMsg("需要桌面端才能添加本地模块。");
+    return;
+  }
+  // 首次添加时确认风险：登记等于允许启动器执行该目录里的代码
+  if (!confirmLocalRiskOnce()) {
+    localMsg("已取消添加。");
     return;
   }
 
@@ -1197,67 +1224,6 @@ document.querySelectorAll(".tab").forEach((tab) => {
 });
 
 /* ------------------------------------------------------------------ */
-/* 本地模块登记开关（隐藏入口开启，本次会话内生效）                    */
-/* ------------------------------------------------------------------ */
-
-/**
- * 本地模块登记会读取用户指定的任意目录并登记为可执行模块，
- * 因此做成隐藏入口而非开关按钮：连续点击标题多次是低发现率、无歧义的意图表达。
- * 本段不向用户展示任何提示文案。
- */
-const DEV_MODE_CLICK_TARGET = 5;
-let devModeClicks = 0;
-let devModeClickTimer: number | null = null;
-
-function renderDevMode(): void {
-  // 登记区块仅开启后显示，未开启时完全不可见。
-  const panel = document.getElementById("local-module-panel");
-  if (panel) panel.hidden = !state.devMode;
-}
-
-/** 从 Rust 读取登记开关状态（浏览器模式下保持关闭）。 */
-async function loadDevMode(): Promise<void> {
-  try {
-    const info = await devModeStatus();
-    state.devMode = info.enabled;
-  } catch {
-    state.devMode = false;
-  }
-  renderDevMode();
-}
-
-/** 开启本地模块登记并刷新 UI。 */
-async function handleEnableDevMode(): Promise<void> {
-  if (!isDesktop()) return;
-  try {
-    const info = await enableDevMode();
-    state.devMode = info.enabled;
-    renderDevMode();
-  } catch {
-    // 静默失败：隐藏入口本就要求不打扰普通用户
-  }
-}
-
-/** 标题隐藏入口：在限定时间内连续点击达到阈值即触发。 */
-function wireDevModeEntry(): void {
-  const title = document.getElementById("brand-title");
-  if (!title) return;
-  title.addEventListener("click", () => {
-    devModeClicks += 1;
-    if (devModeClickTimer !== null) {
-      window.clearTimeout(devModeClickTimer);
-    }
-    devModeClickTimer = window.setTimeout(() => {
-      devModeClicks = 0;
-    }, 2000);
-    if (devModeClicks >= DEV_MODE_CLICK_TARGET) {
-      devModeClicks = 0;
-      void handleEnableDevMode();
-    }
-  });
-}
-
-/* ------------------------------------------------------------------ */
 /* 启动                                                                */
 /* ------------------------------------------------------------------ */
 
@@ -1266,8 +1232,6 @@ async function boot(): Promise<void> {
   await loadBundles();
   await loadModuleStates();
   await loadTrustInfo();
-  loadDevMode();
-  wireDevModeEntry();
   renderModules();
   renderBundles();
   renderEnv();
