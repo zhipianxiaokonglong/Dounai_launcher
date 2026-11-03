@@ -324,6 +324,17 @@ export interface VendorProvider {
   /** 其中已由启动器保存的 */
   saved: string[];
   privacy: string;
+  /** 上游没说清缺哪个变量：UI 应给出手动填写变量名的入口 */
+  manual_env: boolean;
+}
+
+export interface VersionCheck {
+  /** manifest 里手写的版本 */
+  manifest: string;
+  /** 从上游 pyproject/Cargo.toml 读到的版本（读不到为 null） */
+  upstream: string | null;
+  /** 两者是否一致 */
+  consistent: boolean;
 }
 
 export interface VendorLayer {
@@ -333,6 +344,12 @@ export interface VendorLayer {
   running: boolean;
   providers: VendorProvider[];
   error: string | null;
+  /** manifest 版本与上游版本比对（L-04） */
+  version_check: VersionCheck | null;
+  /** 共享区变量名（对所有层生效，L-03） */
+  shared_keys: string[];
+  /** 密钥库是否为 DPAPI 加密存储（L-02） */
+  encrypted_store: boolean;
 }
 
 /** 读取三层厂商状态（不含任何密钥值）。 */
@@ -345,9 +362,10 @@ export async function setVendorKey(
   moduleId: string,
   envName: string,
   value: string,
+  shared = false,
 ): Promise<VendorLayer[]> {
   return call<VendorLayer[]>("set_vendor_key", {
-    request: { module_id: moduleId, env_name: envName, value },
+    request: { module_id: moduleId, env_name: envName, value, shared },
   });
 }
 

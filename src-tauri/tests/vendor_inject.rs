@@ -80,6 +80,7 @@ fn saved_key_is_injected_into_entry_env() {
             module_id: "moodvoice".to_string(),
             env_name: "OPENAI_API_KEY".to_string(),
             value: "sk-integration-test".to_string(),
+            shared: false,
         },
     )
     .unwrap();
@@ -143,6 +144,7 @@ fn manifest_env_does_not_override_saved_key() {
             module_id: "omninexus".to_string(),
             env_name: "OPENAI_API_KEY".to_string(),
             value: "from-launcher".to_string(),
+            shared: false,
         },
     )
     .unwrap();
@@ -173,6 +175,7 @@ fn overview_never_contains_secret_values() {
             module_id: "dounai-input".to_string(),
             env_name: "DASHSCOPE_API_KEY".to_string(),
             value: secret.to_string(),
+            shared: false,
         },
     )
     .unwrap();
@@ -228,6 +231,7 @@ fn key_reaches_child_process_env() {
             module_id: "moodvoice".to_string(),
             env_name: "OPENAI_API_KEY".to_string(),
             value: "sk-child-check-777".to_string(),
+            shared: false,
         },
     )
     .unwrap();
@@ -266,6 +270,7 @@ fn store_file_lives_under_data_root() {
             module_id: "omninexus".to_string(),
             env_name: "ANTHROPIC_API_KEY".to_string(),
             value: "sk-ant-xyz".to_string(),
+            shared: false,
         },
     )
     .unwrap();

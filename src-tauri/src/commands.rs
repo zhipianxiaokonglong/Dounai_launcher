@@ -1140,6 +1140,11 @@ pub struct SetVendorKeyRequest {
     /// 环境变量名，如 DASHSCOPE_API_KEY
     pub env_name: String,
     pub value: String,
+    /// true 表示写入**共享区**（对所有层生效，L-03）。
+    ///
+    /// `OPENAI_API_KEY` 这类变量三层读同一个名字，填三遍既多余也容易漏。
+    #[serde(default)]
+    pub shared: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1177,12 +1182,33 @@ pub fn vendor_overview_inner(state: &AppState) -> Vec<crate::vendor_keys::LayerV
             running: false,
             providers: Vec::new(),
             error: None,
+            version_check: None,
+            shared_keys: state
+                .vendors
+                .lock()
+                .map(|v| v.shared_names())
+                .unwrap_or_default(),
+            encrypted_store: state
+                .vendors
+                .lock()
+                .map(|v| v.is_encrypted())
+                .unwrap_or(false),
         };
 
         if !installed {
             view.error = Some("尚未安装/登记该层模块".to_string());
             out.push(view);
             continue;
+        }
+
+        // L-04：比对 manifest 手写版本与上游声明版本。
+        // 只做提示，不阻塞——手写版本可能是有意的（例如本地开发）。
+        if let Ok(root) = state.module_root(spec.module_id) {
+            let manifest_version = crate::vendor_keys::read_module_manifest_version(&root);
+            if !manifest_version.is_empty() {
+                view.version_check =
+                    Some(crate::vendor_keys::check_version(&manifest_version, &root));
+            }
         }
 
         // 从 manifest 的健康地址推出服务根，再拼各层的清单路径
@@ -1254,7 +1280,11 @@ pub fn set_vendor_key(
 
 pub fn set_vendor_key_inner(state: &AppState, request: &SetVendorKeyRequest) -> Result<(), String> {
     let mut store = state.vendors.lock().map_err(|_| "密钥库锁不可用")?;
-    store.set(&request.module_id, &request.env_name, &request.value)
+    if request.shared {
+        store.set_shared(&request.env_name, &request.value)
+    } else {
+        store.set(&request.module_id, &request.env_name, &request.value)
+    }
 }
 
 /// 清除一个厂商密钥并返回最新总览。

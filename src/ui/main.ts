@@ -56,6 +56,8 @@ interface El {
   planLog: HTMLElement;
   btnExecute: HTMLButtonElement;
   btnCancel: HTMLButtonElement;
+  /** 在线安装可用性说明（L-01） */
+  executeHint: HTMLElement;
   envBody: HTMLElement;
   btnRefresh: HTMLButtonElement;
 }
@@ -82,6 +84,7 @@ const el: El = {
   btnCancel: must("btn-cancel"),
   envBody: must("env-body"),
   btnRefresh: must("btn-refresh"),
+  executeHint: must("execute-hint"),
 };
 
 const state = {
@@ -125,6 +128,7 @@ async function probeEnvironment(): Promise<void> {
     state.envReport = null;
     renderEnv();
     renderModules();
+  renderExecuteAvailability();
     return;
   }
 
@@ -850,8 +854,45 @@ function recomputePlan(): void {
     el.planRecos.appendChild(note);
   }
 
-  el.btnExecute.disabled = plan.requiresConsent;
-  el.btnExecute.textContent = plan.requiresConsent ? "需显式确认后安装" : "开始安装";
+  // 在线安装是否可用由 onlineInstallBlockers 决定（L-01），
+  // 这里只补充"需要显式确认"这一种状态
+  renderExecuteAvailability();
+  if (plan.requiresConsent && onlineInstallBlockers().length === 0) {
+    el.btnExecute.textContent = "需显式确认后安装";
+  } else {
+    el.btnExecute.textContent = "开始安装";
+  }
+}
+
+/**
+ * 在线安装被哪些条件阻塞（L-01）。
+ *
+ * 三样缺一不可：可信签名公钥、可访问的下载源、非空出网白名单。
+ * 这里集中判定，UI 才能**提前**置灰，而不是等用户点完才报错。
+ */
+function onlineInstallBlockers(): string[] {
+  const t = state.trust;
+  const blockers: string[] = [];
+
+  // 未配置公钥且不放行未签名 → 发布版必然拒绝安装
+  if (t && t.trusted_keys === 0 && !t.allow_unsigned) {
+    blockers.push("未配置签名公钥（未签名模块会被拒绝安装）");
+  }
+  // 下载源：当前版本没有随包发布的源地址
+  blockers.push("未配置模块下载源（无软件源）");
+
+  return blockers;
+}
+
+/** 把阻塞原因写成一句可读的说明，并同步按钮状态。 */
+function renderExecuteAvailability(): void {
+  const blockers = onlineInstallBlockers();
+  const available = blockers.length === 0;
+
+  el.btnExecute.disabled = !available || Boolean(state.plan?.requiresConsent);
+  el.executeHint.textContent = available
+    ? ""
+    : `当前无法在线安装：${blockers.join("；")}。请改用下方「从本地文件安装」，或用模块页的本地登记。`;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1148,13 +1189,29 @@ document
   .getElementById("btn-vendor-refresh")
   ?.addEventListener("click", () => void loadVendors());
 document.getElementById("vendor-layers")?.addEventListener("click", (event) => {
+  // 手动填变量名（L-05）：上游没给变量名时的兜底路径
+  const manualNode = (event.target as HTMLElement).closest("[data-vk-save-manual]");
+  if (manualNode) {
+    const layer = manualNode.getAttribute("data-layer") ?? "";
+    const nameInput = document.getElementById(
+      manualNode.getAttribute("data-name-input") ?? "",
+    ) as HTMLInputElement | null;
+    const valueInput = document.getElementById(
+      manualNode.getAttribute("data-value-input") ?? "",
+    ) as HTMLInputElement | null;
+    void handleSaveVendorKeyManual(layer, nameInput, valueInput);
+    return;
+  }
+
   const node = (event.target as HTMLElement).closest("[data-vk-save], [data-vk-clear]");
   if (!node) return;
   const layer = node.getAttribute("data-layer") ?? "";
   const env = node.getAttribute("data-env") ?? "";
   if (node.hasAttribute("data-vk-save")) {
     const inputId = node.getAttribute("data-input") ?? "";
-    void handleSaveVendorKey(layer, env, inputId);
+    const sharedId = node.getAttribute("data-shared-input") ?? "";
+    const sharedBox = document.getElementById(sharedId) as HTMLInputElement | null;
+    void handleSaveVendorKey(layer, env, inputId, sharedBox?.checked ?? false);
   } else {
     void handleClearVendorKey(layer, env);
   }
@@ -1170,6 +1227,26 @@ el.btnCancel.addEventListener("click", () => {
 el.btnExecute.addEventListener("click", () => {
   if (!state.plan) return;
   el.planLog.hidden = false;
+
+  // 双保险：即使按钮被启用，也不让用户走到"点了才失败"
+  const blocked = onlineInstallBlockers();
+  if (blocked.length > 0) {
+    el.planLog.textContent = [
+      `安装计划「${state.plan.bundleName}」（共 ${state.plan.steps.length} 项）`,
+      "",
+      "当前版本无法在线安装，原因：",
+      ...blocked.map((b) => `  · ${b}`),
+      "",
+      "可用替代路径（都能跑通）：",
+      "  1. 套装页底部「从本地文件安装」——本地 zip，会先算哈希再装；",
+      "  2. 模块页「手动添加本地模块」——登记已 clone 的目录；",
+      "",
+      "说明：在线安装链路本身已就绪（下载/哈希/验签/防穿越解压/原子替换/状态记录），",
+      "缺的只是可访问的软件源与发布公钥，不是代码能力。",
+      "设计上刻意不放开空白名单——宁可装不上，也不装来路不明的模块。",
+    ].join("\n");
+    return;
+  }
 
   // 安装需要三样东西，缺一不可。这里逐条列出真实状态，
   // 而不是笼统说"尚未实现"——用户需要知道具体卡在哪。
@@ -1311,10 +1388,20 @@ function renderVendors(): void {
   const hint = document.getElementById("vendor-hint");
   if (hint) {
     const ready = state.vendorLayers.filter((l) => l.running).length;
-    hint.textContent =
+    const encrypted = state.vendorLayers[0]?.encrypted_store;
+    const sharedCount = state.vendorLayers[0]?.shared_keys.length ?? 0;
+    const parts = [
       state.vendorLayers.length === 0
         ? "尚未读取"
-        : `${ready}/${state.vendorLayers.length} 层正在运行（只有运行中的层才能读到厂商清单）`;
+        : `${ready}/${state.vendorLayers.length} 层正在运行`,
+      encrypted === undefined
+        ? ""
+        : encrypted
+          ? "密钥库已加密（DPAPI，仅当前用户可解）"
+          : "密钥库为明文存储（当前平台无 DPAPI）",
+      sharedCount > 0 ? `${sharedCount} 个共享变量对所有层生效` : "",
+    ];
+    hint.textContent = parts.filter(Boolean).join(" · ");
   }
 
   if (state.vendorLayers.length === 0) {
@@ -1324,13 +1411,27 @@ function renderVendors(): void {
 
   box.innerHTML = state.vendorLayers
     .map((layer) => {
+      // L-04：manifest 手写版本与上游声明版本不一致时给一个醒目提示。
+      // 只提示不阻塞——手写版本可能是有意的（例如本地开发改过 pyproject）。
+      const vc = layer.version_check;
+      const versionBadge =
+        vc && vc.upstream && !vc.consistent
+          ? `<span class="badge badge--warn" title="manifest 写 ${esc(vc.manifest)}，上游声明 ${esc(vc.upstream)}">版本不一致</span>`
+          : "";
+
       const head = `
         <div class="plan__title" style="display:flex;gap:8px;align-items:center">
           ${esc(layer.label)}
           <span class="badge badge--optional">${esc(layer.module_id)}</span>
           ${layer.installed ? '<span class="badge badge--ok">已安装</span>' : '<span class="badge badge--warn">未安装</span>'}
           ${layer.running ? '<span class="badge badge--ok">运行中</span>' : '<span class="badge badge--warn">未运行</span>'}
-        </div>`;
+          ${versionBadge}
+        </div>
+        ${
+          vc && vc.upstream && !vc.consistent
+            ? `<p class="card__desc" style="margin:6px 0 0">manifest 声明版本 <code>${esc(vc.manifest)}</code>，上游实际 <code>${esc(vc.upstream)}</code>。建议更新 manifest，否则依赖判断可能失真。</p>`
+            : ""
+        }`;
 
       if (layer.error) {
         return `<div class="plan" style="margin-bottom:12px">${head}
@@ -1351,12 +1452,18 @@ function renderVendors(): void {
                 <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
                   <code>${esc(env)}</code>
                   ${saved ? '<span class="badge badge--ok">已保存</span>' : ""}
+                  ${layer.shared_keys.includes(env) ? '<span class="badge badge--optional">共享</span>' : ""}
                   <input class="input" id="${esc(id)}" type="password" placeholder="粘贴密钥"
                          style="max-width:260px" />
+                  <label class="card__desc" style="display:inline-flex;gap:4px;align-items:center">
+                    <input type="checkbox" id="${esc(id)}-shared" />
+                    共享到所有层
+                  </label>
                   <button class="btn btn--primary" data-vk-save="1"
                           data-layer="${esc(layer.module_id)}"
                           data-env="${esc(env)}"
-                          data-input="${esc(id)}">保存</button>
+                          data-input="${esc(id)}"
+                          data-shared-input="${esc(id)}-shared">保存</button>
                   ${saved
                     ? `<button class="btn" data-vk-clear="1"
                          data-layer="${esc(layer.module_id)}"
@@ -1365,6 +1472,23 @@ function renderVendors(): void {
                 </div>`;
             })
             .join("");
+
+          // 上游没说清缺哪个变量（L-05）：给出手填入口，而不是只显示"缺配置"
+          const manualRow = p.manual_env
+            ? `<div style="margin-top:8px">
+                 <p class="card__desc" style="margin:0 0 6px">上游没有明确给出变量名，请手动填写（例如 <code>OPENAI_API_KEY</code>）：</p>
+                 <div style="display:flex;gap:8px;flex-wrap:wrap">
+                   <input class="input" id="${esc(`vkm-${layer.module_id}-${p.id}`)}" placeholder="变量名"
+                          style="max-width:220px" />
+                   <input class="input" id="${esc(`vkv-${layer.module_id}-${p.id}`)}" type="password" placeholder="密钥值"
+                          style="max-width:220px" />
+                   <button class="btn btn--primary" data-vk-save-manual="1"
+                           data-layer="${esc(layer.module_id)}"
+                           data-name-input="${esc(`vkm-${layer.module_id}-${p.id}`)}"
+                           data-value-input="${esc(`vkv-${layer.module_id}-${p.id}`)}">保存</button>
+                 </div>
+               </div>`
+            : "";
 
           return `<div style="border-top:1px solid rgba(0,0,0,.08);padding:10px 0">
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -1378,8 +1502,11 @@ function renderVendors(): void {
                 ? missing
                 : p.ready
                   ? '<p class="card__desc" style="margin:6px 0 0">无需额外配置。</p>'
-                  : '<p class="card__desc" style="margin:6px 0 0">此厂商当前不可用，但原因不是缺密钥（可能需要安装本地模型或启动本地服务）。</p>'
+                  : p.manual_env
+                    ? ""
+                    : '<p class="card__desc" style="margin:6px 0 0">此厂商当前不可用，但原因不是缺密钥（可能需要安装本地模型或启动本地服务）。</p>'
             }
+            ${manualRow}
           </div>`;
         })
         .join("");
@@ -1419,6 +1546,7 @@ async function handleSaveVendorKey(
   moduleId: string,
   envName: string,
   inputId: string,
+  shared = false,
 ): Promise<void> {
   const input = document.getElementById(inputId) as HTMLInputElement | null;
   const value = input?.value ?? "";
@@ -1427,11 +1555,13 @@ async function handleSaveVendorKey(
     return;
   }
   try {
-    state.vendorLayers = await setVendorKey(moduleId, envName, value.trim());
+    state.vendorLayers = await setVendorKey(moduleId, envName, value.trim(), shared);
     if (input) input.value = "";
     renderVendors();
     vendorMsg(
-      `已保存 ${envName}。\n\n密钥不会回显；请到「环境」页停止再启动该模块，重新启动时才会注入。`,
+      shared
+        ? `已保存 ${envName} 到共享区：所有层都会收到它（层专属键仍优先）。\n\n请重启相关模块生效。`
+        : `已保存 ${envName}。\n\n密钥不会回显；请到「环境」页停止再启动该模块，重新启动时才会注入。`,
     );
   } catch (error) {
     vendorMsg(`保存失败：${describeError(error)}`);
@@ -1447,6 +1577,33 @@ async function handleClearVendorKey(moduleId: string, envName: string): Promise<
     vendorMsg(`已清除 ${envName}。`);
   } catch (error) {
     vendorMsg(`清除失败：${describeError(error)}`);
+  }
+}
+
+/** 手动填写变量名并保存（L-05 兜底路径：上游没给变量名时）。 */
+async function handleSaveVendorKeyManual(
+  layer: string,
+  nameInput: HTMLInputElement | null,
+  valueInput: HTMLInputElement | null,
+): Promise<void> {
+  const name = (nameInput?.value ?? "").trim();
+  const value = (valueInput?.value ?? "").trim();
+  if (!name || !value) {
+    vendorMsg("请同时填写变量名与密钥值。");
+    return;
+  }
+  if (!/^[A-Z][A-Z0-9_]*$/.test(name)) {
+    vendorMsg("变量名格式不对：应以大写字母开头，只含大写字母、数字与下划线（如 OPENAI_API_KEY）。");
+    return;
+  }
+  try {
+    state.vendorLayers = await setVendorKey(layer, name, value);
+    if (nameInput) nameInput.value = "";
+    if (valueInput) valueInput.value = "";
+    renderVendors();
+    vendorMsg(`已保存 ${name}。\n\n密钥不会回显；请到「环境」页停止再启动该层模块生效。`);
+  } catch (error) {
+    vendorMsg(`保存失败：${describeError(error)}`);
   }
 }
 

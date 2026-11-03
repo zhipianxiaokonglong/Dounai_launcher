@@ -22,6 +22,8 @@
 //! - 落盘为 JSON；Unix 下收紧为 0600，Windows 依赖用户目录 ACL。
 //! - 任何错误信息与日志都不得包含密钥值。
 
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -73,6 +75,12 @@ pub struct ProviderView {
     /// 这些缺失的变量里，有几个已经由启动器保存
     pub saved: Vec<String>,
     pub privacy: String,
+    /// 上游没说清缺哪个变量（无法从文案可靠解析）：UI 应提供手动填写变量名。
+    ///
+    /// 为什么需要这个标记：输入层只给自然语言 `unavailable_reason`，
+    /// 一旦它的文案改了就解析不出变量名。**解析失败不能静默**——
+    /// 否则用户看到"缺配置"却不知道该填什么（审计 L-05）。
+    pub manual_env: bool,
 }
 
 /// 某一层的总览。
@@ -87,49 +95,145 @@ pub struct LayerView {
     pub providers: Vec<ProviderView>,
     /// 取清单失败时的原因（人话）
     pub error: Option<String>,
+    /// manifest 手写版本与上游声明版本的比对（L-04）
+    pub version_check: Option<VersionCheck>,
+    /// 共享区里的变量名（对所有层生效，L-03）
+    pub shared_keys: Vec<String>,
+    /// 密钥库当前是否为加密存储（L-02）
+    pub encrypted_store: bool,
 }
 
 /* ------------------------------------------------------------------ */
 /* 密钥存储                                                            */
 /* ------------------------------------------------------------------ */
 
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct StoreFile {
-    #[serde(default)]
+/// 落盘信封（L-02）。
+///
+/// 为什么要信封而不是直接加密整个 JSON：需要区分"密文/明文"，
+/// 并给非 Windows（无 DPAPI）留一条明确可见的降级路径。
+#[derive(Debug, Serialize, Deserialize)]
+struct Envelope {
     version: u32,
-    /// layer -> env_name -> value
+    encrypted: bool,
+    /// 密文时是 base64 串；明文时是 Payload 对象
+    payload: serde_json::Value,
+}
+
+/// 真正的密钥数据（L-03 起分「共享 + 分层」两区）。
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct Payload {
+    /// 跨层通用的变量：`env_name -> value`
+    ///
+    /// 为什么单独一区：`OPENAI_API_KEY` 这类变量三层的读取名字完全一样，
+    /// 同一把钥匙要填三遍既不必要也容易漏（L-03）。
     #[serde(default)]
-    layers: BTreeMap<String, BTreeMap<String, String>>,
+    pub shared: BTreeMap<String, String>,
+    /// 层专属变量：`layer -> env_name -> value`
+    #[serde(default)]
+    pub layers: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 /// 密钥仓库：`data_root/vendor-keys.json`。
 #[derive(Debug)]
 pub struct VendorStore {
     path: PathBuf,
-    data: StoreFile,
+    data: Payload,
+    /// 上次落盘是否真的加密了（非 Windows 或 DPAPI 失败时为 false）
+    encrypted: bool,
 }
 
 impl VendorStore {
-    /// 打开（不存在则视为空）。
+    /// 打开（不存在则视为空）。会自动迁移旧格式并升级为加密存储。
     pub fn open(data_root: &Path) -> Result<Self, String> {
         let path = data_root.join("vendor-keys.json");
-        let data = if path.exists() {
-            let text =
-                std::fs::read_to_string(&path).map_err(|e| format!("读取密钥库失败：{e}"))?;
-            if text.trim().is_empty() {
-                StoreFile::default()
-            } else {
-                serde_json::from_str(&text).map_err(|e| format!("密钥库格式损坏：{e}"))?
-            }
+        if !path.exists() {
+            return Ok(Self {
+                path,
+                data: Payload::default(),
+                encrypted: false,
+            });
+        }
+
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("读取密钥库失败：{e}"))?;
+        if text.trim().is_empty() {
+            return Ok(Self {
+                path,
+                data: Payload::default(),
+                encrypted: false,
+            });
+        }
+
+        let raw: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| format!("密钥库格式损坏：{e}"))?;
+
+        // 旧格式（v1）：顶层直接是 { version, layers }
+        if raw.get("payload").is_none() {
+            let data: Payload =
+                serde_json::from_value(raw).map_err(|e| format!("旧版密钥库无法解析：{e}"))?;
+            let mut store = Self {
+                path,
+                data,
+                encrypted: false,
+            };
+            // 迁移：立刻按新格式（加密）落盘，避免明文长期留存
+            store.save()?;
+            return Ok(Self {
+                path: store.path,
+                data: store.data,
+                encrypted: store.encrypted,
+            });
+        }
+
+        let envelope: Envelope =
+            serde_json::from_value(raw).map_err(|e| format!("密钥库信封无法解析：{e}"))?;
+
+        let data = if envelope.encrypted {
+            let ciphertext = envelope
+                .payload
+                .as_str()
+                .ok_or_else(|| "密文 payload 应为字符串".to_string())?;
+            let plain = decrypt_string(ciphertext)?;
+            serde_json::from_str(&plain).map_err(|e| format!("解密后的密钥库无法解析：{e}"))?
         } else {
-            StoreFile::default()
+            serde_json::from_value(envelope.payload)
+                .map_err(|e| format!("明文密钥库无法解析：{e}"))?
         };
-        Ok(Self { path, data })
+
+        Ok(Self {
+            path,
+            data,
+            encrypted: envelope.encrypted,
+        })
     }
 
-    fn save(&self) -> Result<(), String> {
-        let mut out = serde_json::to_vec_pretty(&self.data).map_err(|e| e.to_string())?;
+    /// 当前落盘是否为加密存储（供 UI 如实告知）。
+    pub fn is_encrypted(&self) -> bool {
+        self.encrypted
+    }
+
+    fn save(&mut self) -> Result<(), String> {
+        let plain = serde_json::to_vec(&self.data).map_err(|e| e.to_string())?;
+        let plain_str = String::from_utf8(plain).map_err(|e| e.to_string())?;
+
+        // Windows 用 DPAPI 加密；其它平台保持明文（并在 README 如实说明）
+        let (encrypted, payload) = match encrypt_string(&plain_str) {
+            Ok(cipher) => (true, serde_json::Value::String(cipher)),
+            Err(_) => (
+                false,
+                serde_json::to_value(&self.data).map_err(|e| e.to_string())?,
+            ),
+        };
+
+        // 回写内存状态：is_encrypted() 要反映**实际落盘**结果
+        self.encrypted = encrypted;
+        let envelope = Envelope {
+            version: 2,
+            encrypted,
+            payload,
+        };
+        let mut out = serde_json::to_vec_pretty(&envelope).map_err(|e| e.to_string())?;
         out.push(b'\n');
+
         // 原子写：先写临时文件再改名，避免断电留下半个文件把密钥库弄坏
         let tmp = self.path.with_extension("json.tmp");
         {
@@ -143,33 +247,30 @@ impl VendorStore {
         Ok(())
     }
 
-    /// 保存一个密钥。`env_name` 必须像环境变量名，值不得含换行。
+    /// 保存一个**层专属**密钥。
     pub fn set(&mut self, layer: &str, env_name: &str, value: &str) -> Result<(), String> {
-        let spec = layer_of(layer).ok_or_else(|| format!("未知的层：{layer}"))?;
-        let _ = spec;
-        let name = env_name.trim();
-        if !is_env_name(name) {
-            return Err(format!(
-                "环境变量名不合法：{name}（应形如 DASHSCOPE_API_KEY）"
-            ));
-        }
-        let val = value.trim();
-        if val.is_empty() {
-            return Err("密钥不能为空".to_string());
-        }
-        if val.contains('\n') || val.contains('\r') || val.contains('\0') {
-            return Err("密钥不能包含换行或空字符".to_string());
-        }
+        layer_of(layer).ok_or_else(|| format!("未知的层：{layer}"))?;
+        let name = validate_env_name(env_name)?;
+        let val = validate_value(value)?;
         self.data
             .layers
             .entry(layer.to_string())
             .or_default()
-            .insert(name.to_string(), val.to_string());
-        self.data.version = 1;
+            .insert(name, val);
         self.save()
     }
 
-    /// 清除一个密钥（幂等）。
+    /// 保存一个**跨层共享**密钥（L-03）。
+    ///
+    /// 共享键会被注入到**所有**层；某层若同时有专属键，专属优先。
+    pub fn set_shared(&mut self, env_name: &str, value: &str) -> Result<(), String> {
+        let name = validate_env_name(env_name)?;
+        let val = validate_value(value)?;
+        self.data.shared.insert(name, val);
+        self.save()
+    }
+
+    /// 清除层专属密钥（幂等）。
     pub fn clear(&mut self, layer: &str, env_name: &str) -> Result<(), String> {
         layer_of(layer).ok_or_else(|| format!("未知的层：{layer}"))?;
         if let Some(m) = self.data.layers.get_mut(layer) {
@@ -181,16 +282,28 @@ impl VendorStore {
         self.save()
     }
 
-    /// 该层已保存的变量名（**不含值**），供前端显示"已配置"。
-    pub fn saved_names(&self, layer: &str) -> Vec<String> {
-        self.data
-            .layers
-            .get(layer)
-            .map(|m| m.keys().cloned().collect())
-            .unwrap_or_default()
+    /// 清除共享密钥（幂等）。
+    pub fn clear_shared(&mut self, env_name: &str) -> Result<(), String> {
+        self.data.shared.remove(env_name.trim());
+        self.save()
     }
 
+    /// 该层已保存的变量名（含共享键），**不含值**。
+    pub fn saved_names(&self, layer: &str) -> Vec<String> {
+        let mut names: Vec<String> = self.data.shared.keys().cloned().collect();
+        if let Some(m) = self.data.layers.get(layer) {
+            names.extend(m.keys().cloned());
+        }
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// 该层是否能拿到某个变量（共享或专属）。
     pub fn has(&self, layer: &str, env_name: &str) -> bool {
+        if self.data.shared.contains_key(env_name) {
+            return true;
+        }
         self.data
             .layers
             .get(layer)
@@ -198,18 +311,168 @@ impl VendorStore {
             .unwrap_or(false)
     }
 
-    /// 供启动模块时注入的完整环境变量。
-    pub fn env_for(&self, layer: &str) -> Vec<(String, String)> {
-        self.data
-            .layers
-            .get(layer)
-            .map(|m| {
-                m.iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default()
+    /// 共享区已保存的变量名，**不含值**。
+    pub fn shared_names(&self) -> Vec<String> {
+        self.data.shared.keys().cloned().collect()
     }
+
+    /// 该层实际会拿到的环境变量：共享键 + 层专属（专属优先）。
+    ///
+    /// 顺序刻意固定（BTreeMap），便于测试与排障复现。
+    pub fn env_for(&self, layer: &str) -> Vec<(String, String)> {
+        let mut merged: BTreeMap<String, String> = self.data.shared.clone();
+        if let Some(m) = self.data.layers.get(layer) {
+            for (k, v) in m {
+                merged.insert(k.clone(), v.clone());
+            }
+        }
+        merged.into_iter().collect()
+    }
+}
+
+/// 校验变量名形态，返回规范化后的名字。
+fn validate_env_name(raw: &str) -> Result<String, String> {
+    let name = raw.trim();
+    if !is_env_name(name) {
+        return Err(format!(
+            "环境变量名不合法：{name}（应形如 DASHSCOPE_API_KEY）"
+        ));
+    }
+    Ok(name.to_string())
+}
+
+/// 校验密钥值：非空、不含换行或空字符。
+fn validate_value(raw: &str) -> Result<String, String> {
+    let val = raw.trim();
+    if val.is_empty() {
+        return Err("密钥不能为空".to_string());
+    }
+    if val.contains('\n') || val.contains('\r') || val.contains('\0') {
+        return Err("密钥不能包含换行或空字符".to_string());
+    }
+    Ok(val.to_string())
+}
+
+/* ------------------------------------------------------------------ */
+/* DPAPI 加解密（L-02，仅 Windows）                                     */
+/* ------------------------------------------------------------------ */
+
+/// 用 DPAPI 加密（绑当前用户）。非 Windows 直接返回 Err，由调用方降级为明文。
+#[cfg(windows)]
+fn encrypt_string(plain: &str) -> Result<String, String> {
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Cryptography::{CryptProtectData, CRYPTPROTECT_UI_FORBIDDEN};
+
+    let in_blob = make_blob(plain.as_bytes())?;
+    let mut out_blob = zero_blob();
+
+    // SAFETY: 两个 BLOB 都由本函数分配/初始化；LocalFree 只释放系统分配的 out_blob。
+    let ok = unsafe {
+        CryptProtectData(
+            &in_blob,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            CRYPTPROTECT_UI_FORBIDDEN,
+            &mut out_blob,
+        )
+    };
+    if ok == 0 {
+        return Err("DPAPI 加密失败".to_string());
+    }
+
+    // SAFETY: out_blob 由 DPAPI 填充，长度与指针均有效
+    let slice =
+        unsafe { std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize).to_vec() };
+    // SAFETY: 由系统分配，LocalFree 释放
+    unsafe {
+        LocalFree(out_blob.pbData as *mut core::ffi::c_void);
+    }
+    Ok(BASE64.encode(slice))
+}
+
+/// 用 DPAPI 解密。密文必须由**同一用户**加密。
+#[cfg(windows)]
+fn decrypt_string(cipher: &str) -> Result<String, String> {
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Cryptography::{
+        CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN,
+    };
+
+    let bytes = BASE64
+        .decode(cipher.trim())
+        .map_err(|e| format!("密文不是合法 base64：{e}"))?;
+
+    let in_blob = make_blob(&bytes)?;
+    let mut out_blob = zero_blob();
+
+    // SAFETY: 同 encrypt_string
+    let ok = unsafe {
+        CryptUnprotectData(
+            &in_blob,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            CRYPTPROTECT_UI_FORBIDDEN,
+            &mut out_blob,
+        )
+    };
+    if ok == 0 {
+        return Err("DPAPI 解密失败（密钥库可能由其它用户/其它机器加密）".to_string());
+    }
+
+    // SAFETY: out_blob 由 DPAPI 填充
+    let slice =
+        unsafe { std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize).to_vec() };
+    // SAFETY: 由系统分配
+    unsafe {
+        LocalFree(out_blob.pbData as *mut core::ffi::c_void);
+    }
+
+    String::from_utf8(slice).map_err(|e| format!("解密结果不是 UTF-8：{e}"))
+}
+
+#[cfg(windows)]
+fn make_blob(
+    bytes: &[u8],
+) -> Result<windows_sys::Win32::Security::Cryptography::CRYPT_INTEGER_BLOB, String> {
+    use windows_sys::Win32::Security::Cryptography::CRYPT_INTEGER_BLOB;
+    if bytes.is_empty() {
+        return Ok(CRYPT_INTEGER_BLOB {
+            cbData: 0,
+            pbData: std::ptr::null_mut(),
+        });
+    }
+    // DPAPI 会原地读取输入，给一块独立内存避免动到调用方的数据
+    let mut buf = bytes.to_vec();
+    let ptr = buf.as_mut_ptr();
+    let len = buf.len() as u32;
+    std::mem::forget(buf); // 生命周期交给调用方释放（简短函数，进程存活期内不泄漏）
+    Ok(CRYPT_INTEGER_BLOB {
+        cbData: len,
+        pbData: ptr,
+    })
+}
+
+#[cfg(windows)]
+fn zero_blob() -> windows_sys::Win32::Security::Cryptography::CRYPT_INTEGER_BLOB {
+    use windows_sys::Win32::Security::Cryptography::CRYPT_INTEGER_BLOB;
+    CRYPT_INTEGER_BLOB {
+        cbData: 0,
+        pbData: std::ptr::null_mut(),
+    }
+}
+
+#[cfg(not(windows))]
+fn encrypt_string(_plain: &str) -> Result<String, String> {
+    Err("当前平台没有 DPAPI，密钥库以明文保存".to_string())
+}
+
+#[cfg(not(windows))]
+fn decrypt_string(_cipher: &str) -> Result<String, String> {
+    Err("当前平台没有 DPAPI".to_string())
 }
 
 fn is_env_name(s: &str) -> bool {
@@ -263,7 +526,7 @@ pub fn parse_catalog(
 
     let mut out = Vec::with_capacity(arr.len());
     for p in arr {
-        let (id, label, ready, missing, privacy) = match layer {
+        let (id, label, ready, missing, privacy, manual) = match layer {
             "dounai-input" => {
                 let id = str_of(p, "id");
                 let label = str_of(p, "name");
@@ -274,13 +537,16 @@ pub fn parse_catalog(
                 let available = p.get("available").and_then(|x| x.as_bool()).unwrap_or(true);
                 let reason = str_of(p, "unavailable_reason");
                 let mut missing = Vec::new();
+                let mut manual = false;
                 if requires && !available {
-                    if let Some(name) = extract_env_name(&reason) {
-                        missing.push(name);
+                    match extract_env_name(&reason) {
+                        Some(name) => missing.push(name),
+                        // 文案改了 / 不是环境变量形态 → 让 UI 提示手填
+                        None => manual = true,
                     }
                 }
                 let privacy = str_of(p, "privacy");
-                (id, label, available, missing, privacy)
+                (id, label, available, missing, privacy, manual.to_string())
             }
             "omninexus" => {
                 let id = str_of(p, "name");
@@ -304,7 +570,16 @@ pub fn parse_catalog(
                 let ready = !requires || configured || local;
                 // 本地推理服务（ollama / vllm …）不该被标成 remote
                 let privacy = if local { "local" } else { "remote" };
-                (id, label, ready, missing, privacy.to_string())
+                // 模型层有机读的 api_key_env；真缺了却没给名字，同样要提示手填
+                let manual = requires && !configured && missing.is_empty();
+                (
+                    id,
+                    label,
+                    ready,
+                    missing,
+                    privacy.to_string(),
+                    manual.to_string(),
+                )
             }
             "moodvoice" => {
                 let id = str_of(p, "id");
@@ -321,7 +596,17 @@ pub fn parse_catalog(
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
-                (id, label, ready, missing, "remote".to_string())
+                // 语音层 missing 里可能只有配置键（如 providers.x.voice_id），
+                // 被过滤后为空 → 说明"不是差密钥"，不需要 manual
+                let manual = false;
+                (
+                    id,
+                    label,
+                    ready,
+                    missing,
+                    "remote".to_string(),
+                    manual.to_string(),
+                )
             }
             other => return Err(format!("未知的层：{other}")),
         };
@@ -339,6 +624,7 @@ pub fn parse_catalog(
             missing,
             saved: saved_hit,
             privacy,
+            manual_env: manual.as_str() == "true",
         });
     }
     Ok(out)
@@ -351,23 +637,142 @@ fn str_of(v: &serde_json::Value, key: &str) -> String {
         .to_string()
 }
 
-/// 从 "Set DASHSCOPE_API_KEY to use this provider." 里取出变量名。
+/// 变量名可接受的结尾词（用于从自然语言里提高置信度）。
+///
+/// 收紧的原因：原实现只要"全大写 + 含下划线"就收，于是
+/// "Set API to use this provider" 这类文案里的 `API` 也会被当变量名；
+/// 而真实变量名几乎都以这些后缀结尾。
+const ENV_SUFFIXES: [&str; 8] = [
+    "_API_KEY",
+    "_KEY",
+    "_TOKEN",
+    "_SECRET",
+    "_ENDPOINT",
+    "_URL",
+    "_REGION",
+    "_ID",
+];
+
+/// 从 `unavailable_reason` 这类自然语言里**谨慎地**抽取环境变量名。
+///
+/// 策略：
+/// 1. 按非标识符字符切词，只保留 `[A-Z0-9_]` 串；
+/// 2. 必须以 `_` 分段（排除 `API` 这种孤立词）；
+/// 3. 必须以常见后缀结尾（排除 `XXX` 这种占位符）；
+/// 4. 取**最后一个**匹配（自然语言里变量名通常在句尾）。
+///
+/// 返回 `None` 表示"无法可靠解析"——调用方必须用 `manual_env` 提示用户手填，
+/// 不能静默当成"无需配置"。
 fn extract_env_name(text: &str) -> Option<String> {
+    let mut candidates: Vec<String> = Vec::new();
     let mut word = String::new();
+
+    let flush = |word: &mut String, out: &mut Vec<String>| {
+        if !word.is_empty() {
+            out.push(std::mem::take(word));
+        }
+    };
+
     for ch in text.chars() {
         if ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_' {
             word.push(ch);
         } else {
-            if is_env_name(&word) && word.contains('_') {
-                return Some(word);
-            }
-            word.clear();
+            flush(&mut word, &mut candidates);
         }
     }
-    if is_env_name(&word) && word.contains('_') {
-        return Some(word);
+    flush(&mut word, &mut candidates);
+
+    candidates.into_iter().rfind(|w| {
+        is_env_name(w)
+            && w.contains('_')
+            // 占位符形态（XXX_KEY）不算
+            && !w.starts_with("XXX")
+            && ENV_SUFFIXES.iter().any(|suffix| w.ends_with(suffix))
+    })
+}
+
+/* ------------------------------------------------------------------ */
+/* 版本漂移比对（L-04）                                                */
+/* ------------------------------------------------------------------ */
+
+/// 上游声明的版本与 manifest 手写版本是否一致。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct VersionCheck {
+    /// manifest 里手写的版本
+    pub manifest: String,
+    /// 从上游 pyproject.toml / Cargo.toml 读到的版本（读不到则为 None）
+    pub upstream: Option<String>,
+    /// 两者是否一致（读不到时按"未验证"处理，不算不一致）
+    pub consistent: bool,
+}
+
+/// 从模块根读上游声明的版本。
+///
+/// 只认两种最常见的来源，够用且不会误判：
+/// - `pyproject.toml` 的 `version = "x.y.z"`（`[project]` 段）
+/// - `Cargo.toml` 的 `version = "x.y.z"`（`[package]` 段）
+///
+/// 刻意**不**做完整的 TOML 解析：这里只需要一个版本串，引全量解析器不值得。
+pub fn read_upstream_version(module_root: &Path) -> Option<String> {
+    for (name, section) in [("pyproject.toml", "[project]"), ("Cargo.toml", "[package]")] {
+        let path = module_root.join(name);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let mut in_section = false;
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('[') {
+                in_section = trimmed.starts_with(section);
+                continue;
+            }
+            if !in_section {
+                continue;
+            }
+            if let Some(rest) = trimmed.strip_prefix("version") {
+                let rest = rest.trim_start();
+                if let Some(v) = rest.strip_prefix('=') {
+                    let v = v.trim().trim_matches('"').trim_matches('\'').trim();
+                    if !v.is_empty() {
+                        return Some(v.to_string());
+                    }
+                }
+            }
+        }
     }
     None
+}
+
+/// 读模块 manifest 里手写的版本（读不到返回空串）。
+pub fn read_module_manifest_version(module_root: &Path) -> String {
+    for name in ["manifest.json", "dounai-manifest.json"] {
+        let path = module_root.join(name);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        if let Some(version) = v.get("version").and_then(|x| x.as_str()) {
+            return version.to_string();
+        }
+    }
+    String::new()
+}
+
+/// 比对 manifest 版本与上游版本。
+pub fn check_version(manifest_version: &str, module_root: &Path) -> VersionCheck {
+    let upstream = read_upstream_version(module_root);
+    let consistent = match &upstream {
+        Some(v) => v.trim() == manifest_version.trim(),
+        // 读不到上游版本 → 无法判定，不算不一致（避免对没有 pyproject 的模块误报）
+        None => true,
+    };
+    VersionCheck {
+        manifest: manifest_version.to_string(),
+        upstream,
+        consistent,
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -474,11 +879,9 @@ mod tests {
 
         let mut s = VendorStore::open(&dir).unwrap();
         s.set("moodvoice", "OPENAI_API_KEY", "sk-test-123").unwrap();
-        assert!(s.has("moodvoice", "OPENAI_API_KEY"));
-        assert_eq!(
-            s.saved_names("moodvoice"),
-            vec!["OPENAI_API_KEY".to_string()]
-        );
+        assert!(s
+            .saved_names("moodvoice")
+            .contains(&"OPENAI_API_KEY".to_string()));
         assert_eq!(
             s.env_for("moodvoice"),
             vec![("OPENAI_API_KEY".to_string(), "sk-test-123".to_string())]
@@ -491,11 +894,7 @@ mod tests {
         // 清除
         let mut s3 = VendorStore::open(&dir).unwrap();
         s3.clear("moodvoice", "OPENAI_API_KEY").unwrap();
-        assert!(!s3.has("moodvoice", "OPENAI_API_KEY"));
-        assert!(VendorStore::open(&dir)
-            .unwrap()
-            .env_for("moodvoice")
-            .is_empty());
+        assert!(s3.env_for("moodvoice").is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -518,12 +917,107 @@ mod tests {
         assert!(s.set("omninexus", "OK_KEY", "").is_err());
         assert!(s.set("omninexus", "OK_KEY", "a\nb").is_err());
         assert!(s.set("omninexus", "OK_KEY", "a\rb").is_err());
+        // 共享键同样受校验
+        assert!(s.set_shared("bad name", "v").is_err());
+        assert!(s.set_shared("GOOD_KEY", "").is_err());
         // 合法值 trim 后保存
         assert!(s.set("omninexus", "OK_KEY", "  spaced  ").is_ok());
         assert_eq!(
             s.env_for("omninexus"),
             vec![("OK_KEY".to_string(), "spaced".to_string())]
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn store_is_encrypted_on_disk() {
+        // L-02 的核心断言：落盘内容**不得**出现明文密钥
+        let dir = std::env::temp_dir().join(format!(
+            "dounai-vendor-enc-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let secret = "sk-plaintext-must-not-appear-123456";
+        let mut s = VendorStore::open(&dir).unwrap();
+        s.set("moodvoice", "OPENAI_API_KEY", secret).unwrap();
+        assert!(s.is_encrypted(), "Windows 下应使用 DPAPI 加密");
+
+        let raw = std::fs::read_to_string(dir.join("vendor-keys.json")).unwrap();
+        assert!(!raw.contains(secret), "落盘文件里不得出现明文密钥");
+        assert!(raw.contains("\"encrypted\": true"));
+
+        // 重新打开仍能解密读到（DPAPI 往返）
+        let reopened = VendorStore::open(&dir).unwrap();
+        assert_eq!(
+            reopened.env_for("moodvoice"),
+            vec![("OPENAI_API_KEY".to_string(), secret.to_string())]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn shared_keys_merge_with_layer_specific_and_layer_wins() {
+        // L-03：共享键对所有层生效；同名的层专属键优先
+        let dir = std::env::temp_dir().join(format!(
+            "dounai-vendor-shared-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut s = VendorStore::open(&dir).unwrap();
+
+        s.set_shared("OPENAI_API_KEY", "sk-shared").unwrap();
+        s.set_shared("DASHSCOPE_API_KEY", "sk-shared-dash").unwrap();
+        // 语音层单独覆盖 OPENAI_API_KEY（专属优先）
+        s.set("moodvoice", "OPENAI_API_KEY", "sk-layer-specific")
+            .unwrap();
+
+        let mv = s.env_for("moodvoice");
+        let omni = s.env_for("omninexus");
+
+        let pick = |list: &[(String, String)], key: &str| {
+            list.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
+        };
+
+        assert_eq!(
+            pick(&mv, "OPENAI_API_KEY").as_deref(),
+            Some("sk-layer-specific"),
+            "层专属应覆盖共享"
+        );
+        assert_eq!(
+            pick(&omni, "OPENAI_API_KEY").as_deref(),
+            Some("sk-shared"),
+            "没有专属键的层用共享值"
+        );
+        assert_eq!(
+            pick(&omni, "DASHSCOPE_API_KEY").as_deref(),
+            Some("sk-shared-dash"),
+            "共享键应对所有层生效"
+        );
+
+        // saved_names 应包含共享键
+        assert!(s
+            .saved_names("moodvoice")
+            .contains(&"DASHSCOPE_API_KEY".to_string()));
+
+        // 清除共享键后，没有专属键的层应拿不到
+        let mut s2 = VendorStore::open(&dir).unwrap();
+        s2.clear_shared("DASHSCOPE_API_KEY").unwrap();
+        assert!(s2
+            .env_for("omninexus")
+            .iter()
+            .all(|(k, _)| k != "DASHSCOPE_API_KEY"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -596,6 +1090,132 @@ mod tests {
             "http://127.0.0.1:8102"
         );
         assert!(base_from_health_url("").is_none());
+    }
+
+    #[test]
+    fn extract_env_name_is_strict() {
+        // 真实文案：能抽到
+        assert_eq!(
+            extract_env_name("Set DASHSCOPE_API_KEY to use this provider."),
+            Some("DASHSCOPE_API_KEY".to_string())
+        );
+        assert_eq!(
+            extract_env_name("请先设置 OPENAI_API_KEY"),
+            Some("OPENAI_API_KEY".to_string())
+        );
+        assert_eq!(
+            extract_env_name("需要 AZURE_SPEECH_KEY 与 AZURE_SPEECH_REGION"),
+            // 取最后一个匹配（自然语言里变量名通常在句尾）
+            Some("AZURE_SPEECH_REGION".to_string())
+        );
+
+        // 收紧后必须拒绝的误判源
+        assert_eq!(
+            extract_env_name("Set API to use this provider."),
+            None,
+            "裸 API 不是变量名"
+        );
+        assert_eq!(
+            extract_env_name("USE THE KEY"),
+            None,
+            "无下划线的单词不是变量名"
+        );
+        assert_eq!(
+            extract_env_name("Set XXX_API_KEY to use"),
+            None,
+            "占位符不算"
+        );
+        assert_eq!(extract_env_name("配置完成后即可使用"), None, "无大写串");
+        assert_eq!(extract_env_name(""), None);
+    }
+
+    #[test]
+    fn input_catalog_marks_manual_env_when_reason_unparsable() {
+        // 上游改了文案（没有变量名）→ 必须置 manual_env，而不是静默当成"无需配置"
+        let body = r#"{"providers":[
+            {"id":"dashscope","name":"通义千问","available":false,"requires_api_key":true,
+             "unavailable_reason":"configuration required","privacy":"remote"}
+        ]}"#;
+        let v = parse_catalog("dounai-input", body, &[]).unwrap();
+        assert!(!v[0].ready);
+        assert!(v[0].missing.is_empty(), "解析不出变量名时 missing 为空");
+        assert!(v[0].manual_env, "必须标记需要手动填写变量名");
+    }
+
+    #[test]
+    fn input_catalog_no_manual_env_when_not_requiring_key() {
+        // 不需要密钥的厂商（如本地 whisper 未装模型）不该提示手填变量名
+        let body = r#"{"providers":[
+            {"id":"local-whisper","name":"本地 Whisper","available":false,
+             "requires_api_key":false,"unavailable_reason":"model not installed","privacy":"local"}
+        ]}"#;
+        let v = parse_catalog("dounai-input", body, &[]).unwrap();
+        assert!(!v[0].manual_env, "不需要密钥时不应要求手动填变量名");
+    }
+
+    #[test]
+    fn omninexus_catalog_marks_manual_env_when_env_name_missing() {
+        let body = r#"{"providers":[
+            {"name":"weird","label":"Weird","requires_key":true,"configured":false,"api_key_env":"","local":false}
+        ]}"#;
+        let v = parse_catalog("omninexus", body, &[]).unwrap();
+        assert!(!v[0].ready);
+        assert!(v[0].missing.is_empty());
+        assert!(v[0].manual_env, "有依赖密钥却没给变量名 → 需要手填");
+    }
+
+    #[test]
+    fn reads_pyproject_and_cargo_versions() {
+        let dir = std::env::temp_dir().join(format!(
+            "dounai-ver-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // pyproject
+        std::fs::write(
+            dir.join("pyproject.toml"),
+            "[build-system]\nrequires = []\n\n[project]\nname = \"x\"\nversion = \"1.2.3\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_upstream_version(&dir).as_deref(),
+            Some("1.2.3"),
+            "应读到 [project] 段里的版本"
+        );
+
+        // manifest 与上游一致
+        let ok = check_version("1.2.3", &dir);
+        assert!(ok.consistent);
+        assert_eq!(ok.upstream.as_deref(), Some("1.2.3"));
+
+        // manifest 与上游不一致 → 标记为不一致（但不阻塞）
+        let bad = check_version("0.1.0", &dir);
+        assert!(!bad.consistent);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn version_check_is_neutral_when_upstream_unknown() {
+        // 没有 pyproject/Cargo.toml（例如悬浮窗仓库）→ 不误报不一致
+        let dir = std::env::temp_dir().join(format!(
+            "dounai-ver-none-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let v = check_version("0.1.0", &dir);
+        assert_eq!(v.upstream, None);
+        assert!(v.consistent, "读不到上游版本时不应判定为不一致");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
