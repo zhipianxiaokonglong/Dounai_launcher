@@ -1,9 +1,16 @@
-//! 厂商密钥注入的集成测试。
+//! 厂商密钥投递测试（按新架构：启动器不存密钥，只写模块 .env）。
 //!
-//! 重点验证三件事：
-//! 1. 保存的密钥会进入模块的 `entry.env`（这是注入能否生效的关键环节）；
-//! 2. **子进程真的拿到了**这个变量（端到端，用 `cmd /c set` 落盘核对）；
-//! 3. 总览数据里**不含密钥值**（隐私约束，结构上就不该有）。
+//! 架构原则（用户确认）：
+//! - 启动器与 Dounai 本体都**不存储**密钥；
+//! - 密钥归属各模块：模型层自定义厂商走 AES-GCM+SQLite（API），
+//!   其余层读各自模块根目录的 `.env`；
+//! - 启动器只负责"帮用户填写"与"读回模块现状"。
+//!
+//! 因此本文件验证的是：
+//! 1. 写入后密钥确实出现在模块 .env 里（模块能读到）；
+//! 2. 启动器**没有**在自己的数据目录留下任何密钥副本；
+//! 3. 写入不会破坏该文件里的其它配置与注释；
+//! 4. overview 不返回密钥值。
 
 use std::path::{Path, PathBuf};
 
@@ -15,7 +22,6 @@ use dounai_launcher::commands::{
     AppState, ClearVendorKeyRequest, SetVendorKeyRequest,
 };
 use dounai_launcher::trust::TrustPolicy;
-use dounai_launcher::vendor_keys::VendorStore;
 
 fn tmp_root(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -40,8 +46,8 @@ fn state(root: &Path) -> AppState {
     .unwrap()
 }
 
-/// 登记一个本地模块（走本地登记通道，需先开启 dev_mode）。
-fn register(state: &AppState, root: &Path, module_id: &str, command: &str) {
+/// 登记一个本地模块，返回它的模块根。
+fn register(state: &AppState, root: &Path, module_id: &str) -> PathBuf {
     let dir = root.join("ext").join(module_id);
     std::fs::create_dir_all(&dir).unwrap();
     let manifest = json!({
@@ -51,7 +57,7 @@ fn register(state: &AppState, root: &Path, module_id: &str, command: &str) {
         "category": "core",
         "entry": {
             "type": "command",
-            "command": command,
+            "command": "cmd /c timeout /t 5",
             "working_dir": "",
             "env": {},
             "health": { "url": null, "timeout_ms": 500 }
@@ -66,34 +72,137 @@ fn register(state: &AppState, root: &Path, module_id: &str, command: &str) {
         state.enable_dev_mode();
     }
     add_local_module_inner(state, dir.to_str().unwrap()).unwrap();
+    dir
 }
 
 #[test]
-fn saved_key_is_injected_into_entry_env() {
-    let root = tmp_root("inject");
+fn key_is_written_into_module_env_file() {
+    let root = tmp_root("envwrite");
     let st = state(&root);
-    register(&st, &root, "moodvoice", "cmd /c timeout /t 5");
+    let module_dir = register(&st, &root, "moodvoice");
 
     set_vendor_key_inner(
         &st,
         &SetVendorKeyRequest {
             module_id: "moodvoice".to_string(),
             env_name: "OPENAI_API_KEY".to_string(),
-            value: "sk-integration-test".to_string(),
-            shared: false,
+            value: "sk-written-to-env".to_string(),
         },
     )
     .unwrap();
 
-    let spec = st.entry_spec_for_test("moodvoice").unwrap();
-    let got = spec
-        .env
-        .iter()
-        .find(|(k, _)| k == "OPENAI_API_KEY")
-        .map(|(_, v)| v.clone());
-    assert_eq!(got.as_deref(), Some("sk-integration-test"));
+    // 关键：密钥必须出现在**模块自己**的 .env 里
+    let env_path = module_dir.join(".env");
+    assert!(env_path.exists(), ".env 应被创建：{}", env_path.display());
+    let text = std::fs::read_to_string(&env_path).unwrap();
+    assert!(
+        text.contains("OPENAI_API_KEY=sk-written-to-env"),
+        "实际内容：{text}"
+    );
 
-    // 清除后不应再注入
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn launcher_keeps_no_key_copy_in_its_data_dir() {
+    // 架构原则的硬断言：启动器数据目录里不得出现密钥文件
+    let root = tmp_root("nocopy");
+    let st = state(&root);
+    let module_dir = register(&st, &root, "omninexus");
+
+    let secret = "sk-must-not-be-stored-by-launcher-123";
+    set_vendor_key_inner(
+        &st,
+        &SetVendorKeyRequest {
+            module_id: "omninexus".to_string(),
+            env_name: "ANTHROPIC_API_KEY".to_string(),
+            value: secret.to_string(),
+        },
+    )
+    .unwrap();
+
+    // 1) 模块 .env 里有它
+    let module_env = std::fs::read_to_string(module_dir.join(".env")).unwrap();
+    assert!(module_env.contains(secret));
+
+    // 2) 启动器数据根里**任何文件**都不该含它
+    let data_root = root.join("appdata");
+    for entry in walkdir::WalkDir::new(&data_root).into_iter().flatten() {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        if let Ok(content) = std::fs::read_to_string(entry.path()) {
+            assert!(
+                !content.contains(secret),
+                "启动器在 {:?} 里留下了密钥副本",
+                entry.path()
+            );
+        }
+    }
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn writing_preserves_existing_env_content() {
+    let root = tmp_root("preserve");
+    let st = state(&root);
+    let module_dir = register(&st, &root, "dounai-input");
+
+    // 用户事先手写过 .env
+    std::fs::write(
+        module_dir.join(".env"),
+        "# 我自己的配置\nDASHSCOPE_API_KEY=sk-handwritten\nDOUNAI_PORT=8101\n",
+    )
+    .unwrap();
+
+    set_vendor_key_inner(
+        &st,
+        &SetVendorKeyRequest {
+            module_id: "dounai-input".to_string(),
+            env_name: "OPENAI_API_KEY".to_string(),
+            value: "sk-added".to_string(),
+        },
+    )
+    .unwrap();
+
+    let text = std::fs::read_to_string(module_dir.join(".env")).unwrap();
+    assert!(
+        text.contains("DASHSCOPE_API_KEY=sk-handwritten"),
+        "原有密钥不能丢"
+    );
+    assert!(text.contains("DOUNAI_PORT=8101"), "无关配置不能丢");
+    assert!(text.contains("# 我自己的配置"), "注释不能丢");
+    assert!(text.contains("OPENAI_API_KEY=sk-added"), "新密钥应写入");
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn clear_removes_key_from_env_but_keeps_others() {
+    let root = tmp_root("clear");
+    let st = state(&root);
+    let module_dir = register(&st, &root, "moodvoice");
+
+    set_vendor_key_inner(
+        &st,
+        &SetVendorKeyRequest {
+            module_id: "moodvoice".to_string(),
+            env_name: "OPENAI_API_KEY".to_string(),
+            value: "sk-temp".to_string(),
+        },
+    )
+    .unwrap();
+    set_vendor_key_inner(
+        &st,
+        &SetVendorKeyRequest {
+            module_id: "moodvoice".to_string(),
+            env_name: "AZURE_SPEECH_KEY".to_string(),
+            value: "az-temp".to_string(),
+        },
+    )
+    .unwrap();
+
     clear_vendor_key_inner(
         &st,
         &ClearVendorKeyRequest {
@@ -102,62 +211,13 @@ fn saved_key_is_injected_into_entry_env() {
         },
     )
     .unwrap();
-    let spec2 = st.entry_spec_for_test("moodvoice").unwrap();
+
+    let text = std::fs::read_to_string(module_dir.join(".env")).unwrap();
+    assert!(!text.contains("OPENAI_API_KEY"), "被清除的变量不应残留");
     assert!(
-        !spec2.env.iter().any(|(k, _)| k == "OPENAI_API_KEY"),
-        "清除后不应再注入"
+        text.contains("AZURE_SPEECH_KEY=az-temp"),
+        "其它变量必须保留"
     );
-
-    std::fs::remove_dir_all(&root).ok();
-}
-
-#[test]
-fn manifest_env_does_not_override_saved_key() {
-    let root = tmp_root("precedence");
-    let st = state(&root);
-    let dir = root.join("ext").join("omninexus");
-    std::fs::create_dir_all(&dir).unwrap();
-    let manifest = json!({
-        "module_id": "omninexus",
-        "name": "omninexus",
-        "version": "0.1.0",
-        "category": "core",
-        "entry": {
-            "type": "command",
-            "command": "cmd /c timeout /t 5",
-            "working_dir": "",
-            // manifest 里写了一个占位值，启动器保存的密钥应胜出
-            "env": { "OPENAI_API_KEY": "from-manifest" },
-            "health": { "url": null, "timeout_ms": 500 }
-        },
-        "dependencies": [],
-        "model_packs": [],
-        "signature": { "algo": "SHA-256 + Ed25519", "value": "" }
-    });
-    std::fs::write(dir.join("manifest.json"), manifest.to_string()).unwrap();
-    st.enable_dev_mode();
-    add_local_module_inner(&st, dir.to_str().unwrap()).unwrap();
-
-    set_vendor_key_inner(
-        &st,
-        &SetVendorKeyRequest {
-            module_id: "omninexus".to_string(),
-            env_name: "OPENAI_API_KEY".to_string(),
-            value: "from-launcher".to_string(),
-            shared: false,
-        },
-    )
-    .unwrap();
-
-    let spec = st.entry_spec_for_test("omninexus").unwrap();
-    let vals: Vec<&String> = spec
-        .env
-        .iter()
-        .filter(|(k, _)| k == "OPENAI_API_KEY")
-        .map(|(_, v)| v)
-        .collect();
-    assert_eq!(vals.len(), 1, "同名变量只能出现一次，实际 {:?}", vals);
-    assert_eq!(vals[0], "from-launcher", "启动器保存的密钥优先");
 
     std::fs::remove_dir_all(&root).ok();
 }
@@ -166,7 +226,7 @@ fn manifest_env_does_not_override_saved_key() {
 fn overview_never_contains_secret_values() {
     let root = tmp_root("noleak");
     let st = state(&root);
-    register(&st, &root, "dounai-input", "cmd /c timeout /t 5");
+    register(&st, &root, "dounai-input");
 
     let secret = "sk-should-never-appear-1234567890";
     set_vendor_key_inner(
@@ -175,112 +235,42 @@ fn overview_never_contains_secret_values() {
             module_id: "dounai-input".to_string(),
             env_name: "DASHSCOPE_API_KEY".to_string(),
             value: secret.to_string(),
-            shared: false,
         },
     )
     .unwrap();
 
-    // 总览会尝试连本机端口；这里模块未运行，必定走 error 分支，但结构里没有值字段
     let views = vendor_overview_inner(&st);
     let json = serde_json::to_string(&views).unwrap();
-    assert!(!json.contains(secret), "总览序列化后不得包含密钥值：{json}");
-    // 但应当能看出"这层有已保存的密钥"
-    let input_layer = views
-        .iter()
-        .find(|v| v.module_id == "dounai-input")
-        .unwrap();
-    assert!(input_layer.installed);
-    assert!(!input_layer.running);
-    assert!(input_layer.error.is_some(), "未运行时应给出原因");
-
-    std::fs::remove_dir_all(&root).ok();
-}
-
-#[test]
-fn key_reaches_child_process_env() {
-    // 端到端：走真实启动路径（start_module_inner → ProcessManager），
-    // 让子进程把变量值写进文件，再核对内容。
-    //
-    // 注意：启动器**禁止入口命令包含 shell 元字符**（`>` 也在内），
-    // 所以重定向不能写在命令里，得放进一个 .cmd 脚本由它承载。
-    if !cfg!(windows) {
-        return;
-    }
-    use dounai_launcher::commands::start_module_inner;
-
-    let root = tmp_root("child");
-    let st = state(&root);
-    let out = root.join("envdump.txt");
-    let script = root.join("check.cmd");
-    // %VAR% 在 cmd 里展开：注入没到子进程的话，这里会写成字面量
-    std::fs::write(
-        &script,
-        format!(
-            "@echo off\r\necho %OPENAI_API_KEY%> \"{}\"\r\n",
-            out.display()
-        ),
-    )
-    .unwrap();
-
-    let cmd = format!("cmd /c {}", script.display());
-    register(&st, &root, "moodvoice", &cmd);
-
-    set_vendor_key_inner(
-        &st,
-        &SetVendorKeyRequest {
-            module_id: "moodvoice".to_string(),
-            env_name: "OPENAI_API_KEY".to_string(),
-            value: "sk-child-check-777".to_string(),
-            shared: false,
-        },
-    )
-    .unwrap();
-
-    let _view = start_module_inner(&st, "moodvoice").expect("模块应能启动");
-
-    // 等子进程写完（最多 3 秒）
-    let mut content = String::new();
-    for _ in 0..30 {
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        if let Ok(t) = std::fs::read_to_string(&out) {
-            if !t.trim().is_empty() {
-                content = t;
-                break;
-            }
-        }
-    }
-    st.processes().stop("moodvoice");
-
+    assert!(!json.contains(secret), "总览序列化后不得包含密钥值");
+    assert!(json.contains("encrypted_store"), "字段结构应保持");
     assert!(
-        content.contains("sk-child-check-777"),
-        "子进程环境里应能看到注入的密钥，实际读到：{:?}",
-        content
+        json.contains("\"shared_keys\":[]"),
+        "共享区已移除，应为空数组"
     );
 
     std::fs::remove_dir_all(&root).ok();
 }
 
 #[test]
-fn store_file_lives_under_data_root() {
-    let root = tmp_root("path");
+fn writing_to_uninstalled_module_fails_clearly() {
+    let root = tmp_root("notinstalled");
     let st = state(&root);
-    set_vendor_key_inner(
+
+    let err = set_vendor_key_inner(
         &st,
         &SetVendorKeyRequest {
-            module_id: "omninexus".to_string(),
-            env_name: "ANTHROPIC_API_KEY".to_string(),
-            value: "sk-ant-xyz".to_string(),
-            shared: false,
+            module_id: "moodvoice".to_string(),
+            env_name: "OPENAI_API_KEY".to_string(),
+            value: "sk-x".to_string(),
         },
     )
-    .unwrap();
+    .unwrap_err();
 
-    let file = root.join("appdata").join("vendor-keys.json");
-    assert!(file.exists(), "密钥库应落在数据根下：{}", file.display());
-
-    // 重新打开能读到（落盘正确）
-    let reopened = VendorStore::open(&root.join("appdata")).unwrap();
-    assert!(reopened.has("omninexus", "ANTHROPIC_API_KEY"));
+    // 未登记模块的根目录不存在，应给出可读错误而不是静默成功
+    assert!(
+        err.contains("模块") || err.contains("目录"),
+        "错误信息应指向模块/目录问题，实际：{err}"
+    );
 
     std::fs::remove_dir_all(&root).ok();
 }

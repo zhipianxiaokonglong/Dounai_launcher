@@ -346,9 +346,17 @@ export interface VendorLayer {
   error: string | null;
   /** manifest 版本与上游版本比对（L-04） */
   version_check: VersionCheck | null;
-  /** 共享区变量名（对所有层生效，L-03） */
+  /** 当前激活厂商（来自模块 status 端点；null 表示该层无此概念） */
+  active_provider: string | null;
+  /**
+   * 保留字段：共享区已移除。
+   *
+   * 架构调整后启动器不再有"跨层共享密钥"概念——
+   * 密钥写进各模块自己的 `.env`，跨层同步由前端对多个模块分别写入。
+   * 保留空数组是为了不破坏既有 JSON 结构。
+   */
   shared_keys: string[];
-  /** 密钥库是否为 DPAPI 加密存储（L-02） */
+  /** 保留字段：启动器不存储密钥，故无加密存储可谈（恒为 false）。 */
   encrypted_store: boolean;
 }
 
@@ -358,14 +366,18 @@ export async function vendorOverview(): Promise<VendorLayer[]> {
 }
 
 /** 保存一个厂商密钥（值不会被回读）。 */
+/**
+ * 把密钥写进该模块自己的 `.env`。
+ *
+ * 启动器只做投递：写完即不再持有（不落盘、不回读、不回显）。
+ */
 export async function setVendorKey(
   moduleId: string,
   envName: string,
   value: string,
-  shared = false,
 ): Promise<VendorLayer[]> {
   return call<VendorLayer[]>("set_vendor_key", {
-    request: { module_id: moduleId, env_name: envName, value, shared },
+    request: { module_id: moduleId, env_name: envName, value },
   });
 }
 
@@ -377,6 +389,45 @@ export async function clearVendorKey(
   return call<VendorLayer[]>("clear_vendor_key", {
     request: { module_id: moduleId, env_name: envName },
   });
+}
+
+/* ------------------------------------------------------------------ */
+/* 模型层厂商管理（重构后的界面，走模块自己的 API）                      */
+/* ------------------------------------------------------------------ */
+
+export type ProviderAction =
+  | "list"
+  | "builtin"
+  | "models"
+  | "defaults"
+  | "create"
+  | "update"
+  | "delete"
+  | "set_enabled"
+  | "test"
+  | "test_saved"
+  | "discover"
+  | "discover_saved"
+  | "set_defaults";
+
+export interface ProviderAdminRequest {
+  action: ProviderAction;
+  moduleId?: string;
+  id?: string;
+  payload?: Record<string, unknown>;
+  enabled?: boolean;
+}
+
+/**
+ * 统一调用模块的厂商管理 API。
+ *
+ * 启动器只是代理：密钥只在这次调用中经手，**不落盘、不缓存**。
+ * 返回值原样来自模块（含 `apiKeyMasked` 这样的脱敏字段）。
+ */
+export async function providerAdminCall(
+  request: ProviderAdminRequest,
+): Promise<unknown> {
+  return call<unknown>("provider_admin_call", { request });
 }
 
 /* ------------------------------------------------------------------ */

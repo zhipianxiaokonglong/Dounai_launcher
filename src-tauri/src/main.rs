@@ -73,6 +73,7 @@ fn main() {
             dounai_launcher::commands::vendor_overview,
             dounai_launcher::commands::set_vendor_key,
             dounai_launcher::commands::clear_vendor_key,
+            dounai_launcher::commands::provider_admin_call,
             dounai_launcher::commands::start_module,
             dounai_launcher::commands::stop_module,
             dounai_launcher::commands::start_all,

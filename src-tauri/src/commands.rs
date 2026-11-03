@@ -31,10 +31,11 @@ pub struct AppState {
     trust: TrustPolicy,
     /// 进程表：管理由启动器拉起的子进程（内存态，不持久化）
     processes: ProcessManager,
-    /// 厂商密钥仓库：唯一副本，启动模块时注入为进程环境变量。
-    ///
-    /// 值只在 Rust 侧使用，**不返回给前端**（见 vendor_keys 模块文档）。
-    vendors: Mutex<crate::vendor_keys::VendorStore>,
+    // 注意：这里**没有**密钥存储字段。
+    //
+    // 架构原则：启动器不存密钥，密钥归各模块自己管
+    // （模型层自定义厂商 → AES-GCM 存 SQLite；其余 → 模块根 .env）。
+    // 启动器只负责把用户输入写进模块自己的配置位、并把模块现状读回来。
     /// 开发者模式：通过隐藏入口（连续点击标题）开启。
     ///
     /// 开启后可用「本地模块登记」（scan/add/remove），且该通道跳过签名校验——
@@ -60,16 +61,12 @@ impl AppState {
         std::fs::create_dir_all(&data_root).map_err(|e| e.to_string())?;
         let state_path = data_root.join("modules-state.json");
         let store = StateStore::open(&state_path).map_err(|e| e.to_string())?;
-        // 先打开密钥库：data_root 随后会被移进结构体
-        let vendors =
-            crate::vendor_keys::VendorStore::open(&data_root).map_err(|e| e.to_string())?;
         Ok(Self {
             data_root,
             store: Mutex::new(store),
             allowlist,
             trust,
             processes: ProcessManager::default(),
-            vendors: Mutex::new(vendors),
             dev_mode: Mutex::new(false),
         })
     }
@@ -174,18 +171,6 @@ impl AppState {
                         crate::runtime::resolve_placeholders(s, &root, &data_dir, &app_local),
                     ));
                 }
-            }
-        }
-
-        // 注入启动器保存的厂商密钥。
-        //
-        // 三个上游都从**进程环境变量**读密钥（输入层甚至不读 .env），
-        // 所以在这里注入是唯一既不改上游、也不往用户仓库写文件的做法。
-        // 同名变量以启动器保存的为准：它是配置的唯一来源。
-        if let Ok(store) = self.vendors.lock() {
-            for (k, v) in store.env_for(module_id) {
-                env.retain(|(ek, _): &(String, String)| ek != &k);
-                env.push((k, v));
             }
         }
 
@@ -1139,12 +1124,9 @@ pub struct SetVendorKeyRequest {
     pub module_id: String,
     /// 环境变量名，如 DASHSCOPE_API_KEY
     pub env_name: String,
+    /// 用户输入的密钥值。**只经手一次**：写入模块 .env 后即丢弃，
+    /// 启动器不落盘、不缓存、不写日志、不回显。
     pub value: String,
-    /// true 表示写入**共享区**（对所有层生效，L-03）。
-    ///
-    /// `OPENAI_API_KEY` 这类变量三层读同一个名字，填三遍既多余也容易漏。
-    #[serde(default)]
-    pub shared: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1182,17 +1164,13 @@ pub fn vendor_overview_inner(state: &AppState) -> Vec<crate::vendor_keys::LayerV
             running: false,
             providers: Vec::new(),
             error: None,
+            active_provider: None,
             version_check: None,
-            shared_keys: state
-                .vendors
-                .lock()
-                .map(|v| v.shared_names())
-                .unwrap_or_default(),
-            encrypted_store: state
-                .vendors
-                .lock()
-                .map(|v| v.is_encrypted())
-                .unwrap_or(false),
+            // 启动器不再有"共享区"概念：跨层同步由前端对多个模块分别写 .env。
+            shared_keys: Vec::new(),
+            // 密钥存储形态由**模块自己**决定，启动器无从得知也不需要知道。
+            // 传 false 仅表示"启动器侧不加密存储"（因为它根本不存）。
+            encrypted_store: false,
         };
 
         if !installed {
@@ -1247,11 +1225,24 @@ pub fn vendor_overview_inner(state: &AppState) -> Vec<crate::vendor_keys::LayerV
             continue;
         };
         let url = format!("{base}{}", spec.catalog_path);
-        let saved = state
-            .vendors
-            .lock()
-            .map(|v| v.saved_names(spec.module_id))
-            .unwrap_or_default();
+        // "已保存"改为问模块：读它自己的 .env 里有哪些已知变量
+        let saved = match state.module_root(spec.module_id) {
+            Ok(root) => {
+                let env_file = crate::vendor_keys::EnvFile::locate(&root);
+                let names: Vec<String> = view
+                    .providers
+                    .iter()
+                    .flat_map(|p| p.missing.iter().cloned())
+                    .collect();
+                let configured = env_file.configured(&names);
+                configured
+                    .into_iter()
+                    .filter(|(_, ok)| *ok)
+                    .map(|(k, _)| k)
+                    .collect()
+            }
+            Err(_) => Vec::new(),
+        };
 
         match http_get_local(&url, std::time::Duration::from_millis(1500)) {
             Ok(body) => match parse_catalog(spec.module_id, &body, &saved) {
@@ -1259,6 +1250,20 @@ pub fn vendor_overview_inner(state: &AppState) -> Vec<crate::vendor_keys::LayerV
                 Err(e) => view.error = Some(e),
             },
             Err(e) => view.error = Some(format!("读取厂商清单失败：{e}")),
+        }
+
+        // 某些层把"当前激活厂商"放在单独的 status 端点（如输入层）
+        if let Some(status_path) = spec.status_path {
+            let status_url = format!("{base}{status_path}");
+            if let Ok(body) = http_get_local(&status_url, std::time::Duration::from_millis(1500)) {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+                    view.active_provider = v
+                        .get("active_provider")
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.to_string());
+                }
+            }
+            // 读不到就留 None，不影响主流程（不把它当错误）
         }
 
         out.push(view);
@@ -1278,13 +1283,14 @@ pub fn set_vendor_key(
     Ok(vendor_overview_inner(&state))
 }
 
+/// 把密钥写进**该模块自己的** `.env`。
+///
+/// 启动器在这里只做"投递"：定位模块根 → 写一行 → 返回。
+/// 不保留副本、不回读、不写日志，因此满足"启动器不存储密钥"。
 pub fn set_vendor_key_inner(state: &AppState, request: &SetVendorKeyRequest) -> Result<(), String> {
-    let mut store = state.vendors.lock().map_err(|_| "密钥库锁不可用")?;
-    if request.shared {
-        store.set_shared(&request.env_name, &request.value)
-    } else {
-        store.set(&request.module_id, &request.env_name, &request.value)
-    }
+    let root = state.module_root(&request.module_id)?;
+    let env_file = crate::vendor_keys::EnvFile::locate(&root);
+    env_file.set(&request.env_name, &request.value)
 }
 
 /// 清除一个厂商密钥并返回最新总览。
@@ -1301,8 +1307,125 @@ pub fn clear_vendor_key_inner(
     state: &AppState,
     request: &ClearVendorKeyRequest,
 ) -> Result<(), String> {
-    let mut store = state.vendors.lock().map_err(|_| "密钥库锁不可用")?;
-    store.clear(&request.module_id, &request.env_name)
+    let root = state.module_root(&request.module_id)?;
+    let env_file = crate::vendor_keys::EnvFile::locate(&root);
+    env_file.remove(&request.env_name)
+}
+
+/* ------------------------------------------------------------------ */
+/* 模型层厂商管理（API 代理，启动器不存密钥）                          */
+/* ------------------------------------------------------------------ */
+
+#[derive(Debug, Deserialize)]
+pub struct ProviderAdminRequest {
+    /// 动作名，对应 provider_admin 的各个方法
+    pub action: String,
+    /// 目标模块（默认 omninexus）
+    #[serde(default)]
+    pub module_id: Option<String>,
+    /// 上游 id（更新/删除/测试已保存配置时用）
+    #[serde(default)]
+    pub id: Option<String>,
+    /// 请求体（新建/更新/测试/发现时用）
+    #[serde(default)]
+    pub payload: Option<serde_json::Value>,
+    /// 开关（set_enabled 用）
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
+/// 统一的厂商管理入口。
+///
+/// 每次调用都**重新定位模块并新建客户端**，不在启动器内缓存任何上游状态：
+/// 这样模块重启、换端口、换机器都自然跟上，也不需要失效逻辑。
+#[tauri::command]
+pub fn provider_admin_call(
+    state: State<AppState>,
+    request: ProviderAdminRequest,
+) -> Result<serde_json::Value, String> {
+    provider_admin_call_inner(&state, &request)
+}
+
+pub fn provider_admin_call_inner(
+    state: &AppState,
+    request: &ProviderAdminRequest,
+) -> Result<serde_json::Value, String> {
+    let module_id = request.module_id.as_deref().unwrap_or("omninexus");
+
+    // 只有已安装的模块才有管理界面（与 UI 的显示条件一致）
+    let installed = state
+        .store
+        .lock()
+        .ok()
+        .and_then(|s| {
+            s.get(module_id)
+                .map(|st| st.install == InstallState::Installed)
+        })
+        .unwrap_or(false);
+    if !installed {
+        return Err(format!("模块 {module_id} 未安装，没有可管理的厂商配置"));
+    }
+
+    // 从模块 manifest 的健康地址推出服务根
+    let spec = state.entry_spec(module_id)?;
+    let Some(health_url) = spec.health_url else {
+        return Err(format!("模块 {module_id} 没有健康端点，无法调用其 API"));
+    };
+    let Some(base) = crate::vendor_keys::base_from_health_url(&health_url) else {
+        return Err(format!("健康地址格式不支持：{health_url}"));
+    };
+
+    let admin = crate::provider_admin::ProviderAdmin::new(base)?;
+    let id = request.id.as_deref().unwrap_or("");
+
+    let result = match request.action.as_str() {
+        "list" => serde_json::to_value(admin.list()?).map_err(|e| e.to_string())?,
+        "builtin" => admin.builtin()?,
+        "models" => admin.models()?,
+        "defaults" => admin.defaults()?,
+        "create" => admin.create(request.payload.clone().unwrap_or(serde_json::Value::Null))?,
+        "update" => {
+            require_id(id, "update")?;
+            admin.update(
+                id,
+                request.payload.clone().unwrap_or(serde_json::Value::Null),
+            )?
+        }
+        "delete" => {
+            require_id(id, "delete")?;
+            admin.delete(id)?
+        }
+        "set_enabled" => {
+            require_id(id, "set_enabled")?;
+            let enabled = request
+                .enabled
+                .ok_or_else(|| "set_enabled 需要 enabled 参数".to_string())?;
+            admin.set_enabled(id, enabled)?
+        }
+        "test" => admin.test(request.payload.clone().unwrap_or(serde_json::Value::Null))?,
+        "test_saved" => {
+            require_id(id, "test_saved")?;
+            admin.test_saved(id)?
+        }
+        "discover" => admin.discover(request.payload.clone().unwrap_or(serde_json::Value::Null))?,
+        "discover_saved" => {
+            require_id(id, "discover_saved")?;
+            admin.discover_saved(id)?
+        }
+        "set_defaults" => {
+            admin.set_defaults(request.payload.clone().unwrap_or(serde_json::Value::Null))?
+        }
+        other => return Err(format!("未知的厂商管理动作：{other}")),
+    };
+
+    Ok(result)
+}
+
+fn require_id(id: &str, action: &str) -> Result<(), String> {
+    if id.trim().is_empty() {
+        return Err(format!("动作 {action} 需要提供厂商 id"));
+    }
+    Ok(())
 }
 
 /* ------------------------------------------------------------------ */

@@ -11,30 +11,96 @@
       "OMNI_PORT": "8102",
       "OMNI_DATA_DIR": "{data_dir}/omninexus"
     },
-    "health": { "url": "http://127.0.0.1:8102/v1/healthz", "timeout_ms": 3000 }
+    "health": {
+      "url": "http://127.0.0.1:8102/v1/healthz",
+      "timeout_ms": 3000
+    }
   },
-  "compat": { "app_version": ">=0.1.0" },
+  "compat": {
+    "app_version": ">=0.1.0"
+  },
   "dependencies": [
-    { "name": "Python", "version": ">=3.11", "type": "runtime" },
-    { "name": "fastapi", "version": ">=0.115", "type": "library" },
-    { "name": "uvicorn", "version": ">=0.32", "type": "library" },
-    { "name": "jinja2", "version": ">=3.1", "type": "library" },
-    { "name": "pyyaml", "version": ">=6.0", "type": "library" }
+    {
+      "name": "Python",
+      "version": ">=3.11",
+      "type": "runtime"
+    },
+    {
+      "name": "fastapi",
+      "version": ">=0.115",
+      "type": "library"
+    },
+    {
+      "name": "uvicorn",
+      "version": ">=0.32",
+      "type": "library"
+    },
+    {
+      "name": "jinja2",
+      "version": ">=3.1",
+      "type": "library"
+    },
+    {
+      "name": "pyyaml",
+      "version": ">=6.0",
+      "type": "library"
+    }
   ],
   "model_packs": [
     {
       "id": "ollama-llama3.2",
       "name": "Llama 3.2（Ollama 本地模型）",
       "size_mb": 2013,
-      "hardware_req": { "gpu": "optional", "ram_mb": 8192, "disk_mb": 2500 },
+      "hardware_req": {
+        "gpu": "optional",
+        "ram_mb": 8192,
+        "disk_mb": 2500
+      },
       "privacy": "offline",
       "recommended": false
     }
   ],
   "permissions": {
     "network": [],
-    "filesystem": ["{data_dir}/omninexus", "{repo}/OmniNexus"],
+    "filesystem": [
+      "{data_dir}/omninexus",
+      "{repo}/OmniNexus"
+    ],
     "devices": []
   },
-  "signature": { "algo": "SHA-256 + Ed25519", "value": "" }
+  "admin_ui": {
+    "kind": "llm",
+    "title": "模型厂商（LLM）",
+    "capabilities": [
+      "list",
+      "create",
+      "update",
+      "delete",
+      "toggle",
+      "test",
+      "discover",
+      "set_default",
+      "export",
+      "import"
+    ],
+    "config_source": {
+      "kind": "module_api",
+      "path": ".env"
+    },
+    "endpoints": {
+      "custom": "/v1/custom-providers",
+      "custom_test": "/v1/custom-providers/test",
+      "custom_discover": "/v1/custom-providers/discover-models",
+      "builtin": "/v1/providers",
+      "defaults": "/v1/provider-defaults",
+      "export": "/v1/provider-config/export",
+      "import": "/v1/provider-config/import",
+      "models": "/v1/models"
+    },
+    "note": "自定义厂商走模块自己的 API（AES-GCM 存 SQLite，密钥不经启动器持久化）；内置厂商仍读模块根 .env。"
+  },
+  "signature": {
+    "algo": "SHA-256 + Ed25519",
+    "value": ""
+  }
 }

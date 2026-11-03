@@ -57,6 +57,34 @@ export interface ReservedSpec {
   note: string;
 }
 
+/**
+ * 管理界面声明（`admin_ui`）。
+ *
+ * 为什么放进 manifest：这样"哪个模块对应哪个管理界面"是**模块自己声明的**，
+ * 启动器不需要硬编码映射；插件作者也能照此约定接入自己的界面。
+ *
+ * 约定：
+ * - **缺省** = 该模块没有管理界面，启动器不渲染；
+ * - 只有**已安装**的模块才会渲染对应界面（未安装不显示）；
+ * - `capabilities` 是能力白名单，启动器只暴露其中列出的操作；
+ * - `config_source.kind`：
+ *   - `env_file`   → 启动器直接读写模块根的配置文件；
+ *   - `module_api` → 通过模块自己的 HTTP API 读写（密钥不由启动器持久化）。
+ */
+export interface AdminUiSpec {
+  kind: "llm" | "tts" | "input" | "app";
+  title: string;
+  capabilities: string[];
+  config_source: {
+    kind: "env_file" | "module_api";
+    path?: string;
+  };
+  /** 各操作的相对路径（供 module_api 使用）。值必须是字符串。 */
+  endpoints?: Record<string, string>;
+  /** 给开发者看的说明，UI 不强制展示。 */
+  note?: string;
+}
+
 export interface ModuleManifest {
   module_id: string;
   name: string;
@@ -68,6 +96,8 @@ export interface ModuleManifest {
   model_packs: ModelPack[];
   permissions: ModulePermissions;
   reserved?: ReservedSpec;
+  /** 管理界面声明；缺省表示没有管理界面 */
+  admin_ui?: AdminUiSpec;
   signature: { algo: string; value: string };
 }
 
@@ -81,6 +111,64 @@ const asBool = (v: unknown, fallback = false): boolean =>
   typeof v === "boolean" ? v : fallback;
 
 const CATEGORIES: ModuleCategory[] = ["core", "optional", "reserved", "experimental"];
+
+const ADMIN_KINDS = ["llm", "tts", "input", "app"] as const;
+const CONFIG_KINDS = ["env_file", "module_api"] as const;
+
+/**
+ * 解析 `admin_ui`。
+ *
+ * 结构不合法时**返回 undefined 而不是抛错**：一个坏的管理界面声明不该让
+ * 整个模块无法显示。但会在 reason 里记录（由上层决定是否提示）。
+ */
+export function parseAdminUi(
+  raw: unknown,
+): { spec?: AdminUiSpec; reason?: string } {
+  if (raw === undefined || raw === null) return {};
+  if (!isRecord(raw)) return { reason: "admin_ui 不是对象" };
+
+  const kind = raw.kind;
+  if (typeof kind !== "string" || !ADMIN_KINDS.includes(kind as (typeof ADMIN_KINDS)[number])) {
+    return { reason: `admin_ui.kind 取值非法：${String(kind)}` };
+  }
+
+  const title = asString(raw.title);
+  if (!title) return { reason: "admin_ui.title 缺失" };
+
+  const capabilities = Array.isArray(raw.capabilities)
+    ? raw.capabilities.filter((x): x is string => typeof x === "string")
+    : [];
+
+  const cfgRaw = isRecord(raw.config_source) ? raw.config_source : {};
+  const cfgKind = cfgRaw.kind;
+  if (
+    typeof cfgKind !== "string" ||
+    !CONFIG_KINDS.includes(cfgKind as (typeof CONFIG_KINDS)[number])
+  ) {
+    return { reason: `admin_ui.config_source.kind 取值非法：${String(cfgKind)}` };
+  }
+
+  const endpoints: Record<string, string> = {};
+  if (isRecord(raw.endpoints)) {
+    for (const [k, v] of Object.entries(raw.endpoints)) {
+      if (typeof v === "string" && v.startsWith("/")) endpoints[k] = v;
+    }
+  }
+
+  return {
+    spec: {
+      kind: kind as AdminUiSpec["kind"],
+      title,
+      capabilities,
+      config_source: {
+        kind: cfgKind as "env_file" | "module_api",
+        path: asString(cfgRaw.path) || undefined,
+      },
+      endpoints,
+      note: asString(raw.note) || undefined,
+    },
+  };
+}
 
 export function parseManifest(raw: unknown): ModuleManifest {
   if (!isRecord(raw)) throw new ManifestError("?", "root", "不是对象");
@@ -100,6 +188,8 @@ export function parseManifest(raw: unknown): ModuleManifest {
   if (!Array.isArray(raw.model_packs)) {
     throw new ManifestError(moduleId, "model_packs", "必须是数组（模型权重，可为空）");
   }
+
+  const adminResult = parseAdminUi(raw.admin_ui);
 
   const entryRaw = isRecord(raw.entry) ? raw.entry : {};
   const healthRaw = isRecord(entryRaw.health) ? entryRaw.health : {};
@@ -190,6 +280,7 @@ export function parseManifest(raw: unknown): ModuleManifest {
       devices: strArray(permRaw.devices),
     },
     reserved,
+    ...(adminResult.spec ? { admin_ui: adminResult.spec } : {}),
     signature: { algo: asString(sigRaw.algo, "SHA-256 + Ed25519"), value: asString(sigRaw.value) },
   };
 }

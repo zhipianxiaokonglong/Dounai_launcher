@@ -26,16 +26,7 @@ ed25519-dalek = { version = "3.0.0", features = ["rand_core"] }
 base64 = "0.23.1"
 tauri = { version = "2.12.5", features = [] }
 tauri-plugin-single-instance = "2.5.4"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
-
-# L-02：DPAPI 加密密钥库
-# 只用于 CryptProtectData / CryptUnprotectData，不引入重型依赖
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", default-features = false, features = [
-    "Win32_Foundation",
-    "Win32_Security_Cryptography",
-    "Win32_System_Memory",
-] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 
 [dev-dependencies]
 tempfile = "3"

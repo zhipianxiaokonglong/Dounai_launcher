@@ -12,29 +12,76 @@
       "EMOTION_TTS_DATA_DIR": "{data_dir}/moodvoice",
       "EMOTION_TTS_ROOT": "{repo}/output"
     },
-    "health": { "url": "http://127.0.0.1:8103/api/health", "timeout_ms": 3000 }
+    "health": {
+      "url": "http://127.0.0.1:8103/api/health",
+      "timeout_ms": 3000
+    }
   },
-  "compat": { "app_version": ">=0.1.0" },
+  "compat": {
+    "app_version": ">=0.1.0"
+  },
   "dependencies": [
-    { "name": "Python", "version": ">=3.11", "type": "runtime" },
-    { "name": "fastapi", "version": ">=0.115", "type": "library" },
-    { "name": "uvicorn", "version": ">=0.32", "type": "library" },
-    { "name": "edge-tts", "version": ">=7,<8", "type": "library" }
+    {
+      "name": "Python",
+      "version": ">=3.11",
+      "type": "runtime"
+    },
+    {
+      "name": "fastapi",
+      "version": ">=0.115",
+      "type": "library"
+    },
+    {
+      "name": "uvicorn",
+      "version": ">=0.32",
+      "type": "library"
+    },
+    {
+      "name": "edge-tts",
+      "version": ">=7,<8",
+      "type": "library"
+    }
   ],
   "model_packs": [
     {
       "id": "gpt-sovits",
       "name": "GPT-SoVITS（本地 TTS）",
       "size_mb": 3584,
-      "hardware_req": { "gpu": "required", "ram_mb": 8192, "disk_mb": 4096 },
+      "hardware_req": {
+        "gpu": "required",
+        "ram_mb": 8192,
+        "disk_mb": 4096
+      },
       "privacy": "offline",
       "recommended": false
     }
   ],
   "permissions": {
     "network": [],
-    "filesystem": ["{data_dir}/moodvoice", "{repo}/output"],
+    "filesystem": [
+      "{data_dir}/moodvoice",
+      "{repo}/output"
+    ],
     "devices": []
   },
-  "signature": { "algo": "SHA-256 + Ed25519", "value": "" }
+  "admin_ui": {
+    "kind": "tts",
+    "title": "语音厂商（TTS）",
+    "capabilities": [
+      "list",
+      "write_env"
+    ],
+    "config_source": {
+      "kind": "env_file",
+      "path": ".env"
+    },
+    "endpoints": {
+      "builtin": "/api/health"
+    },
+    "note": "语音层目前只有读取接口（/api/health 返回 providers 与 missing）；写入由启动器改 .env。"
+  },
+  "signature": {
+    "algo": "SHA-256 + Ed25519",
+    "value": ""
+  }
 }
