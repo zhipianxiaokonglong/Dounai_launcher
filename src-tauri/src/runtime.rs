@@ -416,9 +416,68 @@ pub fn split_command(command: &str) -> Result<(String, Vec<String>), StartError>
 
 /// 占位符替换。
 pub fn resolve_placeholders(raw: &str, repo: &Path, data_dir: &Path, app_local: &Path) -> String {
-    raw.replace("{repo}", &repo.to_string_lossy())
+    // `repo` 参数实际语义是**模块根目录**（见 entry_spec 调用处）。
+    // `{module_dir}` 是公开文档里的规范名；`{repo}` 作为历史别名保留，
+    // 使既有 manifest 无需改动即可继续工作。
+    raw.replace("{module_dir}", &repo.to_string_lossy())
+        .replace("{repo}", &repo.to_string_lossy())
         .replace("{data_dir}", &data_dir.to_string_lossy())
         .replace("{app_local}", &app_local.to_string_lossy())
+}
+
+/// 校验 manifest 声明的程序路径是否被允许执行。
+///
+/// 规则（只约束"带路径"的命令）：
+/// - 首 token 含 `/`、`\\` 或盘符 `:` → 必须落在模块根内，且文件存在；
+/// - 首 token 是裸名（`python`、`cmd` 等）→ 放行，交给 PATH 解析。
+///
+/// 这条限制是**公开 manifest 格式的前置条件**：不限制的话，
+/// 一个 manifest 就能让启动器执行任意程序。
+pub fn check_program_in_root(root: &Path, program: &str) -> Result<(), String> {
+    let p = program.trim();
+    if p.is_empty() {
+        return Err("entry.command 为空".to_string());
+    }
+
+    let has_sep = p.contains('/') || p.contains('\\') || p.contains(':');
+    if !has_sep {
+        // 裸命令名：由 PATH 解析（如 python / cmd / uv）
+        return Ok(());
+    }
+
+    let candidate = PathBuf::from(p);
+    let joined = if candidate.is_absolute() {
+        candidate
+    } else {
+        root.join(candidate)
+    };
+    let norm_root = normalize(root);
+    let norm_joined = normalize(&joined);
+    if !norm_joined.starts_with(&norm_root) {
+        return Err(format!(
+            "entry.command 必须位于模块目录内，实际为：{}",
+            pretty(p)
+        ));
+    }
+
+    // 关键：模块根可能带 `\\?\` 前缀（verbatim 路径）。该形式下 Windows
+    // **不做任何路径归一化**，正斜杠会被当作非法字符、`exists()` 直接返回 false。
+    // manifest 里普遍写 `/`，所以必须先归一化分隔符再判断存在性。
+    let checked = normalize_program_separators(&joined.to_string_lossy());
+    if !PathBuf::from(&checked).exists() {
+        return Err(format!(
+            "entry.command 指向的文件不存在：{}",
+            pretty(&checked)
+        ));
+    }
+    Ok(())
+}
+
+/// 展示用：去掉 Windows verbatim 前缀 `\\?\`，避免错误信息吓到用户。
+fn pretty(p: &str) -> String {
+    let raw = p.replace('/', "\\");
+    let prefix = "\\\\?\\";
+    raw.strip_prefix(prefix).unwrap_or(&raw).to_string()
 }
 
 /// 把程序路径的分隔符归一化（Windows 上 `/` → `\`）。
@@ -772,5 +831,104 @@ mod tests {
         let order: Vec<String> = pm.stop_all().into_iter().map(|v| v.module_id).collect();
         assert_eq!(order, vec!["b", "a"]);
         assert!(pm.list().is_empty());
+    }
+
+    #[test]
+    fn module_dir_placeholder_is_canonical_and_repo_is_alias() {
+        // {module_dir} 是规范名，{repo} 是历史别名——两者必须等价
+        let root = Path::new("C:/modules/omninexus");
+        let a = resolve_placeholders("{module_dir}/x", root, Path::new("C:/d"), Path::new("C:/a"));
+        let b = resolve_placeholders("{repo}/x", root, Path::new("C:/d"), Path::new("C:/a"));
+        assert_eq!(a, b, "{{module_dir}} 与 {{repo}} 必须解析成同一路径");
+        assert!(a.contains("omninexus"));
+    }
+
+    #[test]
+    fn program_inside_module_root_is_allowed() {
+        let dir = std::env::temp_dir().join(format!(
+            "dounai-prog-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("app.exe");
+        std::fs::write(&exe, b"fake").unwrap();
+
+        // 绝对路径且在根内 -> 放行
+        assert!(
+            check_program_in_root(&dir, exe.to_str().unwrap()).is_ok(),
+            "模块根内的程序应放行"
+        );
+        // 相对路径 -> 按模块根拼接，也放行
+        assert!(
+            check_program_in_root(&dir, "app.exe").is_ok(),
+            "相对路径应允许"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn program_outside_module_root_is_rejected() {
+        let dir = std::env::temp_dir().join(format!(
+            "dounai-prog-bad-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 本次改动要防的核心场景：manifest 指向系统程序
+        let bad = check_program_in_root(&dir, "C:/Windows/System32/cmd.exe");
+        assert!(bad.is_err(), "模块根外的绝对路径必须拒绝");
+        assert!(
+            bad.unwrap_err().contains("模块目录内"),
+            "错误信息应说明原因"
+        );
+
+        // 路径穿越也必须拒绝
+        assert!(
+            check_program_in_root(&dir, "../evil.exe").is_err(),
+            "上跳路径必须拒绝"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn bare_program_name_is_allowed_for_path_lookup() {
+        // 裸名交给 PATH 解析（既有 manifest 用 python / cmd / uv 这类）
+        let root = Path::new("C:/modules/x");
+        assert!(check_program_in_root(root, "python").is_ok());
+        assert!(check_program_in_root(root, "cmd").is_ok());
+        assert!(check_program_in_root(root, "").is_err(), "空命令必须拒绝");
+    }
+
+    #[test]
+    fn missing_program_file_is_rejected() {
+        let dir = std::env::temp_dir().join(format!(
+            "dounai-prog-miss-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // 注意：裸名（无分隔符）按设计交给 PATH 解析，因此会放行。
+        // 这里要验证的是"带路径但文件不存在"的情况。
+        let abs_missing = dir.join("nope.exe");
+        let r = check_program_in_root(&dir, abs_missing.to_str().unwrap());
+        assert!(r.is_err(), "带路径但不存在的文件不能放行");
+        assert!(
+            r.unwrap_err().contains("不存在"),
+            "错误信息应说明文件不存在"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

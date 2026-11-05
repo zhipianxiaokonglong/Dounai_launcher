@@ -154,6 +154,9 @@ impl AppState {
         let app_local = self.data_root.clone();
 
         let command = crate::runtime::resolve_placeholders(command, &root, &data_dir, &app_local);
+        // 安全校验：带路径的命令必须落在模块根内（详见 check_program_in_root）
+        let program_token = command.split_whitespace().next().unwrap_or("");
+        crate::runtime::check_program_in_root(&root, program_token)?;
         let working =
             crate::runtime::resolve_placeholders(working_raw, &root, &data_dir, &app_local);
         let working_dir = crate::runtime::check_working_dir(&root, &working)
