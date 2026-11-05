@@ -1,7 +1,7 @@
 {
   "name": "dounai-launcher",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.3.1",
   "description": "Dounai 启动器：安装、环境与模块管理",
   "license": "GPL-3.0-or-later",
   "type": "module",

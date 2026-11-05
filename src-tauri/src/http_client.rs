@@ -23,7 +23,7 @@ impl ReqwestClient {
             .timeout(timeout)
             .connect_timeout(Duration::from_secs(10))
             .redirect(reqwest::redirect::Policy::none())
-            .user_agent("dounai-launcher/0.1.0")
+            .user_agent("dounai-launcher/0.3.1")
             .build()
             .map_err(|e| format!("创建 HTTP 客户端失败：{e}"))?;
         Ok(Self { client })
