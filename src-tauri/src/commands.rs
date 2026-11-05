@@ -1115,244 +1115,92 @@ pub fn add_local_modules_bulk(
 }
 
 /* ------------------------------------------------------------------ */
-/* 厂商密钥（三层统一入口）                                            */
+/* 模块自带管理界面（打开独立窗口）                                    */
 /* ------------------------------------------------------------------ */
 
 #[derive(Debug, Deserialize)]
-pub struct SetVendorKeyRequest {
-    /// 层（模块 id）：dounai-input / omninexus / moodvoice
+pub struct OpenAdminUiRequest {
+    /// 目标模块
     pub module_id: String,
-    /// 环境变量名，如 DASHSCOPE_API_KEY
-    pub env_name: String,
-    /// 用户输入的密钥值。**只经手一次**：写入模块 .env 后即丢弃，
-    /// 启动器不落盘、不缓存、不写日志、不回显。
-    pub value: String,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct ClearVendorKeyRequest {
-    pub module_id: String,
-    pub env_name: String,
-}
-
-/// 三层各自的厂商状态（**不含任何密钥值**）。
+/// 打开模块自带的管理界面窗口。
+///
+/// 走独立顶层窗口而不是 iframe：上游模块都设了
+/// `X-Frame-Options: DENY` / `frame-ancestors 'none'`（防点击劫持），
+/// iframe 会被浏览器直接拒绝；顶层窗口不受该限制，因此不需要改上游一行代码。
+///
+/// 安全边界：
+/// - URL 由「模块 manifest 的 health 地址 + admin_ui.web_ui.path」拼成，
+///   **不接受前端传入的任意 URL**；
+/// - 只允许回环地址；
+/// - 窗口 label 按模块派生，重复点击复用同一窗口。
 #[tauri::command]
-pub fn vendor_overview(state: State<AppState>) -> Vec<crate::vendor_keys::LayerView> {
-    vendor_overview_inner(&state)
-}
+pub async fn open_admin_window(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    request: OpenAdminUiRequest,
+) -> Result<String, String> {
+    // 先把 URL 算出来（纯读操作，不碰窗口 API）
+    let url = admin_url_for(&state, &request.module_id)?;
+    let module_id = request.module_id.clone();
 
-pub fn vendor_overview_inner(state: &AppState) -> Vec<crate::vendor_keys::LayerView> {
-    use crate::vendor_keys::{
-        base_from_health_url, http_get_local, parse_catalog, LayerView, LAYERS,
-    };
+    // 关键：窗口必须在**独立线程**里创建。
+    //
+    // Tauri 2 在 Windows 上的已知问题：在同步命令/事件处理器里创建
+    // WebviewWindow 会死锁（Webview2 的 COM 初始化与消息循环冲突）。
+    // 表现为：窗口外壳出现了，但 webview 内容停在 about:blank。
+    //
+    // 这里用 spawn_blocking 把建窗口挪出主线程，再用同步通道把结果带回来。
+    let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
+    let app_for_thread = app.clone();
+    let url_for_thread = url.clone();
 
-    let mut out = Vec::new();
-    for spec in LAYERS {
-        let installed = state
-            .store
-            .lock()
-            .ok()
-            .and_then(|s| {
-                s.get(spec.module_id)
-                    .map(|st| st.install == InstallState::Installed)
-            })
-            .unwrap_or(false);
-        let mut view = LayerView {
-            module_id: spec.module_id.to_string(),
-            label: spec.label.to_string(),
-            installed,
-            running: false,
-            providers: Vec::new(),
-            error: None,
-            active_provider: None,
-            version_check: None,
-            // 启动器不再有"共享区"概念：跨层同步由前端对多个模块分别写 .env。
-            shared_keys: Vec::new(),
-            // 密钥存储形态由**模块自己**决定，启动器无从得知也不需要知道。
-            // 传 false 仅表示"启动器侧不加密存储"（因为它根本不存）。
-            encrypted_store: false,
-        };
+    std::thread::spawn(move || {
+        let result = (|| -> Result<String, String> {
+            use tauri::Manager;
 
-        if !installed {
-            view.error = Some("尚未安装/登记该层模块".to_string());
-            out.push(view);
-            continue;
-        }
+            let label = format!("admin-{module_id}");
 
-        // L-04：比对 manifest 手写版本与上游声明版本。
-        // 只做提示，不阻塞——手写版本可能是有意的（例如本地开发）。
-        if let Ok(root) = state.module_root(spec.module_id) {
-            let manifest_version = crate::vendor_keys::read_module_manifest_version(&root);
-            if !manifest_version.is_empty() {
-                view.version_check =
-                    Some(crate::vendor_keys::check_version(&manifest_version, &root));
+            // 已存在同名窗口 → 复用并聚焦
+            if let Some(existing) = app_for_thread.get_webview_window(&label) {
+                let _ = existing.show();
+                let _ = existing.set_focus();
+                return Ok(url_for_thread.clone());
             }
-        }
 
-        // 从 manifest 的健康地址推出服务根，再拼各层的清单路径
-        let health_url = match state.entry_spec(spec.module_id) {
-            Ok(e) => e.health_url,
-            Err(e) => {
-                view.error = Some(e);
-                out.push(view);
-                continue;
-            }
-        };
-        let Some(health_url) = health_url else {
-            view.error = Some("该模块没有健康端点，无法查询厂商清单".to_string());
-            out.push(view);
-            continue;
-        };
+            let parsed = url_for_thread
+                .parse::<tauri::Url>()
+                .map_err(|e| format!("管理界面地址不合法：{e}"))?;
 
-        // 存活判定：进程表 **或** 健康端点。
-        //
-        // 只看进程表会误报——启动器重启后内存里的进程表是空的，
-        // 但上游可能仍在运行（用户也可能自己起的）。健康端点才是事实来源。
-        let in_table = state.processes().is_active(spec.module_id);
-        let alive =
-            in_table || crate::runtime::http_ok(&health_url, std::time::Duration::from_millis(800));
-        view.running = alive;
-        if !alive {
-            view.error =
-                Some("模块未运行（进程表与健康端点都不可达），启动后才能读取厂商清单".to_string());
-            out.push(view);
-            continue;
-        }
+            tauri::WebviewWindowBuilder::new(
+                &app_for_thread,
+                label,
+                tauri::WebviewUrl::External(parsed),
+            )
+            .title(format!("{module_id} · 管理界面"))
+            .inner_size(1080.0, 760.0)
+            .min_inner_size(720.0, 520.0)
+            .center()
+            .build()
+            .map_err(|e| format!("打开管理窗口失败：{e}"))?;
 
-        let Some(base) = base_from_health_url(&health_url) else {
-            view.error = Some(format!("健康地址格式不支持：{health_url}"));
-            out.push(view);
-            continue;
-        };
-        let url = format!("{base}{}", spec.catalog_path);
-        // "已保存"改为问模块：读它自己的 .env 里有哪些已知变量
-        let saved = match state.module_root(spec.module_id) {
-            Ok(root) => {
-                let env_file = crate::vendor_keys::EnvFile::locate(&root);
-                let names: Vec<String> = view
-                    .providers
-                    .iter()
-                    .flat_map(|p| p.missing.iter().cloned())
-                    .collect();
-                let configured = env_file.configured(&names);
-                configured
-                    .into_iter()
-                    .filter(|(_, ok)| *ok)
-                    .map(|(k, _)| k)
-                    .collect()
-            }
-            Err(_) => Vec::new(),
-        };
+            Ok(url_for_thread)
+        })();
 
-        match http_get_local(&url, std::time::Duration::from_millis(1500)) {
-            Ok(body) => match parse_catalog(spec.module_id, &body, &saved) {
-                Ok(list) => view.providers = list,
-                Err(e) => view.error = Some(e),
-            },
-            Err(e) => view.error = Some(format!("读取厂商清单失败：{e}")),
-        }
+        let _ = tx.send(result);
+    });
 
-        // 某些层把"当前激活厂商"放在单独的 status 端点（如输入层）
-        if let Some(status_path) = spec.status_path {
-            let status_url = format!("{base}{status_path}");
-            if let Ok(body) = http_get_local(&status_url, std::time::Duration::from_millis(1500)) {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
-                    view.active_provider = v
-                        .get("active_provider")
-                        .and_then(|x| x.as_str())
-                        .map(|s| s.to_string());
-                }
-            }
-            // 读不到就留 None，不影响主流程（不把它当错误）
-        }
-
-        out.push(view);
+    // 等子线程回报（最多 15 秒，避免真出问题时永久挂住）
+    match rx.recv_timeout(std::time::Duration::from_secs(15)) {
+        Ok(r) => r,
+        Err(_) => Err("打开管理窗口超时（请查看启动器日志）".to_string()),
     }
-    out
 }
 
-/// 保存一个厂商密钥并返回最新总览。
-///
-/// 保存后需要**重启对应模块**才生效——上游只在启动时读环境变量。
-#[tauri::command]
-pub fn set_vendor_key(
-    state: State<AppState>,
-    request: SetVendorKeyRequest,
-) -> Result<Vec<crate::vendor_keys::LayerView>, String> {
-    set_vendor_key_inner(&state, &request)?;
-    Ok(vendor_overview_inner(&state))
-}
-
-/// 把密钥写进**该模块自己的** `.env`。
-///
-/// 启动器在这里只做"投递"：定位模块根 → 写一行 → 返回。
-/// 不保留副本、不回读、不写日志，因此满足"启动器不存储密钥"。
-pub fn set_vendor_key_inner(state: &AppState, request: &SetVendorKeyRequest) -> Result<(), String> {
-    let root = state.module_root(&request.module_id)?;
-    let env_file = crate::vendor_keys::EnvFile::locate(&root);
-    env_file.set(&request.env_name, &request.value)
-}
-
-/// 清除一个厂商密钥并返回最新总览。
-#[tauri::command]
-pub fn clear_vendor_key(
-    state: State<AppState>,
-    request: ClearVendorKeyRequest,
-) -> Result<Vec<crate::vendor_keys::LayerView>, String> {
-    clear_vendor_key_inner(&state, &request)?;
-    Ok(vendor_overview_inner(&state))
-}
-
-pub fn clear_vendor_key_inner(
-    state: &AppState,
-    request: &ClearVendorKeyRequest,
-) -> Result<(), String> {
-    let root = state.module_root(&request.module_id)?;
-    let env_file = crate::vendor_keys::EnvFile::locate(&root);
-    env_file.remove(&request.env_name)
-}
-
-/* ------------------------------------------------------------------ */
-/* 模型层厂商管理（API 代理，启动器不存密钥）                          */
-/* ------------------------------------------------------------------ */
-
-#[derive(Debug, Deserialize)]
-pub struct ProviderAdminRequest {
-    /// 动作名，对应 provider_admin 的各个方法
-    pub action: String,
-    /// 目标模块（默认 omninexus）
-    #[serde(default)]
-    pub module_id: Option<String>,
-    /// 上游 id（更新/删除/测试已保存配置时用）
-    #[serde(default)]
-    pub id: Option<String>,
-    /// 请求体（新建/更新/测试/发现时用）
-    #[serde(default)]
-    pub payload: Option<serde_json::Value>,
-    /// 开关（set_enabled 用）
-    #[serde(default)]
-    pub enabled: Option<bool>,
-}
-
-/// 统一的厂商管理入口。
-///
-/// 每次调用都**重新定位模块并新建客户端**，不在启动器内缓存任何上游状态：
-/// 这样模块重启、换端口、换机器都自然跟上，也不需要失效逻辑。
-#[tauri::command]
-pub fn provider_admin_call(
-    state: State<AppState>,
-    request: ProviderAdminRequest,
-) -> Result<serde_json::Value, String> {
-    provider_admin_call_inner(&state, &request)
-}
-
-pub fn provider_admin_call_inner(
-    state: &AppState,
-    request: &ProviderAdminRequest,
-) -> Result<serde_json::Value, String> {
-    let module_id = request.module_id.as_deref().unwrap_or("omninexus");
-
-    // 只有已安装的模块才有管理界面（与 UI 的显示条件一致）
+/// 拼出模块管理页的完整 URL，并做全部前置校验。
+fn admin_url_for(state: &AppState, module_id: &str) -> Result<String, String> {
+    // 已安装才有管理界面
     let installed = state
         .store
         .lock()
@@ -1363,69 +1211,64 @@ pub fn provider_admin_call_inner(
         })
         .unwrap_or(false);
     if !installed {
-        return Err(format!("模块 {module_id} 未安装，没有可管理的厂商配置"));
+        return Err(format!("模块 {module_id} 未安装，没有可打开的管理界面"));
     }
 
-    // 从模块 manifest 的健康地址推出服务根
+    // 读 manifest 里的 admin_ui.web_ui.path
+    let root = state.module_root(module_id)?;
+    let manifest =
+        read_manifest_json(&root).ok_or_else(|| format!("模块 {module_id} 缺少 manifest.json"))?;
+    let web_path = manifest
+        .pointer("/admin_ui/web_ui/path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("模块 {module_id} 没有声明管理界面（admin_ui.web_ui.path）"))?;
+    if !web_path.starts_with('/') {
+        return Err(format!("管理界面路径必须以 / 开头，实际：{web_path}"));
+    }
+
+    let requires_running = manifest
+        .pointer("/admin_ui/web_ui/requires_running")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    // 需要运行时：进程表或健康端点任一为真即可
     let spec = state.entry_spec(module_id)?;
     let Some(health_url) = spec.health_url else {
-        return Err(format!("模块 {module_id} 没有健康端点，无法调用其 API"));
+        return Err(format!("模块 {module_id} 没有健康端点，无法定位管理界面"));
     };
-    let Some(base) = crate::vendor_keys::base_from_health_url(&health_url) else {
+    let Some(base) = crate::module_probe::base_from_health_url(&health_url) else {
         return Err(format!("健康地址格式不支持：{health_url}"));
     };
+    // 只允许回环（与项目既有的出网约束一致）
+    if !base.starts_with("http://127.0.0.1") && !base.starts_with("http://localhost") {
+        return Err(format!("管理界面只允许本机地址，实际：{base}"));
+    }
 
-    let admin = crate::provider_admin::ProviderAdmin::new(base)?;
-    let id = request.id.as_deref().unwrap_or("");
+    if requires_running {
+        let in_table = state.processes().is_active(module_id);
+        let alive =
+            in_table || crate::runtime::http_ok(&health_url, std::time::Duration::from_millis(800));
+        if !alive {
+            return Err(format!(
+                "模块 {module_id} 未运行。请先在「模块」页启动它，再打开管理界面。"
+            ));
+        }
+    }
 
-    let result = match request.action.as_str() {
-        "list" => serde_json::to_value(admin.list()?).map_err(|e| e.to_string())?,
-        "builtin" => admin.builtin()?,
-        "models" => admin.models()?,
-        "defaults" => admin.defaults()?,
-        "create" => admin.create(request.payload.clone().unwrap_or(serde_json::Value::Null))?,
-        "update" => {
-            require_id(id, "update")?;
-            admin.update(
-                id,
-                request.payload.clone().unwrap_or(serde_json::Value::Null),
-            )?
-        }
-        "delete" => {
-            require_id(id, "delete")?;
-            admin.delete(id)?
-        }
-        "set_enabled" => {
-            require_id(id, "set_enabled")?;
-            let enabled = request
-                .enabled
-                .ok_or_else(|| "set_enabled 需要 enabled 参数".to_string())?;
-            admin.set_enabled(id, enabled)?
-        }
-        "test" => admin.test(request.payload.clone().unwrap_or(serde_json::Value::Null))?,
-        "test_saved" => {
-            require_id(id, "test_saved")?;
-            admin.test_saved(id)?
-        }
-        "discover" => admin.discover(request.payload.clone().unwrap_or(serde_json::Value::Null))?,
-        "discover_saved" => {
-            require_id(id, "discover_saved")?;
-            admin.discover_saved(id)?
-        }
-        "set_defaults" => {
-            admin.set_defaults(request.payload.clone().unwrap_or(serde_json::Value::Null))?
-        }
-        other => return Err(format!("未知的厂商管理动作：{other}")),
-    };
-
-    Ok(result)
+    Ok(format!("{base}{web_path}"))
 }
 
-fn require_id(id: &str, action: &str) -> Result<(), String> {
-    if id.trim().is_empty() {
-        return Err(format!("动作 {action} 需要提供厂商 id"));
+/// 读模块根下的 manifest JSON。
+fn read_manifest_json(root: &std::path::Path) -> Option<serde_json::Value> {
+    for name in ["manifest.json", "dounai-manifest.json"] {
+        let path = root.join(name);
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                return Some(v);
+            }
+        }
     }
-    Ok(())
+    None
 }
 
 /* ------------------------------------------------------------------ */

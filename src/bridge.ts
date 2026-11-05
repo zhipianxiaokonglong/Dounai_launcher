@@ -311,88 +311,7 @@ export async function hashFile(path: string): Promise<string> {
   return call<string>("hash_file", { path });
 }
 
-/* ------------------------------------------------------------------ */
-/* 厂商密钥（三层统一入口）                                            */
-/* ------------------------------------------------------------------ */
 
-export interface VendorProvider {
-  id: string;
-  label: string;
-  ready: boolean;
-  /** 还需要哪些环境变量（只有名字，不含值） */
-  missing: string[];
-  /** 其中已由启动器保存的 */
-  saved: string[];
-  privacy: string;
-  /** 上游没说清缺哪个变量：UI 应给出手动填写变量名的入口 */
-  manual_env: boolean;
-}
-
-export interface VersionCheck {
-  /** manifest 里手写的版本 */
-  manifest: string;
-  /** 从上游 pyproject/Cargo.toml 读到的版本（读不到为 null） */
-  upstream: string | null;
-  /** 两者是否一致 */
-  consistent: boolean;
-}
-
-export interface VendorLayer {
-  module_id: string;
-  label: string;
-  installed: boolean;
-  running: boolean;
-  providers: VendorProvider[];
-  error: string | null;
-  /** manifest 版本与上游版本比对（L-04） */
-  version_check: VersionCheck | null;
-  /** 当前激活厂商（来自模块 status 端点；null 表示该层无此概念） */
-  active_provider: string | null;
-  /**
-   * 保留字段：共享区已移除。
-   *
-   * 架构调整后启动器不再有"跨层共享密钥"概念——
-   * 密钥写进各模块自己的 `.env`，跨层同步由前端对多个模块分别写入。
-   * 保留空数组是为了不破坏既有 JSON 结构。
-   */
-  shared_keys: string[];
-  /** 保留字段：启动器不存储密钥，故无加密存储可谈（恒为 false）。 */
-  encrypted_store: boolean;
-}
-
-/** 读取三层厂商状态（不含任何密钥值）。 */
-export async function vendorOverview(): Promise<VendorLayer[]> {
-  return call<VendorLayer[]>("vendor_overview");
-}
-
-/** 保存一个厂商密钥（值不会被回读）。 */
-/**
- * 把密钥写进该模块自己的 `.env`。
- *
- * 启动器只做投递：写完即不再持有（不落盘、不回读、不回显）。
- */
-export async function setVendorKey(
-  moduleId: string,
-  envName: string,
-  value: string,
-): Promise<VendorLayer[]> {
-  return call<VendorLayer[]>("set_vendor_key", {
-    request: { module_id: moduleId, env_name: envName, value },
-  });
-}
-
-/** 清除一个厂商密钥。 */
-export async function clearVendorKey(
-  moduleId: string,
-  envName: string,
-): Promise<VendorLayer[]> {
-  return call<VendorLayer[]>("clear_vendor_key", {
-    request: { module_id: moduleId, env_name: envName },
-  });
-}
-
-/* ------------------------------------------------------------------ */
-/* 模型层厂商管理（重构后的界面，走模块自己的 API）                      */
 /* ------------------------------------------------------------------ */
 
 export type ProviderAction =
@@ -410,24 +329,23 @@ export type ProviderAction =
   | "discover_saved"
   | "set_defaults";
 
-export interface ProviderAdminRequest {
-  action: ProviderAction;
-  moduleId?: string;
-  id?: string;
-  payload?: Record<string, unknown>;
-  enabled?: boolean;
-}
+
+/* ------------------------------------------------------------------ */
+/* 模块自带管理界面                                                    */
+/* ------------------------------------------------------------------ */
 
 /**
- * 统一调用模块的厂商管理 API。
+ * 打开模块自带的管理界面（独立顶层窗口）。
  *
- * 启动器只是代理：密钥只在这次调用中经手，**不落盘、不缓存**。
- * 返回值原样来自模块（含 `apiKeyMasked` 这样的脱敏字段）。
+ * 为什么不是 iframe：三个模块都设了 `X-Frame-Options: DENY` /
+ * `frame-ancestors 'none'`（防点击劫持），iframe 会被浏览器拒绝。
+ * 顶层窗口不受该限制，所以不需要上游做任何改动。
+ *
+ * URL 由 Rust 侧按模块 manifest 的 `admin_ui.web_ui.path` 拼装，
+ * 前端不传任意地址。
  */
-export async function providerAdminCall(
-  request: ProviderAdminRequest,
-): Promise<unknown> {
-  return call<unknown>("provider_admin_call", { request });
+export async function openAdminWindow(moduleId: string): Promise<string> {
+  return call<string>("open_admin_window", { request: { module_id: moduleId } });
 }
 
 /* ------------------------------------------------------------------ */

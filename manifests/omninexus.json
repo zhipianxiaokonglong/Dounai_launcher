@@ -72,6 +72,7 @@
     "kind": "llm",
     "title": "模型厂商（LLM）",
     "capabilities": [
+      "open_web_ui",
       "list",
       "create",
       "update",
@@ -97,7 +98,12 @@
       "import": "/v1/provider-config/import",
       "models": "/v1/models"
     },
-    "note": "自定义厂商走模块自己的 API（AES-GCM 存 SQLite，密钥不经启动器持久化）；内置厂商仍读模块根 .env。"
+    "note": "本模块自带完整 Web 管理界面；启动器只负责打开它，不代理配置、不存密钥。",
+    "web_ui": {
+      "path": "/settings",
+      "label": "模型厂商设置",
+      "requires_running": true
+    }
   },
   "signature": {
     "algo": "SHA-256 + Ed25519",

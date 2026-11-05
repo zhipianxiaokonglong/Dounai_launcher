@@ -68,6 +68,7 @@
     "kind": "tts",
     "title": "语音厂商（TTS）",
     "capabilities": [
+      "open_web_ui",
       "list",
       "write_env"
     ],
@@ -78,7 +79,12 @@
     "endpoints": {
       "builtin": "/api/health"
     },
-    "note": "语音层目前只有读取接口（/api/health 返回 providers 与 missing）；写入由启动器改 .env。"
+    "note": "本模块自带完整 Web 管理界面；启动器只负责打开它，不代理配置、不存密钥。",
+    "web_ui": {
+      "path": "/",
+      "label": "语音层控制台",
+      "requires_running": true
+    }
   },
   "signature": {
     "algo": "SHA-256 + Ed25519",

@@ -19,12 +19,9 @@ import {
   setModuleEnabled,
   uninstallModule,
   installModule,
+  openAdminWindow,
   refreshCatalog,
   purgeLocalData,
-  vendorOverview,
-  setVendorKey,
-  clearVendorKey,
-  providerAdminCall,
   scanLocalModules,
   addLocalModule,
   addLocalModulesBulk,
@@ -38,7 +35,6 @@ import {
   enableDevMode,
   BridgeUnavailableError,
   type ModuleView,
-  type VendorLayer,
   type RustEnvReport,
   type TrustInfo,
 } from "../bridge.js";
@@ -61,6 +57,20 @@ interface El {
   executeHint: HTMLElement;
   envBody: HTMLElement;
   btnRefresh: HTMLButtonElement;
+}
+
+/** HTML 转义（卡片模板里插入用户可控字符串时使用）。 */
+function esc(s: string): string {
+  return s.replace(/[&<>"']/g, (ch) => {
+    const map: Record<string, string> = {
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;",
+    };
+    return map[ch] ?? ch;
+  });
 }
 
 function must<T extends HTMLElement>(id: string): T {
@@ -101,17 +111,7 @@ const state = {
   trust: null as TrustInfo | null,
   /** 开发者模式（隐藏入口开启，本次会话内生效） */
   devMode: false,
-  vendorLayers: [] as VendorLayer[],
-  /** 模型层自定义厂商（来自模块 API，含掩码 Key） */
-  customProviders: [] as Array<Record<string, unknown>>,
-  /** 能力预设（来自列表接口，供表单选） */
-  capabilityPresets: {} as Record<string, unknown>,
-  /** 默认厂商/模型 */
-  providerDefaults: null as Record<string, unknown> | null,
-  /** 探测到的模型候选（用于填充表单） */
-  discoveredModels: [] as string[],
-  /** 最近一次测试结果 */
-  lastTestResult: null as unknown,
+
   /** 最近一次扫描出的本地模块候选 */
   scanCandidates: [] as Array<{ path: string; name: string; module_id: string }>,
 };
@@ -330,6 +330,7 @@ function renderModules(): void {
       if (act === "stop") void handleStartStop(id, "stop");
       if (act === "restart") void handleStartStop(id, "restart");
       if (act === "unlink") void handleUnlink(id);
+      if (act === "admin") void handleOpenAdmin(id);
     });
   });
 }
@@ -355,6 +356,17 @@ function renderActionButtons(m: ModuleManifest, installed: boolean): string {
   const enabled = st?.enabled ?? true;
 
   const parts: string[] = [];
+
+  // 模块自带管理界面：未安装/未声明都不显示；未运行且需要运行时禁用
+  const webUi = m.admin_ui?.web_ui;
+  if (webUi) {
+    const canOpen = running || !webUi.requires_running;
+    const tip = canOpen ? "" : ' title="先启动该模块，管理界面才可用"';
+    parts.push(
+      `<button class="btn" data-act="admin" data-id="${m.module_id}"` +
+        `${canOpen ? "" : " disabled"}${tip}>${esc(webUi.label)}</button>`,
+    );
+  }
 
   if (running) {
     parts.push(`<button class="btn" data-act="stop" data-id="${m.module_id}">停止</button>`);
@@ -595,6 +607,16 @@ async function handleUnlink(moduleId: string): Promise<void> {
     localMsg(`已解除登记：${name}`);
   } catch (error) {
     localMsg(`解除登记失败：${describeError(error)}`);
+  }
+}
+
+/** 打开模块自带的管理界面（独立窗口）。 */
+async function handleOpenAdmin(moduleId: string): Promise<void> {
+  try {
+    const url = await openAdminWindow(moduleId);
+    opMsg(`已打开管理界面：${url}`);
+  } catch (error) {
+    opMsg(`打开管理界面失败：${describeError(error)}`);
   }
 }
 
@@ -1196,42 +1218,6 @@ el.onlyMissing.addEventListener("change", renderModules);
 
 document.getElementById("btn-local-install")?.addEventListener("click", () => void handleLocalInstall());
 document.getElementById("btn-scan")?.addEventListener("click", () => void handleScan());
-document
-  .getElementById("btn-vendor-refresh")
-  ?.addEventListener("click", () => void loadVendors());
-document.getElementById("vendor-layers")?.addEventListener("click", (event) => {
-  // 自定义厂商的按钮（重构后的厂商管理界面）
-  const provNode = (event.target as HTMLElement).closest("[data-prov]");
-  if (provNode) {
-    void handleProviderAction(provNode as HTMLElement);
-    return;
-  }
-
-  // 手动填变量名（L-05）：上游没给变量名时的兜底路径
-  const manualNode = (event.target as HTMLElement).closest("[data-vk-save-manual]");
-  if (manualNode) {
-    const layer = manualNode.getAttribute("data-layer") ?? "";
-    const nameInput = document.getElementById(
-      manualNode.getAttribute("data-name-input") ?? "",
-    ) as HTMLInputElement | null;
-    const valueInput = document.getElementById(
-      manualNode.getAttribute("data-value-input") ?? "",
-    ) as HTMLInputElement | null;
-    void handleSaveVendorKeyManual(layer, nameInput, valueInput);
-    return;
-  }
-
-  const node = (event.target as HTMLElement).closest("[data-vk-save], [data-vk-clear]");
-  if (!node) return;
-  const layer = node.getAttribute("data-layer") ?? "";
-  const env = node.getAttribute("data-env") ?? "";
-  if (node.hasAttribute("data-vk-save")) {
-    const inputId = node.getAttribute("data-input") ?? "";
-    void handleSaveVendorKey(layer, env, inputId);
-  } else {
-    void handleClearVendorKey(layer, env);
-  }
-});
 document.getElementById("btn-add-local")?.addEventListener("click", () => void handleAddLocal());
 
 el.btnCancel.addEventListener("click", () => {
@@ -1302,12 +1288,10 @@ document.querySelectorAll(".tab").forEach((tab) => {
     const target = (tab as HTMLElement).dataset.tab ?? "modules";
     document.querySelectorAll(".tab").forEach((t) => t.classList.remove("is-active"));
     tab.classList.add("is-active");
-    for (const name of ["modules", "bundles", "vendors", "env"]) {
+    for (const name of ["modules", "bundles", "env"]) {
       const panel = document.getElementById(`panel-${name}`);
       if (panel) panel.hidden = name !== target;
     }
-    // 切到厂商页时按需拉取（避免启动即访问本机端口）
-    if (target === "vendors") void loadVendors();
   });
 });
 
@@ -1370,560 +1354,6 @@ function wireDevModeEntry(): void {
       void handleEnableDevMode();
     }
   });
-}
-
-/* ------------------------------------------------------------------ */
-/* 厂商密钥                                                            */
-/* ------------------------------------------------------------------ */
-
-function vendorMsg(text: string): void {
-  const node = document.getElementById("vendor-msg");
-  if (!node) return;
-  node.hidden = false;
-  node.textContent = text;
-}
-
-function esc(s: string): string {
-  return s.replace(/[&<>"']/g, (ch) => {
-    const map: Record<string, string> = {
-      "&": "&amp;",
-      "<": "&lt;",
-      ">": "&gt;",
-      '"': "&quot;",
-      "'": "&#39;",
-    };
-    return map[ch] ?? ch;
-  });
-}
-
-/** 渲染三层厂商状态与密钥输入框。 */
-function renderVendors(): void {
-  const box = document.getElementById("vendor-layers");
-  if (!box) return;
-
-  const hint = document.getElementById("vendor-hint");
-  if (hint) {
-    const ready = state.vendorLayers.filter((l) => l.running).length;
-    const parts = [
-      state.vendorLayers.length === 0
-        ? "尚未读取"
-        : `${ready}/${state.vendorLayers.length} 层正在运行`,
-      // 架构说明：密钥不归启动器保管
-      "密钥写入各模块自己的配置文件，启动器不保留副本",
-    ];
-    hint.textContent = parts.filter(Boolean).join(" · ");
-  }
-
-  // 按 admin_ui 与安装状态过滤：未安装 / 未声明界面的模块不渲染
-  const visible = state.vendorLayers.filter((layer) => {
-    if (!layer.installed) return false;
-    return true;
-  });
-  const noneHint = document.getElementById("vendor-none");
-  if (noneHint) noneHint.hidden = visible.length > 0 || state.vendorLayers.length === 0;
-
-  if (state.vendorLayers.length === 0) {
-    box.innerHTML = '<p class="empty">还没有数据，点上方「刷新厂商状态」。</p>';
-    return;
-  }
-  if (visible.length === 0) {
-    box.innerHTML = "";
-    return;
-  }
-
-  box.innerHTML = visible
-    .map((layer) => {
-      // L-04：manifest 手写版本与上游声明版本不一致时给一个醒目提示。
-      // 只提示不阻塞——手写版本可能是有意的（例如本地开发改过 pyproject）。
-      const vc = layer.version_check;
-      // 当前激活厂商（如输入层的 active_provider）
-      const activeBadge = layer.active_provider
-        ? `<span class="badge badge--ok">当前：${esc(layer.active_provider)}</span>`
-        : "";
-
-      const versionBadge =
-        vc && vc.upstream && !vc.consistent
-          ? `<span class="badge badge--warn" title="manifest 写 ${esc(vc.manifest)}，上游声明 ${esc(vc.upstream)}">版本不一致</span>`
-          : "";
-
-      // 标题优先取模块自己声明的 admin_ui.title（插件作者可自定义）
-      const manifest = state.modules.get(layer.module_id);
-      const adminTitle = manifest?.admin_ui?.title;
-      const adminKind = manifest?.admin_ui?.kind;
-
-      const head = `
-        <div class="plan__title" style="display:flex;gap:8px;align-items:center">
-          ${esc(adminTitle || layer.label)}
-          ${adminKind ? `<span class="badge badge--optional">${esc(adminKind)}</span>` : ""}
-          <span class="badge badge--optional">${esc(layer.module_id)}</span>
-          ${layer.installed ? '<span class="badge badge--ok">已安装</span>' : '<span class="badge badge--warn">未安装</span>'}
-          ${layer.running ? '<span class="badge badge--ok">运行中</span>' : '<span class="badge badge--warn">未运行</span>'}
-          ${versionBadge}
-          ${activeBadge}
-        </div>
-        ${
-          vc && vc.upstream && !vc.consistent
-            ? `<p class="card__desc" style="margin:6px 0 0">manifest 声明版本 <code>${esc(vc.manifest)}</code>，上游实际 <code>${esc(vc.upstream)}</code>。建议更新 manifest，否则依赖判断可能失真。</p>`
-            : ""
-        }`;
-
-      if (layer.error) {
-        return `<div class="plan" style="margin-bottom:12px">${head}
-          <p class="card__desc" style="margin:8px 0 0">${esc(layer.error)}</p>
-        </div>`;
-      }
-
-      const rows = layer.providers
-        .map((p) => {
-          const status = p.ready
-            ? '<span class="badge badge--ok">可用</span>'
-            : '<span class="badge badge--warn">缺配置</span>';
-          const missing = p.missing
-            .map((env) => {
-              const saved = p.saved.includes(env);
-              const id = `vk-${layer.module_id}-${p.id}-${env}`;
-              return `
-                <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
-                  <code>${esc(env)}</code>
-                  ${saved ? '<span class="badge badge--ok">已保存</span>' : ""}
-
-                  <input class="input" id="${esc(id)}" type="password" placeholder="粘贴密钥"
-                         style="max-width:260px" />
-                  <button class="btn btn--primary" data-vk-save="1"
-                          data-layer="${esc(layer.module_id)}"
-                          data-env="${esc(env)}"
-                          data-input="${esc(id)}">保存</button>
-                  ${saved
-                    ? `<button class="btn" data-vk-clear="1"
-                         data-layer="${esc(layer.module_id)}"
-                         data-env="${esc(env)}">清除</button>`
-                    : ""}
-                </div>`;
-            })
-            .join("");
-
-          // 上游没说清缺哪个变量（L-05）：给出手填入口，而不是只显示"缺配置"
-          const manualRow = p.manual_env
-            ? `<div style="margin-top:8px">
-                 <p class="card__desc" style="margin:0 0 6px">上游没有明确给出变量名，请手动填写（例如 <code>OPENAI_API_KEY</code>）：</p>
-                 <div style="display:flex;gap:8px;flex-wrap:wrap">
-                   <input class="input" id="${esc(`vkm-${layer.module_id}-${p.id}`)}" placeholder="变量名"
-                          style="max-width:220px" />
-                   <input class="input" id="${esc(`vkv-${layer.module_id}-${p.id}`)}" type="password" placeholder="密钥值"
-                          style="max-width:220px" />
-                   <button class="btn btn--primary" data-vk-save-manual="1"
-                           data-layer="${esc(layer.module_id)}"
-                           data-name-input="${esc(`vkm-${layer.module_id}-${p.id}`)}"
-                           data-value-input="${esc(`vkv-${layer.module_id}-${p.id}`)}">保存</button>
-                 </div>
-               </div>`
-            : "";
-
-          return `<div style="border-top:1px solid rgba(0,0,0,.08);padding:10px 0">
-            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-              <strong>${esc(p.label)}</strong>
-              <span class="badge badge--optional">${esc(p.id)}</span>
-              <span class="badge badge--optional">${esc(p.privacy)}</span>
-              ${status}
-            </div>
-            ${
-              p.missing.length > 0
-                ? missing
-                : p.ready
-                  ? '<p class="card__desc" style="margin:6px 0 0">无需额外配置。</p>'
-                  : p.manual_env
-                    ? ""
-                    : '<p class="card__desc" style="margin:6px 0 0">此厂商当前不可用，但原因不是缺密钥（可能需要安装本地模型或启动本地服务）。</p>'
-            }
-            ${manualRow}
-          </div>`;
-        })
-        .join("");
-
-      // LLM 类型且有 API 能力的模块，追加自定义厂商管理界面
-      const providerBlock =
-        adminKind === "llm" && manifest?.admin_ui?.endpoints?.custom
-          ? renderCustomProviders(layer.module_id)
-          : "";
-
-      return `<div class="plan" style="margin-bottom:12px">${head}
-        <div style="margin-top:10px">${rows || '<p class="card__desc">该层没有返回任何厂商。</p>'}</div>
-        ${providerBlock}
-      </div>`;
-    })
-    .join("");
-}
-
-/** 读取三层厂商状态。 */
-async function loadVendors(): Promise<void> {
-  if (!isDesktop()) {
-    vendorMsg("需要桌面端才能读取厂商状态。");
-    return;
-  }
-  vendorMsg("正在读取三层厂商状态…");
-  try {
-    state.vendorLayers = await vendorOverview();
-    renderVendors();
-    const failed = state.vendorLayers.filter((l) => l.error);
-    vendorMsg(
-      failed.length === 0
-        ? "已读取。"
-        : `已读取。${failed.length} 层暂不可读：${failed
-            .map((l) => `${l.label}（${l.error ?? "未知"}）`)
-            .join("；")}`,
-    );
-  } catch (error) {
-    vendorMsg(`读取失败：${describeError(error)}`);
-  }
-}
-
-/** 保存一个密钥并提示重启。 */
-async function handleSaveVendorKey(
-  moduleId: string,
-  envName: string,
-  inputId: string,
-): Promise<void> {
-  const input = document.getElementById(inputId) as HTMLInputElement | null;
-  const value = input?.value ?? "";
-  if (!value.trim()) {
-    vendorMsg(`请先填写 ${envName} 的值。`);
-    return;
-  }
-  try {
-    state.vendorLayers = await setVendorKey(moduleId, envName, value.trim());
-    if (input) input.value = "";
-    renderVendors();
-    vendorMsg(
-      `已写入 ${moduleId} 的 .env（${envName}）。\n\n` +
-        "启动器不保留密钥副本。请到「环境」页停止再启动该模块，它重新读取配置后才会生效。",
-    );
-  } catch (error) {
-    vendorMsg(`保存失败：${describeError(error)}`);
-  }
-}
-
-/** 清除一个密钥。 */
-async function handleClearVendorKey(moduleId: string, envName: string): Promise<void> {
-  if (!confirm(`清除已保存的 ${envName}？\n\n模块重启后将不再收到该变量。`)) return;
-  try {
-    state.vendorLayers = await clearVendorKey(moduleId, envName);
-    renderVendors();
-    vendorMsg(`已清除 ${envName}。`);
-  } catch (error) {
-    vendorMsg(`清除失败：${describeError(error)}`);
-  }
-}
-
-/** 手动填写变量名并保存（L-05 兜底路径：上游没给变量名时）。 */
-async function handleSaveVendorKeyManual(
-  layer: string,
-  nameInput: HTMLInputElement | null,
-  valueInput: HTMLInputElement | null,
-): Promise<void> {
-  const name = (nameInput?.value ?? "").trim();
-  const value = (valueInput?.value ?? "").trim();
-  if (!name || !value) {
-    vendorMsg("请同时填写变量名与密钥值。");
-    return;
-  }
-  if (!/^[A-Z][A-Z0-9_]*$/.test(name)) {
-    vendorMsg("变量名格式不对：应以大写字母开头，只含大写字母、数字与下划线（如 OPENAI_API_KEY）。");
-    return;
-  }
-  try {
-    state.vendorLayers = await setVendorKey(layer, name, value);
-    if (nameInput) nameInput.value = "";
-    if (valueInput) valueInput.value = "";
-    renderVendors();
-    vendorMsg(`已写入 ${layer} 的 .env（${name}）。请重启该层模块生效。`);
-  } catch (error) {
-    vendorMsg(`保存失败：${describeError(error)}`);
-  }
-}
-
-/* ------------------------------------------------------------------ */
-/* 模型层自定义厂商（重构后的厂商管理界面）                             */
-/* ------------------------------------------------------------------ */
-
-/** 把上游返回的自定义厂商渲染成管理列表。 */
-function renderCustomProviders(moduleId: string): string {
-  const list = state.customProviders;
-  const defaults = state.providerDefaults;
-
-  const rows = list
-    .map((raw) => {
-      const p = raw as Record<string, unknown>;
-      const id = String(p.id ?? "");
-      const name = String(p.name ?? "");
-      const baseUrl = String(p.baseUrl ?? "");
-      const masked = String(p.apiKeyMasked ?? "");
-      const hasKey = Boolean(p.hasApiKey);
-      const enabled = Boolean(p.enabled);
-      const models = Array.isArray(p.models) ? p.models : [];
-      const modelNames = models
-        .map((m) => String((m as Record<string, unknown>).name ?? ""))
-        .filter(Boolean)
-        .join(", ");
-
-      return `<div style="border-top:1px solid rgba(0,0,0,.08);padding:10px 0">
-        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-          <strong>${esc(name)}</strong>
-          <span class="badge badge--optional">${esc(id.slice(0, 8))}</span>
-          ${enabled ? '<span class="badge badge--ok">已启用</span>' : '<span class="badge badge--warn">已停用</span>'}
-          ${hasKey ? `<span class="badge badge--ok" title="密钥由模型层加密保管">Key ${esc(masked)}</span>` : '<span class="badge badge--warn">无 Key</span>'}
-        </div>
-        <p class="card__desc" style="margin:6px 0 0">
-          <code>${esc(baseUrl)}</code><br/>
-          模型：${esc(modelNames || "（无）")}
-        </p>
-        <div class="toolbar" style="margin:8px 0 0">
-          <button class="btn" data-prov="test-saved" data-module="${esc(moduleId)}" data-id="${esc(id)}">连接测试</button>
-          <button class="btn" data-prov="toggle" data-module="${esc(moduleId)}" data-id="${esc(id)}" data-enabled="${enabled ? "0" : "1"}">${enabled ? "停用" : "启用"}</button>
-          <button class="btn" data-prov="default" data-module="${esc(moduleId)}" data-id="${esc(id)}" data-model="${esc(String((models[0] as Record<string, unknown>)?.name ?? ""))}">设为默认</button>
-          <button class="btn" data-prov="delete" data-module="${esc(moduleId)}" data-id="${esc(id)}">删除</button>
-        </div>
-      </div>`;
-    })
-    .join("");
-
-  const defaultLine = defaults
-    ? `<p class="card__desc" style="margin:6px 0 0">当前默认：<strong>${esc(String(defaults.providerName ?? ""))}</strong> / <code>${esc(String(defaults.model ?? ""))}</code></p>`
-    : "";
-
-  const testInfo = state.lastTestResult
-    ? `<pre class="log" style="margin-top:8px">${esc(formatTestResult(state.lastTestResult))}</pre>`
-    : "";
-
-  const discovered = state.discoveredModels.length
-    ? `<p class="card__desc" style="margin:8px 0 0">探测到 ${state.discoveredModels.length} 个模型：
-        <code>${esc(state.discoveredModels.slice(0, 8).join(", "))}${state.discoveredModels.length > 8 ? " …" : ""}</code></p>`
-    : "";
-
-  return `<div style="margin-top:14px;border-top:2px solid rgba(0,0,0,.12);padding-top:10px">
-    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-      <strong>自定义厂商</strong>
-      <span class="badge badge--optional">密钥由模型层加密保管，启动器不落盘</span>
-    </div>
-    ${defaultLine}
-    ${rows || '<p class="card__desc" style="margin:8px 0 0">还没有自定义厂商。</p>'}
-
-    <div style="margin-top:12px;padding:10px;background:rgba(0,0,0,.02);border-radius:8px">
-      <p class="card__desc" style="margin:0 0 8px"><strong>新增厂商</strong>（OpenAI 兼容）</p>
-      <div class="toolbar" style="margin-bottom:8px">
-        <input class="input" id="cp-name" placeholder="名称（唯一）" style="max-width:180px" />
-        <input class="input" id="cp-base" placeholder="Base URL，如 https://api.example.com/v1"
-               style="max-width:320px" />
-        <input class="input" id="cp-key" type="password" placeholder="API Key（可留空）" style="max-width:220px" />
-      </div>
-      <div class="toolbar" style="margin-bottom:8px">
-        <input class="input" id="cp-model" placeholder="模型名，如 deepseek-chat" style="max-width:200px" />
-        <select class="select" id="cp-preset" title="能力预设">
-          <option value="">能力预设（可选）</option>
-        </select>
-        <button class="btn" data-prov="discover" data-module="${esc(moduleId)}">探测模型</button>
-        <button class="btn" data-prov="test" data-module="${esc(moduleId)}">测试连接</button>
-        <button class="btn btn--primary" data-prov="create" data-module="${esc(moduleId)}">添加</button>
-      </div>
-      <p class="card__desc" style="margin:0">
-        Base URL <strong>不会自动补 /v1</strong>，请按服务要求完整填写。
-        模型字段只需名字；能力由预设决定。
-      </p>
-      ${discovered}
-      ${testInfo}
-    </div>
-
-    <pre id="cp-msg" class="log" hidden></pre>
-  </div>`;
-}
-
-/** 把三级测试结果转成可读文本。 */
-function formatTestResult(raw: unknown): string {
-  if (!raw || typeof raw !== "object") return String(raw);
-  const r = raw as Record<string, unknown>;
-  const result = (r.result ?? r) as Record<string, unknown>;
-  const status = String(result.status ?? "unknown");
-  const message = String(result.message ?? "");
-  const levels = Array.isArray(result.levels) ? result.levels : [];
-  const lines = [`状态：${status}${message ? " — " + message : ""}`];
-  for (const lv of levels) {
-    const item = lv as Record<string, unknown>;
-    lines.push(
-      `  · ${String(item.level ?? "")}: ${String(item.status ?? "")}` +
-        (item.latencyMs != null ? ` (${item.latencyMs}ms)` : ""),
-    );
-  }
-  const mm = result.multimodal as Record<string, unknown> | undefined;
-  if (mm) lines.push(`  · 多模态探测: ${String(mm.status ?? "")}`);
-  return lines.join("\n");
-}
-
-function cpMsg(text: string): void {
-  const node = document.getElementById("cp-msg");
-  if (!node) return;
-  node.hidden = false;
-  node.textContent = text;
-}
-
-/** 读取表单里的厂商配置（密钥只用于本次调用）。 */
-function readProviderForm(): Record<string, unknown> | null {
-  const name = (document.getElementById("cp-name") as HTMLInputElement | null)?.value.trim() ?? "";
-  const baseUrl = (document.getElementById("cp-base") as HTMLInputElement | null)?.value.trim() ?? "";
-  const apiKey = (document.getElementById("cp-key") as HTMLInputElement | null)?.value.trim() ?? "";
-  const model = (document.getElementById("cp-model") as HTMLInputElement | null)?.value.trim() ?? "";
-  const presetId = (document.getElementById("cp-preset") as HTMLSelectElement | null)?.value ?? "";
-
-  if (!name || !baseUrl) {
-    cpMsg("请至少填写名称与 Base URL。");
-    return null;
-  }
-
-  // 能力：有预设就用预设的值，否则给一个最小默认
-  const preset = presetId
-    ? (state.capabilityPresets as Record<string, Record<string, unknown>>)[presetId]
-    : undefined;
-  const capabilities = preset ?? {
-    inputModalities: ["text"],
-    contextWindow: 32000,
-    maxOutputTokens: 2048,
-    supportsStreaming: true,
-    supportsTools: false,
-  };
-
-  return {
-    name,
-    base_url: baseUrl,
-    ...(apiKey ? { api_key: apiKey } : {}),
-    protocol: "openai-compatible",
-    timeoutSeconds: 20,
-    enabled: true,
-    // 上游 ModelInput 只有 name / label / capabilities —— 没有 id
-    models: [{ name: model || "default", label: model || "default", capabilities }],
-    defaultModel: model || "default",
-  };
-}
-
-/** 刷新自定义厂商列表与相关状态。 */
-async function loadCustomProviders(moduleId: string): Promise<void> {
-  try {
-    const raw = (await providerAdminCall({ action: "list", moduleId })) as Record<string, unknown>;
-    state.customProviders = Array.isArray(raw?.providers)
-      ? (raw.providers as Array<Record<string, unknown>>)
-      : [];
-    state.capabilityPresets = (raw?.capabilityPresets as Record<string, unknown>) ?? {};
-    const defaults = (await providerAdminCall({ action: "defaults", moduleId })) as Record<string, unknown>;
-    state.providerDefaults = (defaults?.defaults as Record<string, unknown>) ?? null;
-    renderVendors();
-    fillPresetSelect();
-  } catch (error) {
-    cpMsg(`读取自定义厂商失败：${describeError(error)}`);
-  }
-}
-
-/** 把能力预设填进下拉。 */
-function fillPresetSelect(): void {
-  const sel = document.getElementById("cp-preset") as HTMLSelectElement | null;
-  if (!sel || sel.dataset.filled === "1") return;
-  const presets = Object.keys(state.capabilityPresets);
-  if (presets.length === 0) return;
-  for (const key of presets) {
-    const opt = document.createElement("option");
-    opt.value = key;
-    opt.textContent = key;
-    sel.appendChild(opt);
-  }
-  sel.dataset.filled = "1";
-}
-
-/** 处理自定义厂商的所有按钮。 */
-async function handleProviderAction(node: HTMLElement): Promise<void> {
-  const act = node.dataset.prov ?? "";
-  const moduleId = node.dataset.module ?? "omninexus";
-  const id = node.dataset.id ?? "";
-
-  try {
-    if (act === "create") {
-      const payload = readProviderForm();
-      if (!payload) return;
-      await providerAdminCall({ action: "create", moduleId, payload });
-      // 清空密钥输入框（不留存）
-      const keyInput = document.getElementById("cp-key") as HTMLInputElement | null;
-      if (keyInput) keyInput.value = "";
-      cpMsg("已创建。密钥已交给模型层加密保管，启动器未保留副本。");
-      await loadCustomProviders(moduleId);
-      return;
-    }
-    if (act === "discover" || act === "test") {
-      const payload = readProviderFormForProbe();
-      if (!payload) return;
-      const res = (await providerAdminCall({ action: act, moduleId, payload })) as Record<string, unknown>;
-      if (act === "discover") {
-        const models = Array.isArray(res?.models) ? res.models : [];
-        state.discoveredModels = models.map((m) => String((m as Record<string, unknown>)?.id ?? (m as unknown)));
-        const first = state.discoveredModels[0];
-        const modelInput = document.getElementById("cp-model") as HTMLInputElement | null;
-        if (modelInput && first && !modelInput.value) modelInput.value = first;
-        cpMsg(`探测到 ${state.discoveredModels.length} 个模型，已填入第一个。`);
-      } else {
-        state.lastTestResult = res;
-        cpMsg("测试完成，结果见下方。");
-      }
-      renderVendors();
-      fillPresetSelect();
-      return;
-    }
-    if (act === "test-saved") {
-      const res = await providerAdminCall({ action: "test_saved", moduleId, id });
-      state.lastTestResult = res;
-      cpMsg("测试完成。");
-      renderVendors();
-      return;
-    }
-    if (act === "toggle") {
-      const enabled = node.dataset.enabled === "1";
-      await providerAdminCall({ action: "set_enabled", moduleId, id, enabled });
-      await loadCustomProviders(moduleId);
-      return;
-    }
-    if (act === "delete") {
-      if (!confirm("删除这个厂商？密钥会随配置一起从模型层移除。")) return;
-      await providerAdminCall({ action: "delete", moduleId, id });
-      await loadCustomProviders(moduleId);
-      return;
-    }
-    if (act === "default") {
-      const model = node.dataset.model ?? "";
-      if (!model) {
-        cpMsg("该厂商没有可用的模型名，无法设为默认。");
-        return;
-      }
-      await providerAdminCall({
-        action: "set_defaults",
-        moduleId,
-        payload: { providerKind: "custom", providerId: id, model },
-      });
-      await loadCustomProviders(moduleId);
-      return;
-    }
-  } catch (error) {
-    cpMsg(`操作失败：${describeError(error)}`);
-  }
-}
-
-/** 探测/测试用的载荷：允许只填 URL 与 Key（不必先填名称）。 */
-function readProviderFormForProbe(): Record<string, unknown> | null {
-  const baseUrl = (document.getElementById("cp-base") as HTMLInputElement | null)?.value.trim() ?? "";
-  const apiKey = (document.getElementById("cp-key") as HTMLInputElement | null)?.value.trim() ?? "";
-  const model = (document.getElementById("cp-model") as HTMLInputElement | null)?.value.trim() ?? "";
-  if (!baseUrl) {
-    cpMsg("请先填写 Base URL。");
-    return null;
-  }
-  return {
-    base_url: baseUrl,
-    ...(apiKey ? { api_key: apiKey } : {}),
-    ...(model ? { model } : {}),
-    timeoutSeconds: 20,
-  };
 }
 
 /* ------------------------------------------------------------------ */

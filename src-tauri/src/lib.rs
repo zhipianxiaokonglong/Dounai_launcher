@@ -13,13 +13,12 @@ pub mod download;
 pub mod env_probe;
 pub mod http_client;
 pub mod install;
-pub mod provider_admin;
+pub mod module_probe;
 pub mod runtime;
 pub mod security;
 pub mod signature;
 pub mod state;
 pub mod trust;
-pub mod vendor_keys;
 
 pub use catalog::{
     fetch_catalog, parse_catalog, Allowlist, AllowlistError, CatalogEntry, CatalogFetcher,

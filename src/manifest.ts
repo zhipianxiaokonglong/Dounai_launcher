@@ -71,10 +71,27 @@ export interface ReservedSpec {
  *   - `env_file`   → 启动器直接读写模块根的配置文件；
  *   - `module_api` → 通过模块自己的 HTTP API 读写（密钥不由启动器持久化）。
  */
+/**
+ * 模块**自带的 Web 管理界面**声明。
+ *
+ * 这是本期的主路径：三个模块都已有完整管理页，启动器只负责打开它，
+ * 不再自绘表单、不代理配置、不存密钥。
+ */
+export interface AdminWebUi {
+  /** 相对模块服务根的路径，必须以 / 开头 */
+  path: string;
+  /** 按钮文案 */
+  label: string;
+  /** 是否要求模块先处于运行状态（通常为 true） */
+  requires_running: boolean;
+}
+
 export interface AdminUiSpec {
   kind: "llm" | "tts" | "input" | "app";
   title: string;
   capabilities: string[];
+  /** 模块自带的 Web 管理界面（有则优先使用） */
+  web_ui?: AdminWebUi;
   config_source: {
     kind: "env_file" | "module_api";
     path?: string;
@@ -155,11 +172,28 @@ export function parseAdminUi(
     }
   }
 
+  // web_ui：模块自带管理页
+  let webUi: AdminWebUi | undefined;
+  const webRaw = raw.web_ui;
+  if (isRecord(webRaw)) {
+    const webPath = asString(webRaw.path);
+    // 只接受以 / 开头的相对路径，拒绝绝对 URL（防外部注入）
+    if (webPath.startsWith("/")) {
+      webUi = {
+        path: webPath,
+        label: asString(webRaw.label) || "打开管理界面",
+        requires_running:
+          typeof webRaw.requires_running === "boolean" ? webRaw.requires_running : true,
+      };
+    }
+  }
+
   return {
     spec: {
       kind: kind as AdminUiSpec["kind"],
       title,
       capabilities,
+      ...(webUi ? { web_ui: webUi } : {}),
       config_source: {
         kind: cfgKind as "env_file" | "module_api",
         path: asString(cfgRaw.path) || undefined,
