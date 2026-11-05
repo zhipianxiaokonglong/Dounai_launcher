@@ -248,6 +248,7 @@ cd reserved/memory && pytest    # Reserved 插件：24 项
 | [用户文档](docs/USER_GUIDE.md) | 安装、套装、界面、常见问题 |
 | [**模块运行（启动/停止）设计**](docs/RUNNING.md) | **v0.2.0 设计稿：启动/停止命令、健康检查、一键启动、验收标准** |
 | [**模块管理界面声明（插件开发）**](docs/ADMIN_UI.md) | **`admin_ui` 字段规范：模块如何声明自己的配置界面** |
+| [**OmniNexus 缺陷报告：默认模型不生效**](docs/OMNINEXUS-ISSUE-default-model.md) | 上游缺陷的完整复现、根因与修复建议 |
 | [出网白名单](docs/ALLOWLIST.md) | 允许访问的域名与自查方法 |
 | [安全策略](SECURITY.md) | 漏洞披露、SLA、已实现防线、已知限制 |
 | [验收总表](docs/ACCEPTANCE.md) | 逐项结论与证据 |
