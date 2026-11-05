@@ -426,23 +426,52 @@ pub struct ModuleView {
     pub healthy: bool,
     /// 是否为外部链接模块（文件在用户自己的目录里）
     pub linked: bool,
+    /// 该进程不是本启动器拉起的（无法用「停止」按钮停掉）
+    pub external: bool,
 }
 
-fn to_view(id: &str, st: &ModuleState, pm: &ProcessManager) -> ModuleView {
-    // 运行态以进程表为准，而不是状态文件里的内存字段：
-    // 后者在启动器重启后一律是 Stopped，但进程可能还活着，
-    // 因此统一从进程表取真实快照并回收已退出进程。
+fn to_view(
+    id: &str,
+    st: &ModuleState,
+    pm: &ProcessManager,
+    health_url: Option<&str>,
+) -> ModuleView {
+    // 运行态优先取进程表：它记录本启动器真正拉起的进程，并能回收已退出者。
     let rv = pm.view(id);
+
+    // 进程表里没有 ≠ 真的没在跑。
+    //
+    // 用户可能自己用命令行起了上游（调试时很常见），或在上一版启动器里
+    // 启动后本版重启了——这些进程都不在当前进程表里。只用进程表会误判为
+    // 「未运行」，导致管理界面按钮禁用，用户看着明明健康检查通过却用不了。
+    //
+    // 因此这里补一次健康探测：只有**探通**才改判为 Running。
+    // 探不通仍是 Stopped，不会谎报运行，与原设计意图一致。
+    let mut run_state = parse_run(&rv.run);
+    let mut healthy = rv.healthy;
+    let mut external = false;
+    if matches!(run_state, RunState::Stopped) {
+        if let Some(url) = health_url {
+            if crate::runtime::http_ok(url, std::time::Duration::from_millis(800)) {
+                run_state = RunState::Running;
+                healthy = true;
+                external = true;
+            }
+        }
+    }
+
     ModuleView {
         module_id: id.to_string(),
         install: st.install,
         enabled: st.enabled,
         version: st.version.clone(),
         path: st.path.clone(),
-        run: parse_run(&rv.run),
+        run: run_state,
         last_error: rv.last_error.or_else(|| st.last_error.clone()),
         pid: rv.pid,
-        healthy: rv.healthy,
+        healthy,
+        // 外部启动的进程不归本启动器管，如实标注，UI 据此禁用「停止」
+        external,
         linked: st.linked,
     }
 }
@@ -458,12 +487,27 @@ fn parse_run(s: &str) -> RunState {
 
 #[tauri::command]
 pub fn list_module_states(state: State<AppState>) -> Result<Vec<ModuleView>, String> {
+    // ⚠ 顺序很重要：entry_spec 内部会去锁 store（经 module_root）。
+    // std 的 Mutex 不可重入，若在持锁状态下调 entry_spec 会**死锁**。
+    // 所以先在无锁状态收齐 health_url，再取锁遍历。
+    let ids: Vec<String> = {
+        let store = state.store.lock().map_err(|_| "状态锁不可用")?;
+        store.all().keys().cloned().collect()
+    };
+    // 锁已在上一作用域释放，这里才安全调 entry_spec（它内部会再取锁）
+    let mut health_map: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
+    for id in &ids {
+        let h = state.entry_spec(id).ok().and_then(|spec| spec.health_url);
+        health_map.insert(id.clone(), h);
+    }
+
     let store = state.store.lock().map_err(|_| "状态锁不可用")?;
     let pm = state.processes();
     Ok(store
         .all()
         .iter()
-        .map(|(id, st)| to_view(id, st, pm))
+        .map(|(id, st)| to_view(id, st, pm, health_map.get(id).and_then(|h| h.as_deref())))
         .collect())
 }
 
@@ -1027,13 +1071,25 @@ pub fn add_local_module_inner(state: &AppState, raw_path: &str) -> Result<Module
             .map_err(|e| e.to_string())?;
     }
 
-    // 返回登记后的视图
-    let store = state.store.lock().map_err(|_| "状态锁不可用")?;
-    let st = store
-        .get(&module_id)
-        .ok_or_else(|| "登记后读取状态失败".to_string())?;
+    // 返回登记后的视图。
+    //
+    // ⚠ 顺序：health_url 必须在取 store 锁**之前**算好。
+    // entry_spec 内部会去锁 store（经 module_root），std 的 Mutex 不可重入，
+    // 持锁时调它必然死锁（实测让两条 local_module 测试永久挂起）。
+    let health = state
+        .entry_spec(&module_id)
+        .ok()
+        .and_then(|spec| spec.health_url);
+
+    let st = {
+        let store = state.store.lock().map_err(|_| "状态锁不可用")?;
+        store
+            .get(&module_id)
+            .ok_or_else(|| "登记后读取状态失败".to_string())?
+            .clone()
+    };
     let pm = state.processes();
-    Ok(to_view(&module_id, st, pm))
+    Ok(to_view(&module_id, &st, pm, health.as_deref()))
 }
 
 /// 解除本地模块登记（不删除文件）。
@@ -1560,3 +1616,51 @@ pub fn hash_file(path: String, state: State<AppState>) -> Result<String, String>
 
 #[allow(dead_code)]
 fn _assert_path_type(_: &Path) {}
+
+#[cfg(test)]
+mod liveness_tests {
+    use super::*;
+    use crate::catalog::Allowlist;
+    use crate::trust::TrustPolicy;
+
+    /// 防回归：验证 store 锁不会被泄漏/自我阻塞。
+    ///
+    /// 背景：我曾把 `entry_spec`（内部要取 store 锁）写在**持有 store 锁**
+    /// 的循环里，std 的 Mutex 不可重入 → 死锁。表现为模块列表空白、
+    /// 前端 invoke 永久挂起。这条测试守住「取锁-释放」这条基本路径。
+    #[test]
+    fn store_lock_can_be_reacquired() {
+        let dir = std::env::temp_dir().join(format!(
+            "dounai-liveness-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = AppState::with_trust(
+            dir.join("appdata"),
+            Allowlist::new(Vec::<String>::new()),
+            TrustPolicy::permissive(),
+        )
+        .unwrap();
+
+        // 1) 锁能取到并及时释放
+        {
+            let store = state.store.lock().unwrap();
+            let _ = store.all().len();
+        }
+
+        // 2) 释放后能再次取到（若泄漏会在这里永久阻塞，测试超时可暴露）
+        let again = state.store.lock().unwrap();
+        let _ = again.all().len();
+        drop(again);
+
+        // 3) 不持锁时调 entry_spec 必须返回（它内部会再取锁）
+        let a = state.entry_spec("omninexus");
+        assert!(a.is_err() || a.is_ok(), "只要能返回即说明没死锁");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}

@@ -352,6 +352,8 @@ function renderActionButtons(m: ModuleManifest, installed: boolean): string {
 
   const st = moduleStateOf(m.module_id);
   const running = st?.run === "running" || st?.run === "starting";
+  // 外部启动的进程：显示为运行中，但停不掉（不在进程表里）
+  const external = Boolean(st?.external);
   const failed = st?.run === "failed";
   const enabled = st?.enabled ?? true;
 
@@ -368,7 +370,14 @@ function renderActionButtons(m: ModuleManifest, installed: boolean): string {
     );
   }
 
-  if (running) {
+  if (running && external) {
+    // 状态如实显示，但按钮禁用并说明原因，避免"点了没反应"
+    parts.push(
+      `<button class="btn" disabled ` +
+        `title="该进程不是启动器拉起的，无法从这里停止。请到「环境」页查看，或用任务管理器结束。">` +
+        `停止</button>`,
+    );
+  } else if (running) {
     parts.push(`<button class="btn" data-act="stop" data-id="${m.module_id}">停止</button>`);
   } else if (failed) {
     parts.push(`<button class="btn" data-act="restart" data-id="${m.module_id}">重试</button>`);
