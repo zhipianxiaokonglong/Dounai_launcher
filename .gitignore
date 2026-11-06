@@ -36,3 +36,6 @@ Thumbs.db
 *.key
 *.pem
 priv*
+# 仅本地使用的内部文档（缺陷排查、对接材料等），不进公开仓库
+.internal/
+*.internal.md
