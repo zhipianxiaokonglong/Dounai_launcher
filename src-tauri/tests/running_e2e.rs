@@ -303,7 +303,10 @@ fn r5_rejects_missing_manifest() {
         w.finish().unwrap();
     }
     let hash = dounai_launcher::sha256_hex(&buf);
-    install_module_inner(
+
+    // 拒绝点已前移：安装阶段读包内 manifest，缺失即拒绝。
+    // 这比「装完再启动才报错」更好——坏包不会落盘。
+    let install_err = install_module_inner(
         &st,
         InstallRequest {
             module_id: "bare".into(),
@@ -311,13 +314,19 @@ fn r5_rejects_missing_manifest() {
             version: "1.0.0".into(),
             zip_base64: B64.encode(&buf),
             expected_sha256: hash,
-            manifest: json!({ "module_id": "bare" }),
+            manifest: json!({}),
         },
     )
-    .unwrap();
+    .expect_err("不含 manifest 的包必须在安装阶段被拒");
+    assert!(install_err.contains("manifest"), "实际：{install_err}");
 
-    let err = start_module_inner(&st, "bare").unwrap_err();
-    assert!(err.contains("manifest"), "实际：{err}");
+    // 且坏包不该落盘：模块目录不应出现安装内容
+    let mod_dir = root.join("modules").join("bare");
+    assert!(!mod_dir.join("readme.txt").exists(), "被拒绝的包不应被解压");
+
+    // 启动也应失败（模块根本没有安装）
+    assert!(start_module_inner(&st, "bare").is_err());
+
     std::fs::remove_dir_all(&root).ok();
 }
 

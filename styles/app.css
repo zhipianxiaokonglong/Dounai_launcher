@@ -192,3 +192,9 @@ html, body {
   .log { background: #101216; }
   .badge--reserved { background: #2c2547; color: #b39dff; }
 }
+
+/* 权限声明：当前不强制，只作提示，弱化显示以免被误认为安全保证 */
+.card__muted {
+  opacity: 0.62;
+  font-size: 11px;
+}

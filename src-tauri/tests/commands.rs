@@ -158,7 +158,9 @@ fn install_rejects_wrong_hash() {
 
 #[test]
 fn install_accepts_matching_hash_under_permissive_policy() {
-    let zip = make_zip(&[("a.txt", b"x")]);
+    // 包内必须带 manifest：precheck_install 现在从包内读它
+    let mf = r#"{ "module_id": "m", "dependencies": [], "model_packs": [] }"#;
+    let zip = make_zip(&[("manifest.json", mf.as_bytes()), ("a.txt", b"x")]);
     let r = req("m", &B64.encode(&zip), &dounai_launcher::sha256_hex(&zip));
     let (trust, bytes) = precheck_install(&r, &TrustPolicy::permissive()).unwrap();
     assert_eq!(trust, TrustVerdict::UnsignedAllowed);
@@ -167,7 +169,10 @@ fn install_accepts_matching_hash_under_permissive_policy() {
 
 #[test]
 fn install_rejects_unsigned_manifest_under_strict_policy() {
-    let zip = make_zip(&[("a.txt", b"x")]);
+    // 包内带一份**未签名** manifest：拒绝原因才是"签名"而非"缺 manifest"
+    let mf = r#"{ "module_id": "m", "dependencies": [], "model_packs": [],
+                  "signature": { "algo": "SHA-256 + Ed25519", "value": "" } }"#;
+    let zip = make_zip(&[("manifest.json", mf.as_bytes()), ("a.txt", b"x")]);
     let r = req("m", &B64.encode(&zip), &dounai_launcher::sha256_hex(&zip));
     // 严格策略且无可信公钥 → 未签名必须被拒
     let err = precheck_install(&r, &TrustPolicy::strict(vec!["a2V5".into()])).unwrap_err();
@@ -178,11 +183,17 @@ fn install_rejects_unsigned_manifest_under_strict_policy() {
 fn install_rejects_module_id_mismatch() {
     // manifest 声明的 id 与请求不一致：防"张冠李戴"，
     // 即用 A 模块的签名 manifest 去安装 B 模块的包
-    let zip = make_zip(&[("a.txt", b"x")]);
-    let mut r = req("m", &B64.encode(&zip), &dounai_launcher::sha256_hex(&zip));
-    r.manifest = serde_json::json!({ "module_id": "other-module" });
+    // 包内声明 module_id = "m"，而请求要用 "other-module" 安装
+    let mf = r#"{ "module_id": "m", "dependencies": [], "model_packs": [] }"#;
+    let zip = make_zip(&[("manifest.json", mf.as_bytes()), ("a.txt", b"x")]);
+    let r = req(
+        "other-module",
+        &B64.encode(&zip),
+        &dounai_launcher::sha256_hex(&zip),
+    );
     let err = precheck_install(&r, &TrustPolicy::permissive()).unwrap_err();
     assert!(err.contains("不一致"), "实际错误：{err}");
+    assert!(err.contains("m"), "错误信息应指出包内声明的 id");
 }
 
 #[test]

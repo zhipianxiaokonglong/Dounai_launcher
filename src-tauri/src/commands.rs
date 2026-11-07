@@ -602,8 +602,12 @@ pub struct InstallRequest {
     /// 早期版本这里是 `Option`，为空即跳过校验，等于允许安装任意字节。
     /// 哈希校验必须与安装链路绑定，因此改为强制。
     pub expected_sha256: String,
-    /// 该模块的 manifest（用于签名验证）。
-    /// 发布构建下未签名会被拒绝（见 `trust.rs`）。
+    /// **已不再用于签名校验**，仅为兼容保留。
+    ///
+    /// 签名与 `module_id` 一致性校验都以 **zip 包内**的 `manifest.json`
+    /// 为准（见 `peek_manifest_from_zip`）。之所以改用包内内容：
+    /// 若信任请求里传的对象，调用方可以伪造一份「能验过」的 manifest
+    /// 而装进任意内容，签名机制就形同虚设。
     pub manifest: serde_json::Value,
 }
 
@@ -616,6 +620,62 @@ pub struct InstallResponse {
     pub install_dir: String,
     /// 本次安装的信任判定结果，便于 UI 展示"已验签 / 未验签"
     pub trust: TrustVerdict,
+}
+
+/// 从 zip 字节里读取包内的 manifest（不落盘）。
+///
+/// 查找规则与运行时一致：根目录下的 `manifest.json`，其次 `dounai-manifest.json`。
+/// 也接受包内套一层目录的常见打包方式（只在这一层里找）。
+///
+/// 为什么要单独 peek：安装前的签名校验必须作用于**包内真 manifest**，
+/// 而不是调用方在请求里传的对象——否则签名机制可被绕过或空转。
+pub fn peek_manifest_from_zip(zip_bytes: &[u8]) -> Result<serde_json::Value, String> {
+    use std::io::Read;
+    use zip::ZipArchive;
+
+    let mut archive = ZipArchive::new(std::io::Cursor::new(zip_bytes))
+        .map_err(|e| format!("zip 无法解析：{e}"))?;
+
+    let names: Vec<String> = (0..archive.len())
+        .filter_map(|i| {
+            archive
+                .by_index(i)
+                .ok()
+                .and_then(|f| f.name().ok().map(|n| n.to_string()))
+        })
+        .collect();
+
+    // 候选：根目录同名文件，或「一层子目录/同名文件」
+    let candidates = ["manifest.json", "dounai-manifest.json"];
+    let mut picked: Option<String> = None;
+    for cand in candidates {
+        if names.iter().any(|n| n == cand) {
+            picked = Some(cand.to_string());
+            break;
+        }
+        if let Some(n) = names.iter().find(|n| {
+            // 恰好一层目录，如 "my-mod/manifest.json"
+            n.split('/').count() == 2
+                && n.ends_with(&format!("/{cand}"))
+                && !n.starts_with("__MACOSX")
+        }) {
+            picked = Some(n.clone());
+            break;
+        }
+    }
+
+    let Some(name) = picked else {
+        return Err("安装包内缺少 manifest.json（包根或一层子目录下）".to_string());
+    };
+
+    let mut file = archive
+        .by_name(&name)
+        .map_err(|e| format!("读取包内 {name} 失败：{e}"))?;
+    let mut text = String::new();
+    file.read_to_string(&mut text)
+        .map_err(|e| format!("包内 {name} 不是 UTF-8 文本：{e}"))?;
+    serde_json::from_str::<serde_json::Value>(&text)
+        .map_err(|e| format!("包内 {name} 不是合法 JSON：{e}"))
 }
 
 /// 安装前的全部校验（与 Tauri 解耦，便于直接测试）。
@@ -635,27 +695,41 @@ pub fn precheck_install(
         return Err("拒绝安装：缺少 expected_sha256（哈希校验不可跳过）".to_string());
     }
 
-    // 2) manifest 签名：按策略判定
-    let trust = crate::trust::evaluate(&request.manifest, trust_policy)
-        .map_err(|e| format!("拒绝安装：{e}"))?;
-
-    // 3) manifest 声明的 module_id 必须与请求一致，防"张冠李戴"
-    if let Some(declared) = request.manifest.get("module_id").and_then(|v| v.as_str()) {
-        if declared != request.module_id {
-            return Err(format!(
-                "拒绝安装：manifest 声明的 module_id（{declared}）与请求（{}）不一致",
-                request.module_id
-            ));
-        }
-    }
-
     let zip_bytes = base64_decode(&request.zip_base64)?;
 
-    // 4) 哈希校验：不匹配直接拒绝，绝不进入解压
+    // 2) 哈希校验：先确认包本身没被损坏/替换，再深入解析内容
     if !verify_sha256(&zip_bytes, expected) {
         return Err(format!(
             "哈希校验失败：期望 {expected}，实际 {}",
             sha256_hex(&zip_bytes)
+        ));
+    }
+
+    // 3) 从**包内**读真 manifest。
+    //
+    // 关键修复：之前用的是 request.manifest，而本地安装通道传的是
+    // `{ module_id }` 桩对象——签名校验对象是桩，永远验不过，签名机制空转；
+    // module_id 一致性检查也变成"自己跟自己比"，恒真。
+    //
+    // 现在改为读包内 manifest，签名与身份校验都作用于真实内容。
+    let packaged = peek_manifest_from_zip(&zip_bytes)?;
+
+    // 4) manifest 签名：按策略判定（对象是包内真 manifest）
+    let trust =
+        crate::trust::evaluate(&packaged, trust_policy).map_err(|e| format!("拒绝安装：{e}"))?;
+
+    // 5) 包内声明的 module_id 必须与请求一致，防"张冠李戴"
+    let declared = packaged
+        .get("module_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if declared.is_empty() {
+        return Err("拒绝安装：包内 manifest 缺少 module_id".to_string());
+    }
+    if declared != request.module_id {
+        return Err(format!(
+            "拒绝安装：包内 manifest 声明的 module_id（{declared}）与请求（{}）不一致",
+            request.module_id
         ));
     }
 
@@ -1171,6 +1245,99 @@ pub fn add_local_modules_bulk(
         }
     }
     Ok(results)
+}
+
+/* ------------------------------------------------------------------ */
+/* 读取模块根 manifest（只读，用于界面展示实时值）                     */
+/* ------------------------------------------------------------------ */
+
+/// 单个模块的 manifest 读取结果。
+#[derive(Debug, Clone, Serialize)]
+pub struct ModuleManifestView {
+    pub module_id: String,
+    /// manifest 原文（JSON）。读不到时为 null。
+    pub manifest: Option<serde_json::Value>,
+    /// 读取失败原因（文件缺失 / JSON 非法等）。
+    pub error: Option<String>,
+    /// 模块根绝对路径（便于排障时核对到底读的是哪份文件）。
+    pub root: String,
+}
+
+/// 读取所有**已登记**模块的模块根 manifest。
+///
+/// 界面卡片必须以这个结果为准：它和执行路径（`entry_spec`）读的是同一份文件，
+/// 因此"卡片显示什么"与"实际跑什么"不再分裂。
+///
+/// 内置 `manifests/*.json` 退化为商店元数据/未安装占位，不再用于展示已装模块。
+#[tauri::command]
+pub fn read_module_manifests(state: State<AppState>) -> Vec<ModuleManifestView> {
+    read_module_manifests_inner(&state)
+}
+
+pub fn read_module_manifests_inner(state: &AppState) -> Vec<ModuleManifestView> {
+    // 先取 id 列表再释放锁：module_root 内部会再次锁 store，不可重入
+    let ids: Vec<String> = {
+        let Ok(store) = state.store.lock() else {
+            return Vec::new();
+        };
+        store.all().keys().cloned().collect()
+    };
+
+    let mut out = Vec::new();
+    for id in ids {
+        let root = match state.module_root(&id) {
+            Ok(r) => r,
+            Err(e) => {
+                out.push(ModuleManifestView {
+                    module_id: id.clone(),
+                    manifest: None,
+                    error: Some(e),
+                    root: String::new(),
+                });
+                continue;
+            }
+        };
+        let root_str = root.to_string_lossy().to_string();
+
+        // 与 entry_spec 相同的文件名优先级
+        let found = ["manifest.json", "dounai-manifest.json"]
+            .iter()
+            .map(|n| root.join(n))
+            .find(|p| p.exists());
+
+        let Some(path) = found else {
+            out.push(ModuleManifestView {
+                module_id: id,
+                manifest: None,
+                error: Some("模块根缺少 manifest.json".to_string()),
+                root: root_str,
+            });
+            continue;
+        };
+
+        let parsed = std::fs::read_to_string(&path)
+            .map_err(|e| format!("读取 manifest 失败：{e}"))
+            .and_then(|text| {
+                serde_json::from_str::<serde_json::Value>(&text)
+                    .map_err(|e| format!("manifest 不是合法 JSON：{e}"))
+            });
+
+        match parsed {
+            Ok(v) => out.push(ModuleManifestView {
+                module_id: id,
+                manifest: Some(v),
+                error: None,
+                root: root_str,
+            }),
+            Err(e) => out.push(ModuleManifestView {
+                module_id: id,
+                manifest: None,
+                error: Some(e),
+                root: root_str,
+            }),
+        }
+    }
+    out
 }
 
 /* ------------------------------------------------------------------ */

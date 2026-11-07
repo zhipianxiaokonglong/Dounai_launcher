@@ -54,12 +54,117 @@ fn permissive_state(root: &Path) -> AppState {
     .unwrap()
 }
 
+/// 回归：包内缺少 manifest 时必须拒绝（不能靠请求里的对象兜底）。
+#[test]
+fn install_rejects_zip_without_manifest() {
+    let root = tmp_root("no-manifest");
+    let state = permissive_state(&root);
+    let zip = make_zip(&[("readme.txt", b"no manifest here")]);
+    let hash = dounai_launcher::sha256_hex(&zip);
+
+    let err = install_module_inner(
+        &state,
+        InstallRequest {
+            module_id: "mod-x".into(),
+            category: "optional".into(),
+            version: "0.1.0".into(),
+            zip_base64: B64.encode(&zip),
+            expected_sha256: hash,
+            manifest: json!({ "module_id": "mod-x" }),
+        },
+    )
+    .expect_err("包内无 manifest 必须拒绝");
+
+    assert!(err.contains("缺少 manifest"), "实际错误：{err}");
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// 回归：X 通道。包内声明的 module_id 与请求不一致时必须拒绝。
+///
+/// 原实现比较的是 `request.manifest`（桩对象，恒等于请求 id），
+/// 所以永远通过。改为读包内内容后，这条才有真实约束力。
+#[test]
+fn install_rejects_module_id_mismatch_between_zip_and_request() {
+    let root = tmp_root("id-mismatch");
+    let state = permissive_state(&root);
+    let manifest = r#"{ "module_id": "real-id", "dependencies": [], "model_packs": [] }"#;
+    let zip = make_zip(&[("manifest.json", manifest.as_bytes())]);
+    let hash = dounai_launcher::sha256_hex(&zip);
+
+    let err = install_module_inner(
+        &state,
+        InstallRequest {
+            module_id: "claimed-id".into(),
+            category: "optional".into(),
+            version: "0.1.0".into(),
+            zip_base64: B64.encode(&zip),
+            expected_sha256: hash,
+            manifest: json!({ "module_id": "claimed-id" }),
+        },
+    )
+    .expect_err("包内外 module_id 不一致必须拒绝");
+
+    assert!(err.contains("不一致"), "实际错误：{err}");
+    assert!(err.contains("real-id"), "错误信息应指出包内声明");
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// 回归：严格策略下，包内未签名 manifest 必须被拒绝。
+///
+/// 这条验证「验签对象确实是包内内容」：若仍在校验请求里的桩对象，
+/// 那么给桩塞一个假签名就能绕过；这里桩故意为空，仍应被拒。
+#[test]
+fn strict_policy_rejects_unsigned_manifest_inside_zip() {
+    let root = tmp_root("strict-unsigned");
+    let state = AppState::with_trust(
+        root.to_path_buf(),
+        Allowlist::new(Vec::<String>::new()),
+        TrustPolicy::strict(Vec::new()),
+    )
+    .unwrap();
+
+    let manifest =
+        r#"{ "module_id": "mod-y", "signature": { "algo": "SHA-256 + Ed25519", "value": "" } }"#;
+    let zip = make_zip(&[("manifest.json", manifest.as_bytes())]);
+    let hash = dounai_launcher::sha256_hex(&zip);
+
+    let err = install_module_inner(
+        &state,
+        InstallRequest {
+            module_id: "mod-y".into(),
+            category: "optional".into(),
+            version: "0.1.0".into(),
+            zip_base64: B64.encode(&zip),
+            expected_sha256: hash,
+            manifest: json!({}),
+        },
+    )
+    .expect_err("严格策略下未签名必须拒绝");
+
+    assert!(err.contains("拒绝安装"), "实际错误：{err}");
+    std::fs::remove_dir_all(&root).ok();
+}
+
 #[test]
 fn full_install_chain_lands_files_and_records_state() {
     let root = tmp_root("chain");
     let state = permissive_state(&root);
 
+    // 包内必须带真 manifest：后端以它为准做签名与身份校验
+    let manifest = r#"{
+        "module_id": "dounai-input",
+        "name": "Dounai Input",
+        "version": "0.2.0",
+        "category": "core",
+        "entry": { "type": "command", "command": "{module_dir}/run.py", "working_dir": "" },
+        "dependencies": [],
+        "model_packs": [],
+        "permissions": { "network": [], "filesystem": [], "devices": [] },
+        "signature": { "algo": "SHA-256 + Ed25519", "value": "" }
+    }"#;
+
     let zip = make_zip(&[
+        ("manifest.json", manifest.as_bytes()),
         ("dounai_input/__init__.py", b"# pkg"),
         ("dounai_input/server.py", b"print('hi')"),
         ("requirements.txt", b"fastapi"),
@@ -71,15 +176,16 @@ fn full_install_chain_lands_files_and_records_state() {
         InstallRequest {
             module_id: "dounai-input".into(),
             category: "core".into(),
-            version: "0.1.0".into(),
+            version: "0.2.0".into(),
             zip_base64: B64.encode(&zip),
             expected_sha256: hash,
-            manifest: json!({ "module_id": "dounai-input" }),
+            // 这个字段已不再参与校验；真正的验签对象是包内 manifest
+            manifest: json!({}),
         },
     )
     .expect("安装应成功");
 
-    assert_eq!(resp.files, 3);
+    assert_eq!(resp.files, 4, "含 manifest.json 共 4 个文件");
     assert!(!resp.replaced);
     assert_eq!(resp.trust, TrustVerdict::UnsignedAllowed);
 
@@ -96,7 +202,7 @@ fn full_install_chain_lands_files_and_records_state() {
     let store = StateStore::open(&root.join("modules-state.json")).unwrap();
     let st = store.get("dounai-input").unwrap();
     assert_eq!(st.install, InstallState::Installed);
-    assert_eq!(st.version, "0.1.0");
+    assert_eq!(st.version, "0.2.0");
     assert!(st.enabled, "core 装完应默认启用");
 
     // 无临时目录残留
@@ -116,7 +222,10 @@ fn failed_install_leaves_no_files_and_marks_broken() {
     let root = tmp_root("fail");
     let state = permissive_state(&root);
 
-    let zip = make_zip(&[("a.txt", b"data")]);
+    // 包里带一份**未签名**的 manifest：这样拒绝原因才是"签名策略"
+    let mf = r#"{ "module_id": "mod-x", "dependencies": [], "model_packs": [],
+                  "signature": { "algo": "SHA-256 + Ed25519", "value": "" } }"#;
+    let zip = make_zip(&[("manifest.json", mf.as_bytes()), ("a.txt", b"data")]);
     // 故意给错哈希
     let wrong = dounai_launcher::sha256_hex(b"other");
 
@@ -156,7 +265,10 @@ fn strict_policy_blocks_unsigned_install_end_to_end() {
     )
     .unwrap();
 
-    let zip = make_zip(&[("a.txt", b"data")]);
+    // 包里带一份**未签名**的 manifest：这样拒绝原因才是"签名策略"而非"缺 manifest"
+    let mf = r#"{ "module_id": "mod-x", "dependencies": [], "model_packs": [],
+                  "signature": { "algo": "SHA-256 + Ed25519", "value": "" } }"#;
+    let zip = make_zip(&[("manifest.json", mf.as_bytes()), ("a.txt", b"data")]);
     let hash = dounai_launcher::sha256_hex(&zip);
 
     let err = install_module_inner(
@@ -182,7 +294,12 @@ fn reinstall_replaces_previous_version() {
     let root = tmp_root("upgrade");
     let state = permissive_state(&root);
 
-    let v1 = make_zip(&[("version.txt", b"1.0"), ("old.txt", b"legacy")]);
+    let mf1 = r#"{ "module_id": "m", "dependencies": [], "model_packs": [] }"#;
+    let v1 = make_zip(&[
+        ("manifest.json", mf1.as_bytes()),
+        ("version.txt", b"1.0"),
+        ("old.txt", b"legacy"),
+    ]);
     let h1 = dounai_launcher::sha256_hex(&v1);
     let r1 = install_module_inner(
         &state,
@@ -198,7 +315,12 @@ fn reinstall_replaces_previous_version() {
     .unwrap();
     assert!(!r1.replaced);
 
-    let v2 = make_zip(&[("version.txt", b"2.0"), ("new.txt", b"fresh")]);
+    let mf2 = r#"{ "module_id": "m", "dependencies": [], "model_packs": [] }"#;
+    let v2 = make_zip(&[
+        ("manifest.json", mf2.as_bytes()),
+        ("version.txt", b"2.0"),
+        ("new.txt", b"fresh"),
+    ]);
     let h2 = dounai_launcher::sha256_hex(&v2);
     let r2 = install_module_inner(
         &state,
@@ -227,7 +349,12 @@ fn malicious_zip_cannot_escape_via_command_layer() {
     let root = tmp_root("escape");
     let state = permissive_state(&root);
 
-    let zip = make_zip(&[("ok.txt", b"fine"), ("../../escaped.txt", b"evil")]);
+    let mf = r#"{ "module_id": "evil", "dependencies": [], "model_packs": [] }"#;
+    let zip = make_zip(&[
+        ("manifest.json", mf.as_bytes()),
+        ("ok.txt", b"fine"),
+        ("../../escaped.txt", b"evil"),
+    ]);
     let hash = dounai_launcher::sha256_hex(&zip);
 
     let err = install_module_inner(
@@ -257,7 +384,8 @@ fn reserved_module_installs_disabled() {
     let root = tmp_root("reserved");
     let state = permissive_state(&root);
 
-    let zip = make_zip(&[("stub.txt", b"x")]);
+    let mf = r#"{ "module_id": "dounai-memory-reserved", "dependencies": [], "model_packs": [] }"#;
+    let zip = make_zip(&[("manifest.json", mf.as_bytes()), ("stub.txt", b"x")]);
     let hash = dounai_launcher::sha256_hex(&zip);
 
     install_module_inner(

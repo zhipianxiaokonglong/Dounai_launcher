@@ -37,6 +37,7 @@ import {
   type ModuleView,
   type RustEnvReport,
   type TrustInfo,
+  readModuleManifests,
 } from "../bridge.js";
 
 interface El {
@@ -203,7 +204,18 @@ function describeError(error: unknown): string {
 /* 数据加载（一期用打包进 dist 的静态 manifest；后续替换为启动器后端）   */
 /* ------------------------------------------------------------------ */
 
+/**
+ * 加载模块信息。
+ *
+ * 两个数据源，按优先级：
+ * 1. **模块根 manifest**（已登记模块）—— 这是权威来源，与执行路径同源；
+ * 2. 启动器内置 `manifests/*.json` —— 退化为商店元数据/未安装项占位。
+ *
+ * 之前只用第 2 个，导致卡片显示的是构建期烘焙的旧值（版本、命令、依赖数），
+ * 而进程实际跑的是模块根那份，两套互不同步。
+ */
 async function loadModules(): Promise<void> {
+  // 先用内置清单铺底（未安装的模块靠它显示为"可安装"）
   const mods = await loadManifestFiles();
   for (const raw of mods) {
     try {
@@ -211,6 +223,31 @@ async function loadModules(): Promise<void> {
       state.modules.set(m.module_id, m);
     } catch (error) {
       console.warn("跳过非法 manifest", error);
+    }
+  }
+
+  // 再用模块根实时 manifest 覆盖已登记模块
+  if (!isDesktop()) return;
+  let live: Awaited<ReturnType<typeof readModuleManifests>> = [];
+  try {
+    live = await readModuleManifests();
+  } catch (error) {
+    console.warn("读取模块根 manifest 失败", error);
+    return;
+  }
+
+  for (const view of live) {
+    // 读不到就保留内置清单的占位，但记录原因
+    if (!view.manifest) {
+      if (view.error) console.warn(`${view.module_id} 的模块根 manifest 不可用：${view.error}`);
+      continue;
+    }
+    try {
+      const m = parseManifest(view.manifest);
+      state.modules.set(m.module_id, m);
+    } catch (error) {
+      // 模块根的 manifest 非法时，不清掉内置占位，避免卡片直接消失
+      console.warn(`${view.module_id} 的模块根 manifest 非法，沿用内置清单`, error);
     }
   }
 }
@@ -261,12 +298,53 @@ function categoryBadge(m: ModuleManifest): string {
   return `<span class="badge ${map[m.category] ?? ""}">${label[m.category] ?? m.category}</span>`;
 }
 
+/**
+ * 为「已登记但内置清单里没有」的模块造一个最小 manifest 占位。
+ *
+ * 用途：让本地登记的模块也能出现在卡片区（修复"后端登记成功、界面无卡片"）。
+ * 真实值来自模块根 manifest，已在 `loadModules()` 里覆盖；这里只是兜底，
+ * 保证即使模块根 manifest 读不到也不至于完全消失。
+ */
+function buildManifestPlaceholder(moduleId: string): ModuleManifest {
+  const st = moduleStateOf(moduleId);
+  return {
+    module_id: moduleId,
+    name: moduleId,
+    version: st?.version || "未知版本",
+    // ModuleView 不含 category，这里用 optional；真实分类来自模块根 manifest
+    category: "optional" as const,
+    entry: {
+      type: "command",
+      command: "",
+      working_dir: "",
+      env: {},
+      health: { url: null, timeout_ms: 3000 },
+    },
+    compat: { app_version: ">=0.0.0" },
+    dependencies: [],
+    model_packs: [],
+    permissions: { network: [], filesystem: [], devices: [] },
+    signature: { algo: "SHA-256 + Ed25519", value: "" },
+  };
+}
+
 function renderModules(): void {
   const q = el.search.value.trim().toLowerCase();
   const cat = el.filterCategory.value;
   const onlyMissing = el.onlyMissing.checked;
 
-  const list = [...state.modules.values()].filter((m) => {
+  // 遍历源 = 内置清单 ∪ 已登记模块。
+  // 之前只遍历 state.modules（来自内置清单），导致"本地登记成功但界面没卡片"。
+  const registered: ModuleManifest[] = [];
+  for (const [id, view] of state.moduleStates) {
+    if (state.modules.has(id)) continue;
+    // 无清单信息时用最小占位，保证卡片能出现且状态可见
+    const fallback = buildManifestPlaceholder(id);
+    if (view.install === "installed" || view.linked) registered.push(fallback);
+  }
+  const all = [...state.modules.values(), ...registered];
+
+  const list = all.filter((m) => {
     if (cat && m.category !== cat) return false;
     if (q && !(`${m.name} ${m.module_id}`.toLowerCase().includes(q))) return false;
     if (onlyMissing) {
@@ -308,7 +386,9 @@ function renderModules(): void {
         <div>模型包：<strong>${m.model_packs.length}</strong> 个${
           m.model_packs.length > 0 ? `（推荐 ${m.model_packs.filter((p) => p.recommended).length}）` : ""
         }</div>
-        <div>网络权限：${m.permissions.network.length === 0 ? "无（纯本地）" : m.permissions.network.join(", ")}</div>
+        <div class="card__muted">
+          权限声明：仅供参考，<strong>当前版本不强制</strong>
+        </div>
         ${st?.last_error ? `<div style="color:var(--danger)">${escapeHtml(st.last_error)}</div>` : ""}
       </div>
       <div class="card__actions">

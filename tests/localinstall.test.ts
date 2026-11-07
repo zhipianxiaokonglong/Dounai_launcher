@@ -81,7 +81,9 @@ describe("buildLocalInstallRequest", () => {
     expect(req.version).toBe("local");
     expect(req.expectedSha256).toBe(await sha256Hex(bytes));
     expect(req.zipBase64).toBe(toBase64(bytes));
-    expect(req.manifest).toEqual({ module_id: "dounai-input" });
+    // 请求里的 manifest 已不再用于验签（后端读包内真 manifest），
+    // 因此这里是空对象；校验对象是 zip 内的 manifest.json
+    expect(req.manifest).toEqual({});
   });
 
   it("去掉模块 id 两侧空白", async () => {

@@ -79,7 +79,9 @@ export async function buildLocalInstallRequest(
     version: "local",
     zipBase64: toBase64(fileBytes),
     expectedSha256,
-    // 本地包没有配套签名；发布版严格策略会据此拒绝——这是预期行为
-    manifest: { module_id: moduleId },
+    // 注意：真正的签名与身份校验由后端对**包内 manifest**执行，
+    // 这里传空对象即可。历史上这里传的是 `{ module_id }` 桩对象，
+    // 导致签名校验作用于桩、永远验不过，等于空转。
+    manifest: {},
   };
 }

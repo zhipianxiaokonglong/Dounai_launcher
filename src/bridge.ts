@@ -339,6 +339,31 @@ export type ProviderAction =
 
 
 /* ------------------------------------------------------------------ */
+/* 模块根 manifest（界面展示的权威来源）                                */
+/* ------------------------------------------------------------------ */
+
+/** 单个模块的模块根 manifest 读取结果。 */
+export interface ModuleManifestView {
+  module_id: string;
+  /** manifest 原文；读不到时为 null */
+  manifest: Record<string, unknown> | null;
+  /** 读取失败原因 */
+  error: string | null;
+  /** 模块根绝对路径（排障用） */
+  root: string;
+}
+
+/**
+ * 读取所有**已登记**模块的模块根 manifest。
+ *
+ * 这是卡片展示的权威来源：与执行路径（entry_spec）读的是同一份文件，
+ * 所以"卡片显示什么"与"实际跑什么"不会分裂。
+ */
+export async function readModuleManifests(): Promise<ModuleManifestView[]> {
+  return call<ModuleManifestView[]>("read_module_manifests");
+}
+
+/* ------------------------------------------------------------------ */
 /* 模块自带管理界面                                                    */
 /* ------------------------------------------------------------------ */
 
