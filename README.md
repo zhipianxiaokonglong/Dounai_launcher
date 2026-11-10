@@ -4,14 +4,14 @@ Dounai 启动器管理模块的安装、环境与进程生命周期。产品主�
 
 ## 当前状态
 
-本仓库处于 v2 重构期。`refactor/launcher-v2` 分支已冻结 M0 契约，代码尚未按新契约改写。
+本仓库处于 v2 重构期。`refactor/launcher-v2` 分支已冻结 M0 契约，M1 环境引擎已按契约落到 `launcher-core`。Tauri 命令面仍待 M2 起改写。
 
 - 仅支持 Windows 10 与 Windows 11。
 - 不读取 v1 包格式，不设兼容层。v1 包格式从未打包分发。
-- `src/` 与 `src-tauri/` 仍是 v1 代码，M1 起按 `contracts/` 重写。
+- `src/` 与 `src-tauri/src/` 仍是 v1 代码。`src-tauri/core/` 是不依赖 Tauri 的独立 crate，M1 的环境引擎与状态契约在这里。
 - 本版本不能在线安装模块。官方 catalog 与 K1、K5 两把密钥尚未生成。
 
-注意：安装程序启动时会索要管理员权限。安装模式定为 `both`，这一行为已接受并写进 M5 验收项。
+注意：安装程序启动时会索要管理员权限。安装模式定为 `both`，这一行为已接受并写进 M5 验收项。`both` 只是安装器的运行时选项；落盘到 `state/install.json` 时写成 `current_user` 或 `per_machine`，便携 exe 写 `portable`，`install-v1` 契约不收 `both`。
 
 ## 契约
 
@@ -35,16 +35,18 @@ npx --yes ajv-cli@5 validate --spec=draft2020 --strict=false \
   -s contracts/module-v2.schema.json -d "contracts/examples/*.v2.json"
 ```
 
+六份状态 schema 由 [contracts.yml](.github/workflows/contracts.yml) 编译，字段与时间格式断言写在 [contracts/README.md](contracts/README.md)。
+
 ## 文档
 
 | 文档 | 内容 |
 |---|---|
 | [docs/DESIGN.md](docs/DESIGN.md) | 设计决策、架构与子系统行为约束 |
-| [contracts/README.md](contracts/README.md) | M0 契约入口，含角色、包格式与状态 schema |
+| [contracts/README.md](contracts/README.md) | 契约入口，含角色、包格式与 M0、M1 的状态 schema |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | M1 到 M5 的里程碑与实测验收 |
 | [SECURITY.md](SECURITY.md) | 安全策略、信任模型与已知限制 |
 | [docs/ADMIN_UI.md](docs/ADMIN_UI.md) | 模块如何声明自己的配置界面 |
-| [docs/TESTING.md](docs/TESTING.md) | 测试方法学与三个易踩的坑 |
+| [docs/TESTING.md](docs/TESTING.md) | 测试方法学与 M1 真机验收记录 |
 | [docs/TAURI_UPGRADE.md](docs/TAURI_UPGRADE.md) | Tauri 固定版本、unstable 使用面与升级复核步骤 |
 
 ## 许可证

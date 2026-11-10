@@ -10,7 +10,7 @@
 
 1. 环境管理、双源安装与进程生命周期都在 Rust 侧。换语言或换无 WebView 的 GUI 对这三块没有帮助，还会让现有下载器、安装事务与验签代码作废。
 2. 现有 4000 余行引擎已有单元测试覆盖。`launcher-core` 独立后，CI 能跑真实断言，不必依赖图形环境。
-3. 依赖解析改为三来源自适应，管理页改为顶层子 WebView。上游不必补 `uv.lock`，也不必放宽 CSP，跨仓依赖降为零。
+3. 依赖来源由包内 `runtime.deps.kind` 声明，管理页改为顶层子 WebView。上游不必补 `uv.lock`，也不必放宽 CSP，跨仓依赖降为零。
 
 `role` 直接沿用组装层 `DEFAULT_ENDPOINTS` 的 `input`、`llm`、`output` 键名，不需要翻译表。
 
@@ -30,6 +30,9 @@
 | 不读取 v1 包格式 | v1 包从未打包分发。`schema_version: 2` 直接定死，不设读取层与过渡期。 |
 | 离线只做单包导入，并支持本地目录 | 目录实例的源码随时可变，完整性语义与 zip 不同，按源码工作区处理。 |
 | 第三方 `shell` 可以填槽 | 核查依据见 [contracts/README.md](../contracts/README.md) 的“第三方界面”一节。披露要求见 [SECURITY.md](../SECURITY.md)。 |
+| 环境引擎只用随包自带的 uv，固定 0.13.7 | 系统 uv 版本不可控。0.11.7 实测忽略 `UV_PYTHON_NO_REGISTRY`，0.13.7 实测生效。 |
+| uv 缺失时按固定 URL 下载并校验 sha256 | 单一固定 URL 不引入 catalog，M2 的双源不受影响。M5 把同一个 uv.exe 放进安装包。 |
+| Python 只钉 3.12，补丁版本交给 uv | 钉具体补丁版会让预置的 uv 与下载清单一起过期。实际版本记在 `python_build_id`。 |
 
 ## 3. 选型依据
 
@@ -98,6 +101,8 @@ Windows 专属代码圈进 `process/win` 单一模块边界。`launcher-core` �
 3. `perMachine` 只放只读二进制。Python、venv、模块与状态每个 Windows 用户各一份，避免 ACL 问题与“一个用户装模块影响所有人”。
 4. `UV_PYTHON_INSTALL_DIR` 与 `UV_CACHE_DIR` 都指向数据根。便携版优先 exe 同级，写探针失败再回退到 `%LOCALAPPDATA%`。
 
+说明：`source-v1.schema.json` 与 `deps-v1.schema.json` 的 `instance_id` 都允许含 `/`。引擎先编码成不含路径分隔符的 key，再拼 `instances/` 下的目录名与 `state/deps/` 下的文件名，不把斜杠当目录分隔符。落盘文件名用编码后的 key，不是逻辑标识本身。
+
 警告：升级或切换安装模式时，先重建 venv。uv 明确说明更改 Python 安装位置不会自动反映到现有虚拟环境。`state` 要记 `install_mode`、`python_install_dir` 与 `python_build_id`，不一致时提示重建，不能让模块带着失效解释器启动。
 
 体积预算分三层，每个里程碑实测一次：
@@ -125,7 +130,7 @@ Python、venv、wheels 与模块包不计入交付物体积，但要在向导里
 | `commands.rs::open_admin_window` | 直接复用 | 已记录 Windows 同步命令建窗死锁的规避方式 |
 | `trust.rs` | 改造语义 | 已有“有签名必须验通”的单测，但只看 `value` 非空，且分不开“未信任”与“被篡改” |
 | `catalog.rs` | 改造 | `CatalogEntry` 只有 5 个字段；精确 host 白名单挡不住 SourceForge 的动态镜像域名 |
-| `env_probe.rs` | 升级 | 已探测 uv，但注释只把 uv 当加速项 |
+| `env_probe.rs` | 保留只读体检 | 系统 uv 版本不可控，环境引擎只用随包自带的 uv |
 | `runtime.rs` | 重写进程管理 | 惰性 `try_wait`、同步 `sleep`、无 Job Object、无启动互斥。多实例会放大竞态 |
 | `commands.rs` 命令面 | 拆分削薄 | `ORDER` 常量写死启动顺序，发布版信任策略写死 `strict(Vec::new())` |
 | `src/ui/main.ts` | 重做 | 原生 TS 加手写 CSS，无组件化 |
@@ -136,26 +141,38 @@ Python、venv、wheels 与模块包不计入交付物体积，但要在向导里
 
 ### 7.1 环境引擎
 
-安装包预置 `bin/uv.exe`，便携版首次下载。uv 是单二进制、无 Python 依赖，不写系统 PATH，不需要 UAC。
+环境引擎只用随包自带的 uv，固定 0.13.7。程序根 `bin/uv.exe` 优先；缺文件时按固定 URL 下载到数据根，校验 `install.json` 的 `uv_sha256` 后再用。M5 把同一个 uv.exe 放进安装包。系统 PATH 里的 uv 不接管，版本失控会让注册表与离线验收失去意义。`env_probe.rs` 只保留只读体检。
 
-托管 Python 装到数据根：
+托管 Python 装到数据根，固定 3.12，补丁版本由 uv 选当前最新版：
 
 ```
 UV_PYTHON_INSTALL_DIR = <data_root>/runtime/python
 UV_PYTHON_NO_REGISTRY = 1
-UV_PYTHON_PREFERENCE  = only-managed
-uv python install 3.12 --install-dir <data_root>/runtime/python
+UV_MANAGED_PYTHON     = 1
+UV_PYTHON             = <托管 3.12 的 python.exe 绝对路径>
+UV_CACHE_DIR          = <data_root>/runtime/uv-cache
+uv python install 3.12 --install-dir <data_root>/runtime/python --no-registry --managed-python
 ```
 
-三个上游 `requires-python` 都是 `>=3.11`，现有 venv 实测都是 Python 3.12.0，统一 pin 3.12。托管 Python 不写注册表、不写 PATH、不污染系统 Python，卸载时整个 `runtime/` 目录可删。
+注意：`UV_MANAGED_PYTHON` 与 `UV_PYTHON_PREFERENCE` 不能同时出现。uv 0.13.7 实测报 `the argument UV_MANAGED_PYTHON (environment variable) cannot be used with --python-preference`，因此只留 `UV_MANAGED_PYTHON`。只靠解释器偏好时，0.13.7 仍会选中系统里的 CPython 3.13，必须显式绑定 `UV_PYTHON`。`UV_PYTHON_NO_REGISTRY` 要 uv 0.11.8 起才生效，0.11.7 实测忽略该变量。
 
-依赖解析按优先级三选一，启动器自己识别，上游不用改：
+三个上游 `requires-python` 都是 `>=3.11`，现有 venv 实测都是 Python 3.12.0。托管 Python 不写注册表、不写 PATH、不污染系统 Python，卸载时整个 `runtime/` 目录可删。实际解释器标识由 `uv python list --only-installed` 读出，记为 `python_build_id`。切换安装模式或解释器变化后，`state/runtime.json` 里的值与当前 `Paths` 不一致，引擎报 `RootMismatch` 并要求重建 venv。
 
-1. 有 `uv.lock` 时执行 `uv sync --frozen`。
-2. 有 `requirements.txt` 时执行 `uv pip compile requirements.txt`，再 `uv pip sync`。
-3. 只有 `pyproject.toml` 时按 `[project.dependencies]` 编译，再 `uv pip sync`。
+依赖来源按 manifest 的 `runtime.deps.kind` 分派，启动器不嗅探文件，也不按优先级猜测：
 
-解析结果写成 `state/deps/<instance_id>.lock`，内容是钉死版本加哈希的 pinned snapshot。启动器把快照写进自己的 `state/`，不写回模块目录。每次启动做一次 `uv pip sync` 校验，快照哈希变化时显式报错，不静默重建。
+| kind | 解析 | 同步 |
+|---|---|---|
+| `uv_lock` | 直接用项目根的 `uv.lock`，缺失或声明成别的路径时报错，不自动 lock | `UV_PROJECT_ENVIRONMENT=<venv>` 加 `uv sync --frozen --no-install-project --no-dev`，离线重跑时追加 `--offline` |
+| `requirements` | `uv pip compile <path> --generate-hashes --python <managed> -o <state lock>` | `uv pip sync <state lock> --python <venv_python> --require-hashes` |
+| `pyproject` | 同上，输入换成 `pyproject.toml`，`--extra` 只取 `runtime.deps.extras` | 同上 |
+
+注意：`uv sync` 不加 `--frozen` 时会在项目根生成 `uv.lock`。dir 实例的源码目录会被污染，M1 第 5 与第 6 条验收都会失败。`uv_lock` 分支不装项目自身，靠 `entry.working_dir` 让 Python 从当前目录解析包。uv 没有参数可以指向别处的锁文件。引擎因此只收 `deps.path` 为 `uv.lock`。每次同步前还会复核项目根那份的内容哈希。在线首次同步允许联网取 wheel，`--offline` 只约束离线重跑。
+
+三个上游都是 src layout，依赖同步不装项目自身。`PreparedEnv.env_vars` 在 `module_dir/src` 存在时注入 `PYTHONPATH`，让 `-m` 能找到包。
+
+解析结果写成 `state/deps/<instance_id>.lock`，内容是钉死版本加哈希的 pinned snapshot。引擎把快照写进自己的 `state/`，不写回模块目录。快照哈希记在 `state/runtime.json`，另有一份元数据按 [deps-v1](../contracts/deps-v1.schema.json) 写。`module-v2.schema.json` 的 `runtime.snapshot_sha256` 在签名包内不可变，只表示发布者预置的快照哈希，运行时生成的哈希不写回包内。每次 `prepare_instance` 在同步后追加一次离线 dry-run 复核。哈希变化时报 `SnapshotMismatch`，不静默重建，也不回退联网。`verify_instance` 只读状态、比对哈希与安装根，不启动任何子进程。缓存缺 wheels 时报 `OfflineCacheMiss`。
+
+警告：断网重跑必须全程带 `--offline`。只把 `UV_OFFLINE` 当可选项，验收会失败。
 
 `optional-dependencies` 必须显式选择。三家上游都有 `dev`，`Dounai_input` 另有 `keyring` 与 `local-asr`。`runtime.extras` 默认 `[]`，不默认安装 dev。
 
