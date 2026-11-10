@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dounai.local/contracts/source-v1.schema.json",
+  "title": "Dounai installed.json v1",
+  "description": "启动器侧实例状态。主键是 instance_id，不是 module_id。manifest 不得自述这些字段。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "active", "instances", "catalog_state"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "active": {
+      "type": "object",
+      "propertyNames": { "enum": ["input", "llm", "output", "shell"] },
+      "additionalProperties": { "type": "string", "minLength": 1 },
+      "description": "active[role] 等于 instance_id。auxiliary 不设 active 槽，不得出现该键。"
+    },
+    "instances": {
+      "type": "object",
+      "propertyNames": { "type": "string", "minLength": 1 },
+      "additionalProperties": { "$ref": "#/$defs/instance" }
+    },
+    "catalog_state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sequence", "last_seen_version"],
+      "properties": {
+        "sequence": { "type": ["integer", "null"], "minimum": 1 },
+        "expires": { "type": ["string", "null"] },
+        "last_seen_version": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "键为 publisher_fp/module_id/variant，值为已见过的最大 version。无 catalog 的来源不写此项。"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "fingerprint": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "git": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["present", "head", "dirty", "observed_at"],
+      "properties": {
+        "present": { "type": "boolean" },
+        "origin": {
+          "type": "string",
+          "description": "只读观察。可能含凭据，禁止写进日志。"
+        },
+        "branch": { "type": "string" },
+        "head": { "type": ["string", "null"] },
+        "dirty": { "type": "boolean", "description": "只展示，不拦截。" },
+        "observed_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "instance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "instance_id", "module_id", "variant", "version", "role", "category",
+        "publisher_fp", "verdict", "confirmed_at", "installed_at",
+        "source_kind", "source_path", "git", "pinned", "auto_update"
+      ],
+      "properties": {
+        "instance_id": { "type": "string", "minLength": 1 },
+        "module_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}/[a-z0-9][a-z0-9._-]{0,63}$" },
+        "variant": { "type": "string", "pattern": "^[a-z0-9-]{1,32}$" },
+        "version": { "type": "string", "minLength": 1 },
+        "role": { "enum": ["input", "llm", "output", "shell", "auxiliary"] },
+        "category": { "enum": ["core", "optional", "reserved"] },
+        "publisher_fp": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/fingerprint" }],
+          "description": "从 signature.pubkey 推出，不由 manifest 自述。"
+        },
+        "verdict": {
+          "enum": ["A", "B", "C", "D"],
+          "description": "A 已信任签名，B 公钥未登记，C 无签名或未验证，D 硬拒。dir 实例固定为 C。"
+        },
+        "confirmed_at": { "type": "string", "format": "date-time" },
+        "installed_at": { "type": "string", "format": "date-time" },
+        "source_kind": {
+          "enum": ["zip", "dir"],
+          "description": "由启动器判定。zip 含本地 zip 导入，dir 含本地文件夹与 Git 仓库。"
+        },
+        "source_path": {
+          "type": ["string", "null"],
+          "description": "dir 实例为源码目录绝对路径；zip 实例为本地导入时的 zip 路径，远端下载时为 null。"
+        },
+        "zip_sha256": {
+          "oneOf": [{ "type": "null" }, { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }]
+        },
+        "git": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/git" }],
+          "description": "只读观察，不参与信任判定，不发起任何 git 网络操作。"
+        },
+        "expected_signer_fp": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/fingerprint" }],
+          "description": "首次本地导入时用户填写。不符或无签名时直接落 D 类。"
+        },
+        "signature_present": { "type": "boolean" },
+        "allow_unsigned_once": {
+          "type": "boolean",
+          "description": "C 类的一次性授权记录。不得做成可常开的设置项。"
+        },
+        "pinned": {
+          "type": "boolean",
+          "description": "true 时不计入 keep_versions 配额，不参与自动更新，不被自动清理。"
+        },
+        "auto_update": {
+          "type": "boolean",
+          "description": "dir 实例与无 catalog 的 zip 实例固定为 false。"
+        },
+        "head_confirmed": {
+          "type": ["string", "null"],
+          "description": "已确认的 HEAD。启动前比对，变化则要求重新确认并禁止自动启动。"
+        },
+        "data_dir": { "type": "string", "description": "永不自动删除，只标记孤儿并提供手动入口。" },
+        "note": { "type": "string" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "source_kind": { "const": "dir" } }, "required": ["source_kind"] },
+          "then": {
+            "properties": {
+              "verdict": { "const": "C" },
+              "auto_update": { "const": false },
+              "category": { "const": "optional" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "verdict": { "const": "C" } }, "required": ["verdict"] },
+          "then": {
+            "properties": {
+              "auto_update": { "const": false }
+            },
+            "description": "C 类实例永不自动更新，也不能自动成为 active。"
+          }
+        },
+        {
+          "if": { "properties": { "verdict": { "const": "D" } }, "required": ["verdict"] },
+          "then": {
+            "properties": { "pinned": { "const": false } },
+            "description": "D 类硬拒，不应写入实例表。"
+          }
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "roles_version": "1.0.0",
+  "closed": true,
+  "unknown_role_policy": "reject",
+  "distribution": "compiled_into_launcher",
+  "standby_port_base": 18101,
+  "notes": "编译期内嵌，随启动器版本发布。新增与 input、llm、output 同级的数据面角色需要同时改组装层，本版不做。manifest 出现未列出的 role 时硬拒，不得降级为 auxiliary。",
+  "roles": [
+    {
+      "id": "input",
+      "kind": "data_plane",
+      "port": 8101,
+      "health": { "path": "/healthz", "timeout_ms": 3000 },
+      "depends_on": [],
+      "max_active": 1,
+      "degradable": false,
+      "third_party_allowed": true,
+      "required_contract": {
+        "probe": { "method": "GET", "path": "/v1/contract", "timeout_ms": 3000 },
+        "expect": {
+          "shape": "json_schema",
+          "required_keys": ["x-contract-version"],
+          "min_contract_version": "1.1"
+        },
+        "capabilities": [
+          "POST /v1/inputs/text",
+          "POST /v1/inputs/image",
+          "POST /v1/inputs/audio",
+          "inbound_event_schema",
+          "degraded_headers"
+        ],
+        "on_mismatch": "reject_activation"
+      },
+      "notes": "输入接入层。health 路径不带 /v1 前缀。active 实例占 8101。"
+    },
+    {
+      "id": "llm",
+      "kind": "data_plane",
+      "port": 8102,
+      "health": { "path": "/v1/healthz", "timeout_ms": 3000 },
+      "depends_on": ["input"],
+      "max_active": 1,
+      "degradable": false,
+      "third_party_allowed": true,
+      "required_contract": {
+        "probe": { "method": "GET", "path": "/v1/contract", "timeout_ms": 3000 },
+        "expect": {
+          "shape": "contract_manifest",
+          "required_keys": ["service", "service_version", "contracts"],
+          "contract_versions": { "emotion": "2" },
+          "emotion_labels": [
+            "neutral", "joy", "excitement", "comfort", "tenderness", "calm",
+            "sadness", "apology", "encouragement", "surprise", "frustration", "anger"
+          ]
+        },
+        "capabilities": ["sse.delta", "sse.final", "sse.meta", "sse.route", "emotion-v2"],
+        "on_mismatch": "reject_activation"
+      },
+      "notes": "模型编排层。探测路径与 input 相同，返回结构不同，按 shape 分别断言。active 实例占 8102。"
+    },
+    {
+      "id": "output",
+      "kind": "data_plane",
+      "port": 8103,
+      "health": { "path": "/api/health", "timeout_ms": 3000 },
+      "depends_on": ["llm"],
+      "max_active": 1,
+      "degradable": true,
+      "degrade_modes": ["text_only", "text_fallback"],
+      "third_party_allowed": true,
+      "required_contract": {
+        "probe": { "method": "GET", "path": "/api/v1/contract", "timeout_ms": 3000 },
+        "expect": {
+          "shape": "contract_document",
+          "required_keys": ["contract_version", "contract_hash", "tags", "output", "errors"],
+          "emotion_labels": [
+            "neutral", "joy", "excitement", "comfort", "tenderness", "calm",
+            "sadness", "apology", "encouragement", "surprise", "frustration", "anger"
+          ]
+        },
+        "capabilities": [
+          "emotion-v2",
+          "X-MoodVoice-Status",
+          "X-MoodVoice-Degraded",
+          "text_fallback"
+        ],
+        "on_mismatch": "reject_activation"
+      },
+      "notes": "输出表达层。探测路径为 /api/v1/contract，与另外两层不同。合成失败时组装层照常显示文本。active 实例占 8103。"
+    },
+    {
+      "id": "shell",
+      "kind": "local_app",
+      "port": null,
+      "health": null,
+      "depends_on": ["input", "llm"],
+      "max_active": 1,
+      "degradable": false,
+      "third_party_allowed": true,
+      "activation_policy": "explicit_only",
+      "consumes": ["input", "llm", "output"],
+      "rollback": "manual_switch_back",
+      "required_contract": null,
+      "notes": "总装与 UI。第三方模块可填本槽，但不能自动成为 active。首次激活需单独确认，并常驻显示发布者。只启动本地 exe，不占规范端口，不做契约探测。health 为 null，切换后不设健康门禁，保留手动切回入口。启动器无法验证界面内容，确认文案须披露界面欺骗风险。"
+    },
+    {
+      "id": "auxiliary",
+      "kind": "standalone",
+      "port": null,
+      "health": null,
+      "depends_on": [],
+      "max_active": null,
+      "degradable": true,
+      "third_party_allowed": true,
+      "required_contract": null,
+      "notes": "旁路模块。端口由启动器动态分配，不进组装层事件流，不设 active 上限。auxiliary_kind 只是展示标签。"
+    }
+  ]
+}

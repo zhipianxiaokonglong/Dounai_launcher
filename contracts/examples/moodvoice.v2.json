@@ -1,0 +1,36 @@
+{
+  "schema_version": 2,
+  "module_id": "dounai/moodvoice",
+  "name": "输出表达层 · MoodVoice",
+  "version": "1.0.0",
+  "variant": "stable",
+  "role": "output",
+  "category": "optional",
+  "publisher": { "id": "dounai", "name": "Dounai", "url": "" },
+  "requires": { "launcher": ">=1.0.0", "contract": "emotion-v2", "roles_version": "1.0.0" },
+  "depends_on": ["llm"],
+  "runtime": {
+    "python": ">=3.11,<3.14",
+    "venv": "{instance_venv}",
+    "deps": { "kind": "pyproject", "path": "pyproject.toml", "extras": [] }
+  },
+  "entry": {
+    "command": "{venv_python} -m emotional_tts serve",
+    "working_dir": "{module_dir}",
+    "env": { "EMOTION_TTS_PORT": "{port}", "EMOTION_TTS_DATA_DIR": "{data_dir}/moodvoice" },
+    "health": { "url": "http://127.0.0.1:8103/api/health", "timeout_ms": 3000 }
+  },
+  "ports": [8103],
+  "permissions": {
+    "network": [],
+    "filesystem": ["{data_dir}/moodvoice"],
+    "devices": []
+  },
+  "admin_ui": {
+    "kind": "tts",
+    "title": "语音厂商（TTS）",
+    "web_ui": { "path": "/", "label": "语音层控制台", "requires_running": true, "embed": true }
+  },
+  "files": {},
+  "signature": null
+}

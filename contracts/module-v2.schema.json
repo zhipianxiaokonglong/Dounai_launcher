@@ -1,0 +1,271 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dounai.local/contracts/module-v2.schema.json",
+  "title": "Dounai 模块 manifest v2",
+  "description": "zip 发布包与 dir 目录实例共用这份 manifest。签名覆盖除 signature 外的全部字段。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "module_id", "name", "version", "variant", "role",
+    "category", "publisher", "requires", "entry", "ports",
+    "permissions", "files"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 2,
+      "description": "固定为 2。不读取 v1 格式，不设兼容层。"
+    },
+    "module_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}/[a-z0-9][a-z0-9._-]{0,63}$",
+      "description": "namespace/name。namespace 不是信任凭证，官方身份只由内置 K1 指纹验通授予。"
+    },
+    "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "version": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+      "description": "SemVer 三段，不含预发布与构建元数据。变体由 variant 单独声明，版本串里写 -agent 会被拒。版本单调只在同 publisher_fp、module_id、variant 内比较。"
+    },
+    "variant": {
+      "type": "string",
+      "pattern": "^[a-z0-9-]{1,32}$",
+      "default": "stable",
+      "description": "稳定标签。不得把变体写进 version，例如 0.3.3-agent 不合法。"
+    },
+    "role": {
+      "enum": ["input", "llm", "output", "shell", "auxiliary"],
+      "description": "封闭枚举，值来自 roles-v1.json。未知值硬拒，不得降级为 auxiliary。"
+    },
+    "category": {
+      "enum": ["core", "optional", "reserved"],
+      "description": "由验签结果裁定。core 与 reserved 仅内置 K1 指纹可声明；dir 实例只能是 optional。"
+    },
+    "publisher": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 128, "description": "包自述，未经核实，仅供展示。" },
+        "url": { "type": "string", "maxLength": 256 }
+      }
+    },
+    "requires": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["launcher"],
+      "properties": {
+        "launcher": { "type": "string", "minLength": 1, "description": "启动器版本范围，例如 >=1.0.0。" },
+        "contract": { "type": "string", "description": "期望的契约标识，例如 emotion-v2。" },
+        "roles_version": { "type": "string", "description": "期望的 roles-v1.json 版本。" }
+      }
+    },
+    "depends_on": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "enum": ["input", "llm", "output", "shell", "auxiliary"] },
+      "description": "按 role 声明，用于拓扑排序。不得写 module_id 或 instance_id。"
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["python", "venv", "deps"],
+      "properties": {
+        "python": { "type": "string", "minLength": 1, "description": "版本范围，例如 >=3.11,<3.14。" },
+        "venv": {
+          "const": "{instance_venv}",
+          "description": "解析到 instances/<instance_id>/venv。zip 与 dir 一致，不写进用户源码目录。"
+        },
+        "deps": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "path"],
+          "properties": {
+            "kind": { "enum": ["uv_lock", "requirements", "pyproject"] },
+            "path": { "type": "string", "pattern": "^[A-Za-z0-9._/-]+$" },
+            "extras": { "type": "array", "items": { "type": "string" }, "default": [] }
+          }
+        },
+        "snapshot_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "指向 state/deps/<instance_id>.lock，由启动器维护。"
+        }
+      }
+    },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command", "env", "health"],
+      "properties": {
+        "command": {
+          "type": "string",
+          "minLength": 1,
+          "description": "数据面与 auxiliary 实例必须含 {venv_python}；shell 实例必须含 {install_root}。"
+        },
+        "working_dir": { "type": "string", "minLength": 1 },
+        "env": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "端口由启动器注入，非 active 实例使用备用端口段。"
+        },
+        "health": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["url", "timeout_ms"],
+              "properties": {
+                "url": { "type": "string", "pattern": "^http://127\\.0\\.0\\.1:[0-9]{2,5}/" },
+                "timeout_ms": { "type": "integer", "minimum": 100, "maximum": 60000 }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "ports": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "integer", "minimum": 1, "maximum": 65535 },
+      "description": "规范端口由 roles-v1.json 定。非 active 实例由启动器改写为备用端口。"
+    },
+    "permissions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["network", "filesystem", "devices"],
+      "properties": {
+        "network": { "type": "array", "items": { "type": "string" } },
+        "filesystem": { "type": "array", "items": { "type": "string" } },
+        "devices": { "type": "array", "items": { "type": "string" } }
+      },
+      "description": "仅作声明，本版不强制。UI 必须同时显示非沙箱披露。"
+    },
+    "admin_ui": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "type": "string" },
+        "title": { "type": "string" },
+        "capabilities": { "type": "array", "items": { "type": "string" } },
+        "web_ui": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "label", "requires_running"],
+          "properties": {
+            "path": { "type": "string", "pattern": "^/" },
+            "label": { "type": "string", "minLength": 1 },
+            "requires_running": { "type": "boolean" },
+            "embed": { "type": "boolean", "default": true },
+            "min_size": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "width": { "type": "integer", "minimum": 1 },
+                "height": { "type": "integer", "minimum": 1 }
+              }
+            },
+            "placeholder": { "type": "string" }
+          }
+        }
+      }
+    },
+    "model_packs": {
+      "type": "array",
+      "items": { "type": "object" },
+      "description": "可选。首次向导要用，字段沿用 v1，待 v2.4 细化。"
+    },
+    "files": {
+      "type": "object",
+      "propertyNames": {
+        "allOf": [
+          { "pattern": "^[A-Za-z0-9._/-]+$" },
+          {
+            "not": {
+              "pattern": "(^|/)\\.\\.(/|$)|^/|^[A-Za-z]:|^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])([./]|$)"
+            }
+          }
+        ]
+      },
+      "additionalProperties": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+      "description": "逐文件哈希，仅对 zip 发布包校验，不含 manifest.json 自身。dir 实例允许 {}，不校验、不参与信任判定。"
+    },
+    "auxiliary_kind": {
+      "enum": ["memory", "search", "tooling", "observability"],
+      "description": "仅 role 为 auxiliary 时必填。只是展示标签，不参与端口分配与 active。"
+    },
+    "signature": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/signature" }
+      ],
+      "description": "null 或 value 为空属 C 类。dir 实例的签名段只作展示，不改变判定。"
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "role": { "const": "shell" } }, "required": ["role"] },
+      "then": {
+        "properties": {
+          "entry": { "properties": { "command": { "pattern": "\\{install_root\\}" } } }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "role": { "not": { "const": "shell" } } }, "required": ["role"] },
+      "then": {
+        "properties": {
+          "entry": { "properties": { "command": { "pattern": "\\{venv_python\\}" } } }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "role": { "not": { "const": "shell" } } }, "required": ["role"] },
+      "then": { "required": ["runtime"] },
+      "description": "shell 只启动本地 exe，不需要 Python 运行时。"
+    },
+    {
+      "if": { "properties": { "role": { "const": "auxiliary" } }, "required": ["role"] },
+      "then": { "required": ["auxiliary_kind"] }
+    },
+    {
+      "if": { "properties": { "role": { "not": { "const": "auxiliary" } } }, "required": ["role"] },
+      "then": { "not": { "required": ["auxiliary_kind"] } }
+    },
+    {
+      "not": {
+        "anyOf": [
+          { "required": ["instance_id"] },
+          { "required": ["source_kind"] },
+          { "required": ["publisher_fp"] },
+          { "required": ["trust"] },
+          { "required": ["official"] }
+        ]
+      },
+      "description": "禁止包自述启动器侧状态。"
+    }
+  ],
+  "$defs": {
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algo", "pubkey", "key_id", "signed_at", "value"],
+      "properties": {
+        "algo": { "const": "SHA-256 + Ed25519" },
+        "pubkey": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9+/]{43}=$",
+          "description": "32 字节 Ed25519 公钥的 base64。先用该公钥验签，验不过硬拒且不提供确认入口。"
+        },
+        "key_id": { "type": "string", "description": "仅展示，不参与判定。" },
+        "signed_at": { "type": "string", "format": "date-time" },
+        "value": {
+          "type": "string",
+          "pattern": "^$|^[A-Za-z0-9+/]{86}==$",
+          "description": "对剔除 signature 后的规范化 manifest 的签名。空字符串表示未签名。"
+        }
+      }
+    }
+  }
+}

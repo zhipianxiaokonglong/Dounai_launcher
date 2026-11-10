@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dounai.local/contracts/catalog-v2.schema.json",
+  "title": "Dounai catalog v2",
+  "description": "由内置 K5 签名，提供索引、版本单调性与新鲜度。包自身的完整性由包内签名负责。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "sequence", "generated_at", "expires", "sources", "modules", "revoked", "signature"],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "sequence": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "单调序号。两源 catalog 按签名有效、序号不倒退、时间不倒退裁决。"
+    },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "expires": {
+      "type": "string",
+      "format": "date-time",
+      "description": "过期后阻断自动更新。K5 泄露时靠短过期窗口加带外公告与强制升级 exe。"
+    },
+    "min_launcher": { "type": "string", "description": "最低启动器版本。" },
+    "requires_roles": {
+      "type": "string",
+      "description": "第三方 catalog 可声明所需 roles_version，不得新增 role。"
+    },
+    "sources": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/source" }
+    },
+    "modules": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/entry" }
+    },
+    "revoked": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/revocation" },
+      "description": "撤销列表。单独依赖 revoked 撤不掉 K5 自身，必须叠加带外公告与新版启动器。"
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algo", "key_id", "signed_at", "value"],
+      "properties": {
+        "algo": { "const": "SHA-256 + Ed25519" },
+        "key_id": { "const": "K5", "description": "catalog 签名钥与包签名钥 K1 分离。" },
+        "signed_at": { "type": "string", "format": "date-time" },
+        "value": { "type": "string", "pattern": "^[A-Za-z0-9+/]{86}==$" }
+      }
+    }
+  },
+  "$defs": {
+    "fingerprint": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "base_url", "priority"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9-]{1,32}$" },
+        "kind": { "enum": ["github", "sourceforge", "https"] },
+        "base_url": { "type": "string", "pattern": "^https://" },
+        "priority": { "type": "integer", "minimum": 1 },
+        "enabled": { "type": "boolean", "default": true }
+      }
+    },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "module_id", "variant", "version", "role", "name", "publisher_fp",
+        "sha256", "size", "sources", "signature_required", "expires"
+      ],
+      "properties": {
+        "module_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}/[a-z0-9][a-z0-9._-]{0,63}$" },
+        "variant": { "type": "string", "pattern": "^[a-z0-9-]{1,32}$" },
+        "version": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+          "description": "与 manifest v2 一致，只接受 SemVer 三段。"
+        },
+        "role": { "enum": ["input", "llm", "output", "shell", "auxiliary"] },
+        "name": { "type": "string", "minLength": 1 },
+        "publisher_fp": { "$ref": "#/$defs/fingerprint" },
+        "sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "zip 整体哈希。本地 zip 导入时由启动器自算，只防传输损坏。"
+        },
+        "size": { "type": "integer", "minimum": 0, "description": "zip 字节数，解压前按元数据核对上限。" },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["source_id", "url"],
+            "properties": {
+              "source_id": { "type": "string" },
+              "url": { "type": "string", "pattern": "^https://" }
+            }
+          }
+        },
+        "signature_required": {
+          "type": "boolean",
+          "description": "为 true 时包内无签名直接落 D 类硬拒，挡住删签名段的降级攻击。"
+        },
+        "expected_signer_fp": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/fingerprint" }],
+          "description": "首次从官方源下载时核对签名者指纹。"
+        },
+        "min_version": {
+          "type": "string",
+          "description": "本地版本低于该值时阻断自动更新。"
+        },
+        "min_launcher": { "type": "string" },
+        "expires": { "type": "string", "format": "date-time" },
+        "revoked": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "该模块被撤销的 version 或 sha256。"
+        }
+      }
+    },
+    "revocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id", "at"],
+      "properties": {
+        "kind": { "enum": ["key", "package", "version"] },
+        "id": { "type": "string" },
+        "reason": { "type": "string" },
+        "at": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}

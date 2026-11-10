@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dounai.local/contracts/retention-v1.schema.json",
+  "title": "Dounai retention.json v1",
+  "description": "旧版保留与清理边界。清理只在新版本成功激活后执行。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "keep_versions", "pinned", "data_dir_policy", "source_dir_policy"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "keep_versions": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 50,
+      "default": 3,
+      "description": "同一 publisher_fp、module_id、variant 的最近 N 个 version。0 表示不保留。"
+    },
+    "pinned": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "description": "用户显式固定的旧版实例。不计入配额，不参与自动更新，不被自动清理。"
+    },
+    "data_dir_policy": {
+      "const": "never_auto_delete",
+      "description": "清理只删包文件、venv 与日志。data_dir 标记孤儿并提供手动入口。"
+    },
+    "source_dir_policy": {
+      "const": "never_delete",
+      "description": "dir 实例的用户源码目录永不进入清理或卸载范围。"
+    },
+    "cleanup_trigger": {
+      "const": "after_successful_activation",
+      "description": "新版本激活失败或回滚时不清理；正在运行的非 active 实例跳过。"
+    },
+    "last_cleanup_at": { "type": ["string", "null"], "format": "date-time" }
+  }
+}

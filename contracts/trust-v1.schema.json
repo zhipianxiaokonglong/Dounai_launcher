@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dounai.local/contracts/trust-v1.schema.json",
+  "title": "Dounai trust.json v1",
+  "description": "信任单位是公钥，不是源。指纹一律取 SHA-256 完整值，不存短 hash。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "builtin", "trusted"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "builtin": {
+      "type": "array",
+      "minItems": 2,
+      "description": "编译期内嵌的 K1 与 K5。可见、可禁用、不可删除，撤销靠 K5 签的 revoked 加带外公告与新版启动器。",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["key_id", "fingerprint", "purpose", "enabled", "deletable"],
+        "properties": {
+          "key_id": { "enum": ["K1", "K5"] },
+          "fingerprint": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+          "purpose": { "enum": ["module_signing", "catalog_signing"] },
+          "enabled": { "type": "boolean" },
+          "deletable": { "const": false }
+        }
+      }
+    },
+    "trusted": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["fingerprint", "label", "confirmed_at", "enabled", "origin"],
+        "properties": {
+          "fingerprint": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+          "label": { "type": "string", "minLength": 1 },
+          "confirmed_at": { "type": "string", "format": "date-time" },
+          "enabled": { "type": "boolean", "description": "撤销时置 false。已装实例不卸载，但禁止自动更新。" },
+          "origin": {
+            "enum": ["tofu", "import", "builtin"],
+            "description": "tofu 为 B 类确认时记住该公钥。"
+          },
+          "revoked_at": { "type": ["string", "null"], "format": "date-time" },
+          "note": { "type": "string" }
+        }
+      }
+    },
+    "last_updated": { "type": ["string", "null"], "format": "date-time" }
+  },
+  "allOf": [
+    {
+      "not": {
+        "anyOf": [
+          { "required": ["source_id"] },
+          { "required": ["trust_tier"] }
+        ]
+      },
+      "description": "不设信任源与信任域字段。"
+    }
+  ]
+}

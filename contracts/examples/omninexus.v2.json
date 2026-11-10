@@ -1,0 +1,36 @@
+{
+  "schema_version": 2,
+  "module_id": "dounai/omninexus",
+  "name": "LLM 编排核心 · OmniNexus",
+  "version": "0.1.0",
+  "variant": "stable",
+  "role": "llm",
+  "category": "core",
+  "publisher": { "id": "dounai", "name": "Dounai", "url": "" },
+  "requires": { "launcher": ">=1.0.0", "contract": "emotion-v2", "roles_version": "1.0.0" },
+  "depends_on": ["input"],
+  "runtime": {
+    "python": ">=3.11,<3.14",
+    "venv": "{instance_venv}",
+    "deps": { "kind": "pyproject", "path": "pyproject.toml", "extras": [] }
+  },
+  "entry": {
+    "command": "{venv_python} -m omninexus",
+    "working_dir": "{module_dir}",
+    "env": { "OMNI_PORT": "{port}", "OMNI_DATA_DIR": "{data_dir}/omninexus" },
+    "health": { "url": "http://127.0.0.1:8102/v1/healthz", "timeout_ms": 3000 }
+  },
+  "ports": [8102],
+  "permissions": {
+    "network": [],
+    "filesystem": ["{data_dir}/omninexus"],
+    "devices": []
+  },
+  "admin_ui": {
+    "kind": "llm",
+    "title": "模型厂商（LLM）",
+    "web_ui": { "path": "/settings", "label": "模型厂商设置", "requires_running": true, "embed": true }
+  },
+  "files": {},
+  "signature": null
+}

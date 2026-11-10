@@ -1,0 +1,26 @@
+{
+  "schema_version": 2,
+  "module_id": "dounai/dounai-ui",
+  "name": "总装与 UI 层 · Dounai",
+  "version": "0.1.0",
+  "variant": "stable",
+  "role": "shell",
+  "category": "core",
+  "publisher": { "id": "dounai", "name": "Dounai", "url": "" },
+  "requires": { "launcher": ">=1.0.0", "roles_version": "1.0.0" },
+  "depends_on": ["input", "llm"],
+  "entry": {
+    "command": "{install_root}/Dounai/dounai.exe",
+    "working_dir": "{install_root}/Dounai",
+    "env": {},
+    "health": null
+  },
+  "ports": [],
+  "permissions": {
+    "network": [],
+    "filesystem": ["{app_local}"],
+    "devices": []
+  },
+  "files": {},
+  "signature": null
+}

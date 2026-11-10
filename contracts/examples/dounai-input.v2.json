@@ -1,0 +1,36 @@
+{
+  "schema_version": 2,
+  "module_id": "dounai/dounai-input",
+  "name": "输入接入层 · Dounai Input",
+  "version": "0.1.0",
+  "variant": "stable",
+  "role": "input",
+  "category": "core",
+  "publisher": { "id": "dounai", "name": "Dounai", "url": "" },
+  "requires": { "launcher": ">=1.0.0", "contract": "inbound-1.1", "roles_version": "1.0.0" },
+  "depends_on": [],
+  "runtime": {
+    "python": ">=3.11,<3.14",
+    "venv": "{instance_venv}",
+    "deps": { "kind": "pyproject", "path": "pyproject.toml", "extras": [] }
+  },
+  "entry": {
+    "command": "{venv_python} -m dounai_input serve",
+    "working_dir": "{module_dir}",
+    "env": { "DOUNAI_PORT": "{port}", "DOUNAI_DATA_DIR": "{data_dir}/input" },
+    "health": { "url": "http://127.0.0.1:8101/healthz", "timeout_ms": 3000 }
+  },
+  "ports": [8101],
+  "permissions": {
+    "network": [],
+    "filesystem": ["{data_dir}/input"],
+    "devices": ["microphone", "camera"]
+  },
+  "admin_ui": {
+    "kind": "input",
+    "title": "输入层厂商（ASR / 多模态）",
+    "web_ui": { "path": "/", "label": "输入层控制台", "requires_running": true, "embed": true }
+  },
+  "files": {},
+  "signature": null
+}
