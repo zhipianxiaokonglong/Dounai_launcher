@@ -13,7 +13,8 @@
 | `trust-v1.schema.json` | `state/trust.json` 的公钥信任列表 | 启动器 |
 | `retention-v1.schema.json` | `state/retention.json` 的旧版保留策略 | 启动器 |
 | `source-adapter-v1.md` | `SourceAdapter` trait 的接口与不变式 | 启动器仓 |
-| `validate.mjs` | 零依赖校验器 | 启动器仓 |
+| `validate.mjs` | 零依赖契约校验器 | 启动器仓 |
+| `check-upstreams.mjs` | 核对角色声明与五个仓源码是否一致 | 启动器仓 |
 | `examples/*.v2.json` | 五个角色的 schema 校验样例 | 启动器仓 |
 
 ## 五个角色
@@ -61,18 +62,32 @@
 
 ```bash
 node contracts/validate.mjs
+node contracts/check-upstreams.mjs
 ```
 
-校验器零依赖，按 `module-v2.schema.json` 校验五份样例。校验器还核对角色枚举与样例的端口、health、依赖。负例覆盖未知 role、路径穿越、缺 `pubkey` 与未验证实例自动更新。当前 66 项断言全部通过。
+`validate.mjs` 零依赖，按 `module-v2.schema.json` 校验五份样例，并核对角色枚举与样例的端口、health、依赖。负例覆盖未知 role、路径穿越、缺 `pubkey` 与未验证实例自动更新。当前 66 项断言全部通过。
 
-CI 应再用完整 JSON Schema 校验器复核：
+`check-upstreams.mjs` 从组装层与三个上游的源码解析 GET 路由和端口，逐项比对 `roles-v1.json`。默认读取工作区根目录下的五个仓；用 `--root` 指向别的检出布局，用 `--roles` 指向另一份角色契约做负例测试。源码缺失、路径不一致或正则零匹配都判失败，不把检查不适用当成通过。
+
+[contracts.yml](../.github/workflows/contracts.yml) 在每次 push 与 PR 检出四个上游仓。job 依次运行两份校验器。ajv 接着编译四份状态 schema，并校验五份样例。workflow 不设跳过条件，也不使用 `continue-on-error`。
+
+`validate.mjs` 不校验 `format: date-time`，时间字段由 ajv 开启格式校验后检查。本地复核需装 `ajv-cli@5` 与 `ajv-formats@3`，命令见 workflow。
+
+## 发布工具
+
+`src-tauri/src/bin/pack.rs` 与 `sign_catalog.rs` 按本目录契约产出可安装的包与索引。在 `src-tauri/` 目录运行：
 
 ```bash
-npx --yes ajv-cli@5 validate --spec=draft2020 --strict=false \
-  -s contracts/module-v2.schema.json -d "contracts/examples/*.v2.json"
+cargo run --bin pack -- keygen --out-private k1.priv --out-public k1.pub
+cargo run --bin pack -- pack --dir <源目录> --key k1.priv --out module.zip
+cargo run --bin pack -- verify --pubkey k1.pub --zip module.zip
+cargo run --bin sign_catalog -- sign --key k5.priv --catalog catalog.json --out signed.json
+cargo run --bin sign_catalog -- verify --pubkey k5.pub --catalog signed.json
 ```
 
-注意：`validate.mjs` 不校验 `format: date-time`。CI 使用 ajv 时需装 `ajv-formats` 并开启格式校验，否则时间字段只按字符串检查。
+`pack` 扫描源目录生成 `files`，把带 `pubkey` 的签名段写进 zip 内的 `manifest.json`，不改写源目录。打包后立即自检，输出 catalog 条目要用的 `sha256`、`size` 与 `publisher_fp`。`sign_catalog` 固定用 K5 签名，拒绝有效期超过 7 天的索引。
+
+`canonical_payload` 剔除整个 `signature` 段，`key_id`、`signed_at` 与 `pubkey` 不在签名覆盖内。`pubkey` 不靠签名保护：能验通即证明签名者持有对应私钥，替换公钥后验签必失败。完整 schema 校验由 [contracts.yml](../.github/workflows/contracts.yml) 的 ajv 承担，工具只做结构性检查。
 
 ## 定稿时收紧的口径
 
@@ -99,14 +114,14 @@ npx --yes ajv-cli@5 validate --spec=draft2020 --strict=false \
 
 说明：本版不读取 v1 manifest，不设兼容层；`permissions` 只作声明，启动器不做能力沙箱；目录实例固定按未验证处理，不承诺入口文件哈希，也不自动更新。
 
-## M0 尚未完成的工作
+## M0 实施状态
 
-本目录交付的是契约文件，M0 还有以下实施项：
+M0 实施清单的四项工作已交付到本分支。
 
-- `launcher-core` 抽取与 `admin-host` 抽象；
-- 启用 Tauri `unstable` 并固定小版本，capability 按最小授权记录升级检查清单；
-- 跨仓一致性 CI job，禁止条件不满足时静默跳过；
-- `pack` 与 `sign-catalog` 两个命令行工具；
-- K1、K5 两把密钥的生成与编译期内置，属于 M5 执行项。
+- 跨仓一致性 CI 与两个发布工具见 [contracts.yml](../.github/workflows/contracts.yml) 和“发布工具”一节。
+- `launcher-core` 位于 `src-tauri/core`，是不依赖 Tauri 的独立 crate。签名与路径安全模块已迁入，`paths` 与 `AdminHost` 接口已冻结。CI 的 `core` job 单独跑无窗口单测。
+- Tauri 固定为 `=2.12.5` 并启用 `unstable`。capability 维持最小集，升级检查清单见 [TAURI_UPGRADE.md](../docs/TAURI_UPGRADE.md)。
+
+剩余一项属于 M5：K1、K5 两把密钥的生成与编译期内置。生成真实私钥并内置到发布构建前，按 M5 的发布流水线执行，不放在 M0。
 
 以上工作全部限定在 Windows。Windows 专属进程代码放进 `process/win`，不写跨平台 trait 的空壳。

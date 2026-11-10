@@ -129,8 +129,8 @@ Python、venv、wheels 与模块包不计入交付物体积，但要在向导里
 | `runtime.rs` | 重写进程管理 | 惰性 `try_wait`、同步 `sleep`、无 Job Object、无启动互斥。多实例会放大竞态 |
 | `commands.rs` 命令面 | 拆分削薄 | `ORDER` 常量写死启动顺序，发布版信任策略写死 `strict(Vec::new())` |
 | `src/ui/main.ts` | 重做 | 原生 TS 加手写 CSS，无组件化 |
-| `bin/sign_manifests.rs` | 升级为 `pack`，另加 `sign-catalog` | 现只签单个 JSON，无 `files` 清单、无打包，没有给 catalog 签名的工具 |
-| `tauri.conf.json` | 改 | 需补 `nsis.installMode`、`webviewInstallMode`、`installerHooks` 与 `Cargo.toml` 的 `unstable` feature |
+| `bin/sign_manifests.rs` | 已删除，替换为 `pack.rs` 与 `sign_catalog.rs` | 原工具只签单个 JSON，无 `files` 清单、无打包，没有给 catalog 签名的工具 |
+| `tauri.conf.json` | 分两步改 | `unstable` 与固定版本已在 M0 落到 `Cargo.toml`，升级检查清单见 [TAURI_UPGRADE.md](TAURI_UPGRADE.md)；`nsis.installMode`、`webviewInstallMode` 与 `installerHooks` 留 M5 |
 
 ## 7. 子系统行为约束
 

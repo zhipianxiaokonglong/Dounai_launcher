@@ -45,6 +45,7 @@ npx --yes ajv-cli@5 validate --spec=draft2020 --strict=false \
 | [SECURITY.md](SECURITY.md) | 安全策略、信任模型与已知限制 |
 | [docs/ADMIN_UI.md](docs/ADMIN_UI.md) | 模块如何声明自己的配置界面 |
 | [docs/TESTING.md](docs/TESTING.md) | 测试方法学与三个易踩的坑 |
+| [docs/TAURI_UPGRADE.md](docs/TAURI_UPGRADE.md) | Tauri 固定版本、unstable 使用面与升级复核步骤 |
 
 ## 许可证
 

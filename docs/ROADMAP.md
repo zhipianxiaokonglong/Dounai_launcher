@@ -82,7 +82,7 @@ M0 的契约文件已冻结在 [contracts/](../contracts/README.md) 并推送到
 
 主要内容：
 
-- K1 与 K5 生成及内置、`sign-catalog`、发布流水线、带外轮换预案。
+- K1 与 K5 生成及内置、发布流水线、带外轮换预案。
 - 双模式 NSIS 与 `embedBootstrapper`、三个产物、卸载钩子、体积预算。
 - v1 本地状态处置、默认关闭的可选遥测。
 
