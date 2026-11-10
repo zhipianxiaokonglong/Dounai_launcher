@@ -1216,7 +1216,7 @@ async function handleCatalog(): Promise<void> {
       if (r.reason) lines.push(`原因：${r.reason}`);
       lines.push("");
       lines.push("这是预期行为：当前版本的出网白名单为空集，");
-      lines.push("任何外部请求都会被拒绝（见 docs/ALLOWLIST.md）。");
+      lines.push("任何外部请求都会被拒绝。");
       lines.push("已安装模块的查看、启停、卸载不受影响。");
     } else {
       lines.push(`来源：${r.source}（${r.source === "cache" ? "本地缓存" : "远端"}）`);
@@ -1360,8 +1360,7 @@ el.btnExecute.addEventListener("click", () => {
     "  下载(重试/续传/镜像) → 哈希校验(必填) → 签名校验 → 防路径穿越解压 → 原子替换 → 状态记录",
     "",
     "配置方式：",
-    "  · 下载源见 docs/USER_GUIDE.md「出网白名单」",
-    "  · 签名密钥见 docs/HANDOVER.md 的「发布签名密钥」一节",
+    "  · 包格式与信任规则见 contracts/README.md",
   ];
   el.planLog.textContent = lines.join("\n");
 });

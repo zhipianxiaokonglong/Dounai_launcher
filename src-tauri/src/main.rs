@@ -16,7 +16,7 @@ use tauri::Manager;
 ///
 /// 调试构建：允许未签名（仓库里的样例 manifest 尚未签名，便于开发）。
 /// 发布构建：**拒绝未签名**。发布时可在此填入可信公钥，
-/// 公钥来自 `docs/HANDOVER.md` 里约定的签名密钥移交流程。
+/// 发布时可在此填入可信公钥。
 fn build_trust_policy() -> TrustPolicy {
     #[cfg(debug_assertions)]
     {
@@ -48,7 +48,7 @@ fn main() {
                 .join("launcher");
 
             // 出网白名单：一期为空集，即完全不允许联网（最保守）。
-            // 配置真实下载源时在此加入域名，并同步更新 docs/ALLOWLIST.md。
+            // 配置真实下载源时在此加入域名。
             let allowlist = Allowlist::new(Vec::<String>::new());
 
             let state = AppState::with_trust(data_root, allowlist, build_trust_policy())
