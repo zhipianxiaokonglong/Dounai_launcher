@@ -1,0 +1,19 @@
+[package]
+name = "launcher-core"
+version = "0.1.0"
+description = "Dounai launcher core: package signing, path safety, install roots and the admin host contract"
+edition = "2021"
+license = "GPL-3.0-or-later"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+hex = "0.4"
+thiserror = "2"
+base64 = "0.23.1"
+ed25519-dalek = { version = "3.0.0", features = ["rand_core"] }
+
+[dev-dependencies]
+tempfile = "3"

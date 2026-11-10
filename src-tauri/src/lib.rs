@@ -1,11 +1,8 @@
-//! Dounai 启动器核心库。
+//! 启动器桌面壳：Tauri 命令面与进程装配。
 //!
-//! 一期聚焦三件事：
-//! 1. **供应链安全**：哈希校验、解压防路径穿越；
-//! 2. **安装事务**（依赖安装）：失败自动回滚，不留半残环境；
-//! 3. **模块 manifest 校验**：字段完整性与签名。
-//!
-//! 不含 UI：UI 通过 Tauri 命令调用本库。
+//! 纯 Rust 逻辑在 `launcher-core`，含验签、路径安全、双根路径与管理页宿主契约。
+//! 本 crate 的命令面只校验参数与转换结果，不放业务逻辑。
+//! 其余模块按里程碑逐步迁入 `launcher-core`。
 
 pub mod catalog;
 pub mod commands;
@@ -14,11 +11,15 @@ pub mod env_probe;
 pub mod http_client;
 pub mod install;
 pub mod module_probe;
+pub mod release;
 pub mod runtime;
-pub mod security;
-pub mod signature;
 pub mod state;
 pub mod trust;
+
+// 供应链安全、路径与管理页宿主契约住在 launcher-core。
+// 重导出模块名，使 crate 内既有的 `crate::security` / `crate::signature`
+// 路径与外部的 `dounai_launcher::security` 路径继续可用。
+pub use launcher_core::{admin_host, paths, security, signature};
 
 pub use catalog::{
     fetch_catalog, parse_catalog, Allowlist, AllowlistError, CatalogEntry, CatalogFetcher,
@@ -26,11 +27,15 @@ pub use catalog::{
 };
 pub use download::{download, DownloadError, DownloadOptions, DownloadReport, HttpFetcher};
 pub use install::{extract_zip_into, InstallError, InstallReport, InstallTransaction};
+pub use launcher_core::security::{
+    is_safe_filename, safe_join, sha256_hex, verify_sha256, PathError,
+};
+pub use launcher_core::signature::{
+    canonical_payload, verify_manifest, SignatureError, SUPPORTED_ALGO,
+};
 pub use runtime::{
     check_working_dir, resolve_placeholders, split_command, EntrySpec, ProcessManager, RunView,
     StartError,
 };
-pub use security::{is_safe_filename, safe_join, sha256_hex, verify_sha256, PathError};
-pub use signature::{canonical_payload, verify_manifest, SignatureError, SUPPORTED_ALGO};
 pub use state::{Category, InstallState, ModuleState, RunState, StateError, StateStore};
 pub use trust::{TrustError, TrustPolicy, TrustVerdict};

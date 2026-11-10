@@ -27,6 +27,22 @@ jobs:
         run: npm run build
 
   # ---------------------------------------------------------------
+  # launcher-core：纯 Rust，不构建前端、不启动窗口
+  # ---------------------------------------------------------------
+  core:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - name: Core tests (no Tauri window)
+        working-directory: src-tauri
+        run: cargo test -p launcher-core -- --nocapture
+
+  # ---------------------------------------------------------------
   # Rust：格式 + clippy + 测试 + 依赖审计
   # ---------------------------------------------------------------
   rust:
@@ -57,11 +73,11 @@ jobs:
 
       - name: Clippy（静态扫描，警告即失败）
         working-directory: src-tauri
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Tests
         working-directory: src-tauri
-        run: cargo test --all-targets
+        run: cargo test --workspace --all-targets
 
       # 安全不变量 fuzz。CI 是干净环境，不会遇到本地
       # 增量编译缓存导致的行为失真（见 docs/TESTING.md）。

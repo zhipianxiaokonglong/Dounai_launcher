@@ -51,7 +51,11 @@
     }
   },
   "$defs": {
-    "fingerprint": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "fingerprint": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "Ed25519 公钥原始 32 字节的 SHA-256，小写十六进制，带 sha256: 前缀。key_id 只作展示，不参与判定。"
+    },
     "source": {
       "type": "object",
       "additionalProperties": false,

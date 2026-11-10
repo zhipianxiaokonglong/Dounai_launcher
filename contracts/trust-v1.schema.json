@@ -18,7 +18,11 @@
         "required": ["key_id", "fingerprint", "purpose", "enabled", "deletable"],
         "properties": {
           "key_id": { "enum": ["K1", "K5"] },
-          "fingerprint": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+          "fingerprint": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "description": "Ed25519 公钥原始 32 字节的 SHA-256，小写十六进制，带 sha256: 前缀。key_id 只作展示，不参与判定。"
+          },
           "purpose": { "enum": ["module_signing", "catalog_signing"] },
           "enabled": { "type": "boolean" },
           "deletable": { "const": false }
@@ -32,7 +36,11 @@
         "additionalProperties": false,
         "required": ["fingerprint", "label", "confirmed_at", "enabled", "origin"],
         "properties": {
-          "fingerprint": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+          "fingerprint": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "description": "Ed25519 公钥原始 32 字节的 SHA-256，小写十六进制，带 sha256: 前缀。key_id 只作展示，不参与判定。"
+          },
           "label": { "type": "string", "minLength": 1 },
           "confirmed_at": { "type": "string", "format": "date-time" },
           "enabled": { "type": "boolean", "description": "撤销时置 false。已装实例不卸载，但禁止自动更新。" },

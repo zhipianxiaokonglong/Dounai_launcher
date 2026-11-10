@@ -1,0 +1,67 @@
+name: contracts
+
+# 所有分支的 push 与全部 PR 都跑。不设 if 条件，也不使用 continue-on-error。
+# 上游仓检出失败、文件缺失、正则零命中，一律判为失败，不允许静默跳过。
+on:
+  push:
+  pull_request:
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: launcher
+
+      - uses: actions/checkout@v4
+        with:
+          repository: zhipianxiaokonglong/Dounai
+          path: upstreams/Dounai
+      - uses: actions/checkout@v4
+        with:
+          repository: zhipianxiaokonglong/Dounai_input
+          path: upstreams/Dounai_input
+      - uses: actions/checkout@v4
+        with:
+          repository: zhipianxiaokonglong/MoodVoice
+          path: upstreams/MoodVoice
+      - uses: actions/checkout@v4
+        with:
+          repository: zhipianxiaokonglong/OmniNexus
+          path: upstreams/OmniNexus
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Contract assertions
+        working-directory: launcher
+        run: node contracts/validate.mjs
+
+      - name: Upstream consistency
+        working-directory: launcher
+        run: node contracts/check-upstreams.mjs --root ../upstreams
+
+      - name: Install schema validator
+        working-directory: launcher
+        run: npm install --no-save --no-package-lock --prefix .ci ajv-cli@5 ajv-formats@3
+
+      - name: Compile state schemas
+        working-directory: launcher
+        run: |
+          for s in catalog-v2 source-v1 trust-v1 retention-v1; do
+            .ci/node_modules/.bin/ajv compile \
+              --spec=draft2020 --strict=false \
+              -c .ci/node_modules/ajv-formats \
+              -s "contracts/$s.schema.json" || exit 1
+          done
+
+      - name: Validate manifest examples
+        working-directory: launcher
+        run: |
+          .ci/node_modules/.bin/ajv validate \
+            --spec=draft2020 --strict=false \
+            -c .ci/node_modules/ajv-formats \
+            -s contracts/module-v2.schema.json \
+            -d "contracts/examples/*.v2.json"

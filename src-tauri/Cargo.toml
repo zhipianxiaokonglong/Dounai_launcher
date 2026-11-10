@@ -1,3 +1,6 @@
+[workspace]
+members = ["core"]
+
 [package]
 name = "dounai-launcher"
 version = "0.3.1"
@@ -14,6 +17,7 @@ name = "dounai-launcher"
 path = "src/main.rs"
 
 [dependencies]
+launcher-core = { path = "core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
@@ -24,7 +28,7 @@ tempfile = "3"
 walkdir = "2"
 ed25519-dalek = { version = "3.0.0", features = ["rand_core"] }
 base64 = "0.23.1"
-tauri = { version = "2.12.5", features = [] }
+tauri = { version = "=2.12.5", features = ["unstable"] }
 tauri-plugin-single-instance = "2.5.4"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 
@@ -33,7 +37,7 @@ tempfile = "3"
 zip = { version = "9", features = ["deflate"] }
 
 [build-dependencies]
-tauri-build = { version = "2.7.4", features = [] }
+tauri-build = { version = "=2.7.4", features = [] }
 
 [profile.release]
 codegen-units = 1

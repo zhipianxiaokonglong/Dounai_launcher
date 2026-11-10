@@ -25,6 +25,7 @@ __pycache__/
 *-temp.*
 probe-*.html
 *.log
+.ci/
 
 # 编辑器与系统
 .vscode/
