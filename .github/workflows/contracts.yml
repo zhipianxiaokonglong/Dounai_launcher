@@ -50,7 +50,7 @@ jobs:
       - name: Compile state schemas
         working-directory: launcher
         run: |
-          for s in catalog-v2 source-v1 trust-v1 retention-v1; do
+          for s in catalog-v2 source-v1 trust-v1 retention-v1 install-v1 deps-v1; do
             .ci/node_modules/.bin/ajv compile \
               --spec=draft2020 --strict=false \
               -c .ci/node_modules/ajv-formats \

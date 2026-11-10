@@ -128,6 +128,8 @@ const catalogSchema = read('catalog-v2.schema.json');
 const sourceSchema = read('source-v1.schema.json');
 const trustSchema = read('trust-v1.schema.json');
 const retentionSchema = read('retention-v1.schema.json');
+const installSchema = read('install-v1.schema.json');
+const depsSchema = read('deps-v1.schema.json');
 
 report.push('== 角色枚举 ==');
 const roleIds = roles.roles.map((r) => r.id);
@@ -268,6 +270,52 @@ rejects('retention-v1 拒绝自动删 data_dir', {
   schema_version: 1, keep_versions: 3, pinned: [],
   data_dir_policy: 'delete', source_dir_policy: 'never_delete'
 }, retentionSchema);
+
+report.push('== M1 状态 schema ==');
+const installState = {
+  schema_version: 1,
+  install_mode: 'per_machine',
+  install_root: 'C:/Program Files/DounaiLauncher',
+  data_root: 'C:/Users/me/AppData/Local/DounaiLauncher',
+  uv_path: 'C:/Program Files/DounaiLauncher/bin/uv.exe',
+  uv_sha256: FP,
+  uv_version: '0.13.7',
+  written_at: TIME
+};
+validates('install-v1 接受双根 install.json', installState, installSchema);
+validates('install-v1 接受 POSIX 绝对路径', { ...installState, install_root: '/opt/dounai', data_root: '/home/me/.dounai', uv_path: '/opt/dounai/bin/uv' }, installSchema);
+rejects('install-v1 拒绝相对 data_root', { ...installState, data_root: 'data' }, installSchema);
+rejects('install-v1 拒绝未知 install_mode', { ...installState, install_mode: 'both' }, installSchema);
+rejects('install-v1 拒绝不带前缀的哈希', { ...installState, uv_sha256: HEX }, installSchema);
+rejects('install-v1 拒绝预发布版本号', { ...installState, uv_version: '0.13.7-beta.1' }, installSchema);
+rejects('install-v1 拒绝非法 written_at', { ...installState, written_at: '2026-11-10 10:00:00' }, installSchema);
+const { uv_sha256: _omitted, ...installWithoutHash } = installState;
+rejects('install-v1 拒绝缺 uv_sha256', installWithoutHash, installSchema);
+
+const depsState = {
+  schema_version: 1,
+  instance_id: 'dounai/omninexus@stable@main',
+  kind: 'pyproject',
+  source_path: 'pyproject.toml',
+  extras: [],
+  snapshot_sha256: FP,
+  python_build_id: 'cpython-3.12.8-windows-x86_64-none',
+  generated_at: TIME,
+  offline_capable: true
+};
+for (const kind of ['uv_lock', 'requirements', 'pyproject']) {
+  validates(`deps-v1 接受 ${kind}`, { ...depsState, kind }, depsSchema);
+}
+expect('deps-v1 的 kind 枚举与 module-v2 一致',
+  JSON.stringify(depsSchema.properties.kind.enum)
+  === JSON.stringify(moduleSchema.properties.runtime.properties.deps.properties.kind.enum));
+rejects('deps-v1 拒绝未知 kind', { ...depsState, kind: 'poetry_lock' }, depsSchema);
+rejects('deps-v1 拒绝绝对 source_path', { ...depsState, source_path: '/etc/requirements.txt' }, depsSchema);
+rejects('deps-v1 拒绝穿越 source_path', { ...depsState, source_path: '../requirements.txt' }, depsSchema);
+rejects('deps-v1 拒绝不带前缀的快照哈希', { ...depsState, snapshot_sha256: HEX }, depsSchema);
+const { offline_capable: _omittedFlag, ...depsWithoutFlag } = depsState;
+rejects('deps-v1 拒绝缺 offline_capable', depsWithoutFlag, depsSchema);
+rejects('deps-v1 拒绝非法 generated_at', { ...depsState, generated_at: 'yesterday' }, depsSchema);
 
 console.log(report.join('\n'));
 console.log('');

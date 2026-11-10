@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dounai.local/contracts/install-v1.schema.json",
+  "title": "Dounai install.json v1",
+  "description": "程序根、数据根与随包 uv 的定位信息。安装器写一次，环境引擎只读，不重新推断路径。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "install_mode", "install_root", "data_root",
+    "uv_path", "uv_sha256", "uv_version", "written_at"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "install_mode": {
+      "enum": ["current_user", "per_machine", "portable"],
+      "description": "both 安装器把运行时选择写成 current_user 或 per_machine，便携 exe 写 portable。切换模式后要重建 venv。"
+    },
+    "install_root": { "$ref": "#/$defs/absolute_path", "description": "程序根，只读。uv.exe 预置在 bin/ 下。" },
+    "data_root": { "$ref": "#/$defs/absolute_path", "description": "数据根，可写，始终用户级。与程序根不得相同。" },
+    "uv_path": { "$ref": "#/$defs/absolute_path", "description": "环境引擎实际使用的 uv.exe 绝对路径。程序根缺文件时指向数据根里的下载副本。" },
+    "uv_sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "uv.exe 的 SHA-256。bootstrap 每次复核，不符即停止。"
+    },
+    "uv_version": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+      "description": "写入时实测的 uv 版本。引擎固定要求 0.13.7；0.11.7 会忽略 UV_PYTHON_NO_REGISTRY。"
+    },
+    "written_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+      "description": "UTC RFC 3339，秒级精度。draft 2020-12 里 format 只是注释，额外用 pattern 做断言。"
+    }
+  },
+  "$defs": {
+    "absolute_path": {
+      "type": "string",
+      "minLength": 2,
+      "pattern": "^(?:[A-Za-z]:[\\\\/]|/)",
+      "description": "绝对路径。Windows 盘符或 POSIX 根开头，不接受相对路径。"
+    }
+  }
+}

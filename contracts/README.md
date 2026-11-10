@@ -12,6 +12,8 @@
 | `source-v1.schema.json` | `state/installed.json` 的实例记录、来源与 active 槽 | 启动器 |
 | `trust-v1.schema.json` | `state/trust.json` 的公钥信任列表 | 启动器 |
 | `retention-v1.schema.json` | `state/retention.json` 的旧版保留策略 | 启动器 |
+| `install-v1.schema.json` | `state/install.json` 的双根、安装模式与 uv 定位 | M5 安装器写，M1 夹具可写 |
+| `deps-v1.schema.json` | `state/deps/<instance_id>.json` 的依赖快照元数据 | 环境引擎 |
 | `source-adapter-v1.md` | `SourceAdapter` trait 的接口与不变式 | 启动器仓 |
 | `validate.mjs` | 零依赖契约校验器 | 启动器仓 |
 | `check-upstreams.mjs` | 核对角色声明与五个仓源码是否一致 | 启动器仓 |
@@ -65,13 +67,15 @@ node contracts/validate.mjs
 node contracts/check-upstreams.mjs
 ```
 
-`validate.mjs` 零依赖，按 `module-v2.schema.json` 校验五份样例，并核对角色枚举与样例的端口、health、依赖。负例覆盖未知 role、路径穿越、缺 `pubkey` 与未验证实例自动更新。当前 66 项断言全部通过。
+`validate.mjs` 零依赖，按 `module-v2.schema.json` 校验五份样例，并核对角色枚举与样例的端口、health、依赖。当前 84 项断言全部通过。
+
+负例覆盖未知 role、路径穿越、缺 `pubkey` 与未验证实例自动更新。M1 新增的负例覆盖相对路径、哈希格式与未知 `kind`。
 
 `check-upstreams.mjs` 从组装层与三个上游的源码解析 GET 路由和端口，逐项比对 `roles-v1.json`。默认读取工作区根目录下的五个仓；用 `--root` 指向别的检出布局，用 `--roles` 指向另一份角色契约做负例测试。源码缺失、路径不一致或正则零匹配都判失败，不把检查不适用当成通过。
 
-[contracts.yml](../.github/workflows/contracts.yml) 在每次 push 与 PR 检出四个上游仓。job 依次运行两份校验器。ajv 接着编译四份状态 schema，并校验五份样例。workflow 不设跳过条件，也不使用 `continue-on-error`。
+[contracts.yml](../.github/workflows/contracts.yml) 在每次 push 与 PR 检出四个上游仓。job 依次运行两份校验器。ajv 接着编译六份状态 schema，并校验五份样例。workflow 不设跳过条件，也不使用 `continue-on-error`。
 
-`validate.mjs` 不校验 `format: date-time`，时间字段由 ajv 开启格式校验后检查。本地复核需装 `ajv-cli@5` 与 `ajv-formats@3`，命令见 workflow。
+`validate.mjs` 不校验 `format` 关键字。draft 2020-12 把 `format` 当注释，所以 `written_at` 与 `generated_at` 另用 `pattern` 断言 UTC 时间格式，校验器会执行这条 `pattern`。CI 的 ajv 只编译状态 schema，不做状态文件的数据级校验；合规性由写端与断言共同保证。本地复核需装 `ajv-cli@5` 与 `ajv-formats@3`，命令见 workflow。
 
 ## 发布工具
 
@@ -109,6 +113,7 @@ cargo run --bin sign_catalog -- verify --pubkey k5.pub --catalog signed.json
 - `roles-v1.json` 增加或删除 `role` 时，同步改 `module-v2.schema.json` 的 `role` 枚举、`source-v1.schema.json` 的 `active` 键集合、`catalog-v2.schema.json` 的条目枚举与五份样例。
 - 字段语义不兼容时升文件名版本号，不在原文件里叠加兼容分支。
 - `validate.mjs` 的失败项不得通过放宽 schema 消除。允许例外时，在断言里写明理由。
+- M1 新增 `install-v1.schema.json` 与 `deps-v1.schema.json`。`module-v2.schema.json` 只改 `runtime.deps` 与 `runtime.snapshot_sha256` 的 `description`，字段类型、必填与取值未变，不升文件名版本号。
 
 警告：把 `unknown_role_policy` 改成降级为 `auxiliary`，第三方模块会绕过契约自检。不要改这个值。
 
@@ -125,3 +130,20 @@ M0 实施清单的四项工作已交付到本分支。
 剩余一项属于 M5：K1、K5 两把密钥的生成与编译期内置。生成真实私钥并内置到发布构建前，按 M5 的发布流水线执行，不放在 M0。
 
 以上工作全部限定在 Windows。Windows 专属进程代码放进 `process/win`，不写跨平台 trait 的空壳。
+
+## M1 契约增量
+
+M1 新增两份状态 schema，不改 M0 已冻结的约束。
+
+| 状态文件 | 契约 | 写入方 |
+|---|---|---|
+| `state/install.json` | [install-v1.schema.json](install-v1.schema.json) | 安装器写一次，之后只读 |
+| `state/deps/<instance_id>.json` | [deps-v1.schema.json](deps-v1.schema.json) | 环境引擎 |
+| `state/deps/<instance_id>.lock` | 无 schema，内容是 uv 的 pinned snapshot | 环境引擎 |
+| `state/runtime.json` | 无 schema，引擎内部状态 | 环境引擎 |
+
+说明：`state/runtime.json` 记 `install_mode`、`python_install_dir`、`python_build_id`、`uv_version` 与每个实例的 `snapshot_sha256`，不进跨仓契约。锁文件的哈希放在这里，是为了让篡改锁文件时有一个独立比对点。这只防意外改动，不防本地恶意改写。
+
+注意：`source-v1.schema.json` 的 `instance_id` 允许含 `/`，例如 `dounai/omninexus@stable@main`。引擎拼锁文件名前先做安全编码，不把斜杠当目录分隔符。`install-v1` 的两个根不得相同，这条由 `Paths::new` 校验，schema 表达不了跨字段比较。
+
+`module-v2.schema.json` 只改了两处说明文字。`runtime.deps.kind` 由发布者声明，启动器不嗅探、不按优先级猜测；`runtime.snapshot_sha256` 是发布者预置的哈希，包签名后不可变，运行时生成的哈希另记在 `state/runtime.json`。
