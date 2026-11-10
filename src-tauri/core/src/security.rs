@@ -110,7 +110,7 @@ fn normalize(path: &Path) -> PathBuf {
 /// 与 `safe_join` 共用同一套保留名规则，供“模块 id → 目录名”这类
 /// 不涉及相对路径的场景复用，避免两处规则漂移。
 pub fn is_safe_filename(name: &str) -> bool {
-    if name.is_empty() || name.trim() != name {
+    if name.is_empty() || name.trim() != name || name == "." || name == ".." {
         return false;
     }
     // 含路径分隔符就交给 safe_join 处理，这里直接拒绝

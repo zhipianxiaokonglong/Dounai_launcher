@@ -100,6 +100,98 @@ impl Paths {
             ("UV_CACHE_DIR", self.uv_cache_dir()),
         ]
     }
+
+    pub fn bundled_uv_path(&self) -> PathBuf {
+        self.install_root.join("bin").join("uv.exe")
+    }
+
+    pub fn downloaded_uv_path(&self) -> PathBuf {
+        self.data_root.join("runtime").join("bin").join("uv.exe")
+    }
+
+    pub fn install_state_path(&self) -> PathBuf {
+        self.state_dir().join("install.json")
+    }
+
+    pub fn runtime_state_path(&self) -> PathBuf {
+        self.state_dir().join("runtime.json")
+    }
+
+    pub fn deps_dir(&self) -> PathBuf {
+        self.state_dir().join("deps")
+    }
+
+    /// 落盘目录名用编码后的 key，不把 instance_id 里的斜杠当目录分隔符。
+    pub fn instance_dir_keyed(&self, instance_id: &str) -> PathBuf {
+        self.data_root
+            .join("instances")
+            .join(instance_key(instance_id))
+    }
+
+    pub fn instance_venv_python(&self, instance_id: &str) -> PathBuf {
+        self.instance_dir_keyed(instance_id)
+            .join("venv")
+            .join("Scripts")
+            .join("python.exe")
+    }
+
+    pub fn instance_data_dir_keyed(&self, instance_id: &str) -> PathBuf {
+        self.instance_dir_keyed(instance_id).join("data")
+    }
+
+    pub fn instance_logs_dir_keyed(&self, instance_id: &str) -> PathBuf {
+        self.instance_dir_keyed(instance_id).join("logs")
+    }
+
+    pub fn deps_lock_path(&self, instance_id: &str) -> PathBuf {
+        self.deps_dir()
+            .join(format!("{}.lock", instance_key(instance_id)))
+    }
+
+    pub fn deps_meta_path(&self, instance_id: &str) -> PathBuf {
+        self.deps_dir()
+            .join(format!("{}.json", instance_key(instance_id)))
+    }
+}
+
+/// 校验逻辑 instance_id。斜杠是命名空间分隔符，不是目录分隔符；其余字符收紧到白名单。
+pub fn validate_instance_id(instance_id: &str) -> Result<(), PathsError> {
+    let bad = || PathsError::BadInstanceId(instance_id.to_string());
+    if instance_id.is_empty() || instance_id.len() > 128 {
+        return Err(bad());
+    }
+    if !instance_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | '@'))
+    {
+        return Err(bad());
+    }
+    if instance_id
+        .split('/')
+        .any(|seg| seg.is_empty() || seg == "." || seg == "..")
+    {
+        return Err(bad());
+    }
+    Ok(())
+}
+
+/// 把逻辑 instance_id 编码成安全目录名。
+///
+/// 点号也替换掉：`CON.txt` 这类 id 若保留点号，首段会落在 Windows 保留设备名上，
+/// 目录创建会失败或被重定向。哈希取 16 位十六进制，避免 32 位的碰撞面。
+pub fn instance_key(instance_id: &str) -> String {
+    let safe: String = instance_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '@') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let digest = crate::security::sha256_hex(instance_id.as_bytes());
+    format!("{safe}-{}", &digest[..16])
 }
 
 #[cfg(test)]
@@ -179,7 +271,9 @@ mod tests {
     #[test]
     fn instance_id_cannot_escape_instances_dir() {
         let p = paths();
-        for bad in ["../evil", "a/b", "a\\b", "", " spaced", "CON"] {
+        for bad in [
+            "../evil", "a/b", "a\\b", "", " spaced", "CON", ".", "..", "CON.txt",
+        ] {
             assert!(p.instance_dir(bad).is_err(), "未被拒绝：{bad:?}");
         }
         assert!(p.instance_dir("omninexus@agent@dev").is_ok());
@@ -192,5 +286,62 @@ mod tests {
         let back: Paths = serde_json::from_str(&text).unwrap();
         assert_eq!(p, back);
         assert!(text.contains("per_machine"));
+    }
+
+    #[test]
+    fn instance_key_is_safe_and_collision_resistant() {
+        let a = instance_key("dounai/omninexus@stable@main");
+        let b = instance_key("dounai_omninexus@stable@main");
+        assert_ne!(a, b);
+        assert!(!a.contains('/') && !a.contains('\\'));
+        assert!(is_safe_filename(&a));
+        assert_eq!(a, instance_key("dounai/omninexus@stable@main"));
+    }
+
+    #[test]
+    fn instance_key_replaces_dots_and_uses_long_hash() {
+        let key = instance_key("CON.txt");
+        assert!(!key.contains('.'), "点号不得留在 key 里：{key}");
+        assert!(is_safe_filename(&key), "保留设备名不得落在 key 首段：{key}");
+        let tail = key.rsplit('-').next().unwrap();
+        assert_eq!(tail.len(), 16);
+        assert!(tail.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn instance_id_validation_rejects_hostile_values() {
+        for bad in ["", "a//b", "a/../b", "../evil", "a\\b", "a?b", "CON/.."] {
+            assert!(validate_instance_id(bad).is_err(), "未被拒绝：{bad:?}");
+        }
+        assert!(validate_instance_id(&"x".repeat(129)).is_err());
+        assert!(validate_instance_id("dounai/omninexus@stable@main").is_ok());
+    }
+
+    #[test]
+    fn keyed_and_state_paths_stay_under_data_root() {
+        let p = paths();
+        let id = "dounai/omninexus@stable@main";
+        for path in [
+            p.instance_dir_keyed(id),
+            p.instance_venv_python(id),
+            p.instance_data_dir_keyed(id),
+            p.instance_logs_dir_keyed(id),
+            p.deps_lock_path(id),
+            p.deps_meta_path(id),
+            p.install_state_path(),
+            p.runtime_state_path(),
+            p.downloaded_uv_path(),
+        ] {
+            assert!(path.starts_with(&p.data_root), "越界：{}", path.display());
+            assert!(
+                !path.starts_with(&p.install_root),
+                "写入程序根：{}",
+                path.display()
+            );
+        }
+        assert!(p.bundled_uv_path().starts_with(&p.install_root));
+        assert!(p
+            .instance_venv_python(id)
+            .ends_with("venv/Scripts/python.exe"));
     }
 }
