@@ -39,7 +39,9 @@ npx --yes ajv-cli@5 validate --spec=draft2020 --strict=false \
 
 | 文档 | 内容 |
 |---|---|
+| [docs/DESIGN.md](docs/DESIGN.md) | 设计决策、架构与子系统行为约束 |
 | [contracts/README.md](contracts/README.md) | M0 契约入口，含角色、包格式与状态 schema |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | M1 到 M5 的里程碑与实测验收 |
 | [SECURITY.md](SECURITY.md) | 安全策略、信任模型与已知限制 |
 | [docs/ADMIN_UI.md](docs/ADMIN_UI.md) | 模块如何声明自己的配置界面 |
 | [docs/TESTING.md](docs/TESTING.md) | 测试方法学与三个易踩的坑 |
