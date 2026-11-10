@@ -4,11 +4,27 @@
 //! 命令面负责校验参数与转换结果，业务逻辑逐步迁入本层。
 
 pub mod admin_host;
+pub mod env;
+pub mod install;
+pub mod manifest;
 pub mod paths;
 pub mod security;
 pub mod signature;
+pub mod state;
+pub mod time;
 
 pub use admin_host::{AdminHost, AdminHostError, HostEvent, MountRequest, RecordingAdminHost};
-pub use paths::{InstallMode, Paths, PathsError};
+pub use env::{
+    cache_usage, prepare_instance, prepare_instance_with, verify_instance, verify_instance_with,
+    CacheUsage, EnvContext, EnvError, EnvErrorKind, EnvOptions, ManagedPython, PreparedEnv,
+    RuntimeState, UvBinary, UV_VERSION,
+};
+pub use install::{InstallState, InstallStateError};
+pub use manifest::{
+    expand_placeholders, DepsKind, DepsSpec, EntrySpec, HealthSpec, ModuleManifestV2, Role,
+    RuntimeSpec,
+};
+pub use paths::{instance_key, InstallMode, Paths, PathsError};
 pub use security::{is_safe_filename, safe_join, sha256_hex, verify_sha256, PathError};
 pub use signature::{canonical_payload, verify_manifest, SignatureError, SUPPORTED_ALGO};
+pub use state::{file_sha256_prefixed, read_json, write_json, StateError};
