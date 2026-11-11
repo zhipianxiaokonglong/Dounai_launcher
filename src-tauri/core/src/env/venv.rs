@@ -41,8 +41,16 @@ fn err(kind: EnvErrorKind, instance_id: &str, message: impl Into<String>) -> Env
     EnvError::new(kind, instance_id, message)
 }
 
-pub fn venv_dir(paths: &Paths, instance_id: &str) -> PathBuf {
-    paths.instance_dir_keyed(instance_id).join("venv")
+pub fn venv_dir(paths: &Paths, instance_id: &str, sha256: &str) -> PathBuf {
+    paths.generation_venv_dir(instance_id, sha256)
+}
+
+fn remove_dir_if_exists(path: &Path) -> std::io::Result<()> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -73,7 +81,7 @@ pub fn sync_request(
         let mut req = UvRequest::new(&uv.path, instance_id, &["pip", "sync"]);
         req.push_path(&resolved.staging_path);
         req.args.push("--python".into());
-        req.push_path(&paths.instance_venv_python(instance_id));
+        req.push_path(&venv.join("Scripts").join("python.exe"));
         req.args.push("--require-hashes".into());
         req
     };
@@ -113,14 +121,10 @@ pub fn prepare_venv(
     options: &EnvOptions,
     runner: &dyn UvRunner,
 ) -> Result<VenvOutcome, EnvError> {
-    let venv = venv_dir(paths, instance_id);
-    let venv_python = paths.instance_venv_python(instance_id);
-    let created = !venv_python.exists();
-    let mut rollback = VenvRollback {
-        path: venv.clone(),
-        created,
-        armed: true,
-    };
+    let sha = &resolved.sha256;
+    let final_dir = venv_dir(paths, instance_id, sha);
+    let final_python = paths.generation_venv_python(instance_id, sha);
+    let staging = paths.staging_venv_dir(instance_id, sha);
 
     // uv_lock 的 sync 只消费项目根的 uv.lock，且没有参数可指向别处。
     // 执行前再比对一次，确保「哈希过的快照」就是「uv 即将读的那份」。
@@ -145,25 +149,114 @@ pub fn prepare_venv(
         }
     }
 
-    if created {
-        let mut req = UvRequest::new(&uv.path, instance_id, &["venv"]);
-        req.push_path(&venv);
-        req.args.push("--python".into());
-        req.push_path(&python.path);
-        req.cwd = paths.data_root.clone();
-        req.env = python_bound_env(paths, python);
-        runner
-            .run(&req)
-            .map_err(|e| e.reclassify_if_generic(EnvErrorKind::VenvCreate))?;
-        if !venv_python.exists() {
-            return Err(err(
-                EnvErrorKind::VenvCreate,
-                instance_id,
-                format!("venv 建好后没有解释器：{}", venv_python.display()),
-            ));
-        }
+    // 同一 generation 的 venv 已完整时直接复用。sync 与 dry-run 都是幂等的，
+    // 不会把别的 generation 的环境改成本次依赖。
+    if final_python.exists() {
+        sync_and_verify(
+            paths,
+            instance_id,
+            manifest,
+            module_dir,
+            uv,
+            python,
+            resolved,
+            &final_dir,
+            options,
+            runner,
+        )?;
+        return Ok(VenvOutcome {
+            venv_python: final_python,
+            created: false,
+        });
     }
 
+    // 清掉上次崩溃留下的半截目录。正式目录只在 rename 成功后出现。
+    remove_dir_if_exists(&final_dir).map_err(|e| {
+        err(
+            EnvErrorKind::VenvCreate,
+            instance_id,
+            format!("清理不完整的 generation venv 失败：{e}"),
+        )
+    })?;
+    remove_dir_if_exists(&staging).map_err(|e| {
+        err(
+            EnvErrorKind::VenvCreate,
+            instance_id,
+            format!("清理残留的临时 venv 失败：{e}"),
+        )
+    })?;
+
+    let mut rollback = VenvRollback {
+        path: staging.clone(),
+        created: true,
+        armed: true,
+    };
+    let staging_python = staging.join("Scripts").join("python.exe");
+
+    let mut req = UvRequest::new(&uv.path, instance_id, &["venv"]);
+    req.push_path(&staging);
+    req.args.push("--python".into());
+    req.push_path(&python.path);
+    req.cwd = paths.data_root.clone();
+    req.env = python_bound_env(paths, python);
+    runner
+        .run(&req)
+        .map_err(|e| e.reclassify_if_generic(EnvErrorKind::VenvCreate))?;
+    if !staging_python.exists() {
+        return Err(err(
+            EnvErrorKind::VenvCreate,
+            instance_id,
+            format!("临时 venv 建好后没有解释器：{}", staging_python.display()),
+        ));
+    }
+
+    sync_and_verify(
+        paths,
+        instance_id,
+        manifest,
+        module_dir,
+        uv,
+        python,
+        resolved,
+        &staging,
+        options,
+        runner,
+    )?;
+
+    fs::rename(&staging, &final_dir).map_err(|e| {
+        err(
+            EnvErrorKind::VenvCreate,
+            instance_id,
+            format!("把临时 venv 切换成正式目录失败：{e}"),
+        )
+    })?;
+    if !final_python.exists() {
+        return Err(err(
+            EnvErrorKind::VenvCreate,
+            instance_id,
+            format!("切换后的 venv 没有解释器：{}", final_python.display()),
+        ));
+    }
+    rollback.armed = false;
+    Ok(VenvOutcome {
+        venv_python: final_python,
+        created: true,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sync_and_verify(
+    paths: &Paths,
+    instance_id: &str,
+    manifest: &ModuleManifestV2,
+    module_dir: &Path,
+    uv: &UvBinary,
+    python: &ManagedPython,
+    resolved: &ResolvedDeps,
+    venv: &Path,
+    options: &EnvOptions,
+    runner: &dyn UvRunner,
+) -> Result<(), EnvError> {
     let sync = sync_request(
         paths,
         instance_id,
@@ -172,7 +265,7 @@ pub fn prepare_venv(
         uv,
         python,
         resolved,
-        &venv,
+        venv,
         options,
         false,
     );
@@ -181,7 +274,7 @@ pub fn prepare_venv(
         .run(&sync)
         .map_err(|e| e.reclassify_if_generic(EnvErrorKind::VenvSync))?;
 
-    // 每次启动都用离线 dry-run 复核缓存，不走联网、不静默重建。
+    // 每次 prepare 都用离线 dry-run 复核缓存，不走联网、不静默重建。
     let dry = sync_request(
         paths,
         instance_id,
@@ -190,7 +283,7 @@ pub fn prepare_venv(
         uv,
         python,
         resolved,
-        &venv,
+        venv,
         options,
         true,
     );
@@ -202,21 +295,16 @@ pub fn prepare_venv(
         };
         e.reclassify_if_generic(kind)
     })?;
-
-    rollback.armed = false;
-    Ok(VenvOutcome {
-        venv_python,
-        created,
-    })
+    Ok(())
 }
 
-/// 失败时清掉本次新建的 venv 与临时快照，保留上次成功的正式锁文件与元数据。
+/// 失败时清掉临时快照、临时 venv 与不完整的 generation venv。
+/// 已经完整落盘的 generation 目录保留，因为上一次成功的 runtime 可能仍指向它。
 /// 清理失败不静默吞掉，交给调用方附到错误上下文里。
 pub fn cleanup_after_failure(
     paths: &Paths,
     instance_id: &str,
     resolved: Option<&ResolvedDeps>,
-    created_venv: bool,
 ) -> Vec<String> {
     let mut problems = Vec::new();
     let staging = resolved
@@ -225,9 +313,21 @@ pub fn cleanup_after_failure(
     if let Err(e) = crate::state::remove_if_exists(&staging) {
         problems.push(format!("清理临时快照 {} 失败：{e}", staging.display()));
     }
-    if created_venv {
-        if let Err(e) = fs::remove_dir_all(venv_dir(paths, instance_id)) {
-            problems.push(format!("清理本次新建的 venv 失败：{e}"));
+    let Some(r) = resolved else {
+        return problems;
+    };
+    let sha = &r.sha256;
+    let staging_venv = paths.staging_venv_dir(instance_id, sha);
+    if let Err(e) = remove_dir_if_exists(&staging_venv) {
+        problems.push(format!(
+            "清理临时 venv {} 失败：{e}",
+            staging_venv.display()
+        ));
+    }
+    let dir = paths.generation_venv_dir(instance_id, sha);
+    if dir.exists() && !paths.generation_venv_python(instance_id, sha).exists() {
+        if let Err(e) = remove_dir_if_exists(&dir) {
+            problems.push(format!("清理不完整的 generation venv 失败：{e}"));
         }
     }
     problems
@@ -240,6 +340,10 @@ mod tests {
     use crate::env::runner::{MockConfig, MockFailure, MockUvRunner};
     use crate::manifest::ModuleManifestV2;
     use crate::paths::{InstallMode, Paths};
+
+    fn test_sha() -> String {
+        format!("sha256:{}", "a".repeat(64))
+    }
 
     fn setup() -> (
         tempfile::TempDir,
@@ -366,8 +470,13 @@ mod tests {
         assert_eq!(sync.cwd, module);
         assert_eq!(
             sync.env["UV_PROJECT_ENVIRONMENT"],
-            venv_dir(&paths, "mod@a").to_string_lossy()
+            paths
+                .staging_venv_dir("mod@a", &resolved.sha256)
+                .to_string_lossy()
         );
+        assert!(paths
+            .generation_venv_python("mod@a", &resolved.sha256)
+            .exists());
     }
 
     #[test]
@@ -448,7 +557,7 @@ mod tests {
         let (_dir, paths, _module, _uv, _python, resolved) = setup();
         fs::create_dir_all(paths.deps_generation_dir("mod@a")).unwrap();
         fs::write(&resolved.lock_path, b"previous").unwrap();
-        fs::create_dir_all(venv_dir(&paths, "mod@a").join("Scripts")).unwrap();
+        fs::create_dir_all(venv_dir(&paths, "mod@a", &test_sha()).join("Scripts")).unwrap();
         let runner = MockUvRunner::new(MockConfig {
             fail: Some(MockFailure {
                 when_contains: "pip sync".into(),
@@ -458,7 +567,7 @@ mod tests {
             ..MockConfig::default()
         });
         // 先手工建好 venv，确认失败清理不会误删旧环境。
-        fs::write(paths.instance_venv_python("mod@a"), b"old").unwrap();
+        fs::write(paths.generation_venv_python("mod@a", &test_sha()), b"old").unwrap();
         let m = manifest();
         let dummy_uv = UvBinary {
             path: PathBuf::from("uv.exe"),
@@ -484,19 +593,100 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(e.kind, EnvErrorKind::VenvSync);
-        cleanup_after_failure(&paths, "mod@a", Some(&resolved), false);
+        cleanup_after_failure(&paths, "mod@a", Some(&resolved));
         assert!(!resolved.staging_path.exists());
         assert_eq!(fs::read_to_string(&resolved.lock_path).unwrap(), "previous");
-        assert!(paths.instance_venv_python("mod@a").exists());
+        assert!(paths.generation_venv_python("mod@a", &test_sha()).exists());
     }
 
     #[test]
-    fn cleanup_removes_venv_created_by_failed_prepare() {
+    fn cleanup_removes_incomplete_generation_but_keeps_complete_one() {
         let (_dir, paths, _module, _uv, _python, resolved) = setup();
-        fs::create_dir_all(venv_dir(&paths, "mod@a").join("Scripts")).unwrap();
-        fs::write(paths.instance_venv_python("mod@a"), b"new").unwrap();
-        cleanup_after_failure(&paths, "mod@a", Some(&resolved), true);
-        assert!(!venv_dir(&paths, "mod@a").exists());
+        let sha = &resolved.sha256;
+        let dir = paths.generation_venv_dir("mod@a", sha);
+        let staging = paths.staging_venv_dir("mod@a", sha);
+        fs::create_dir_all(&dir).unwrap();
+        fs::create_dir_all(&staging).unwrap();
+        cleanup_after_failure(&paths, "mod@a", Some(&resolved));
+        assert!(!dir.exists(), "不完整的 generation 目录要删掉");
+        assert!(!staging.exists(), "临时 venv 要删掉");
         assert!(!resolved.staging_path.exists());
+
+        fs::create_dir_all(dir.join("Scripts")).unwrap();
+        fs::write(paths.generation_venv_python("mod@a", sha), b"ok").unwrap();
+        fs::create_dir_all(&staging).unwrap();
+        cleanup_after_failure(&paths, "mod@a", Some(&resolved));
+        assert!(paths.generation_venv_python("mod@a", sha).exists());
+    }
+
+    #[test]
+    fn failed_prepare_never_leaves_a_formal_generation_venv() {
+        let (_dir, paths, module, uv, python, resolved) = setup();
+        let runner = MockUvRunner::new(MockConfig {
+            fail: Some(MockFailure {
+                when_contains: "pip sync".into(),
+                kind: EnvErrorKind::VenvSync,
+                message: "sync failed".into(),
+            }),
+            ..MockConfig::default()
+        });
+        let e = prepare_venv(
+            &paths,
+            "mod@a",
+            &manifest(),
+            &module,
+            &uv,
+            &python,
+            &resolved,
+            &EnvOptions::default(),
+            &runner,
+        )
+        .unwrap_err();
+        assert_eq!(e.kind, EnvErrorKind::VenvSync);
+        assert!(!paths
+            .generation_venv_dir("mod@a", &resolved.sha256)
+            .exists());
+        assert!(!paths.staging_venv_dir("mod@a", &resolved.sha256).exists());
+    }
+
+    #[test]
+    fn new_generation_gets_its_own_venv_without_touching_previous_one() {
+        let (_dir, paths, module, uv, python, mut resolved) = setup();
+        let runner = MockUvRunner::default();
+        let first = prepare_venv(
+            &paths,
+            "mod@a",
+            &manifest(),
+            &module,
+            &uv,
+            &python,
+            &resolved,
+            &EnvOptions::default(),
+            &runner,
+        )
+        .unwrap();
+        assert!(first.created);
+        let old_dir = paths.generation_venv_dir("mod@a", &resolved.sha256);
+        assert!(old_dir.exists());
+
+        resolved.sha256 = format!("sha256:{}", "b".repeat(64));
+        resolved.metadata.snapshot_sha256 = resolved.sha256.clone();
+        let second = prepare_venv(
+            &paths,
+            "mod@a",
+            &manifest(),
+            &module,
+            &uv,
+            &python,
+            &resolved,
+            &EnvOptions::default(),
+            &runner,
+        )
+        .unwrap();
+        assert_eq!(
+            second.venv_python,
+            paths.generation_venv_python("mod@a", &resolved.sha256)
+        );
+        assert!(old_dir.exists(), "旧 generation 的 venv 不得被改写或删除");
     }
 }

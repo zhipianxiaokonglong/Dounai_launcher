@@ -241,7 +241,6 @@ pub fn prepare_instance_with(
         instance_id,
     )?;
     let mut resolved_seen: Option<ResolvedDeps> = None;
-    let mut created_venv = false;
 
     let result: Result<(PreparedEnv, RuntimeState), EnvError> = (|| {
         let mut runtime = RuntimeState::load_or_empty(paths, ctx.install, instance_id)?;
@@ -304,7 +303,6 @@ pub fn prepare_instance_with(
             &ctx.options,
             ctx.runner,
         )?;
-        created_venv = outcome.created;
 
         deps::commit(paths, &mut resolved)?;
         let env_vars = build_env_vars(
@@ -356,12 +354,7 @@ pub fn prepare_instance_with(
             Ok(prepared)
         }
         Err(mut e) => {
-            let problems = venv::cleanup_after_failure(
-                paths,
-                instance_id,
-                resolved_seen.as_ref(),
-                created_venv,
-            );
+            let problems = venv::cleanup_after_failure(paths, instance_id, resolved_seen.as_ref());
             if !problems.is_empty() {
                 e.message
                     .push_str(&format!("\n清理失败：{}", problems.join("；")));
@@ -522,7 +515,12 @@ fn build_env_vars(
     options: &EnvOptions,
 ) -> Result<BTreeMap<String, String>, EnvError> {
     let mut vars = python::python_bound_env(paths, python);
-    let venv = venv::venv_dir(paths, instance_id);
+    // venv_python 是 <generation_venv>/Scripts/python.exe，往上两级就是环境目录。
+    let venv = venv_python
+        .ancestors()
+        .nth(2)
+        .unwrap_or(venv_python.as_path())
+        .to_path_buf();
     vars.insert(
         "UV_PROJECT_ENVIRONMENT".into(),
         venv.to_string_lossy().into_owned(),
@@ -671,7 +669,10 @@ mod tests {
         );
         let env = f.prepare().unwrap();
         let id = "dounai/omninexus@stable@main";
-        assert_eq!(env.venv_python, f.paths.instance_venv_python(id));
+        assert_eq!(
+            env.venv_python,
+            f.paths.generation_venv_python(id, &env.snapshot_sha256)
+        );
         assert!(env.venv_python.exists());
         assert_eq!(env.working_dir, f.module);
         assert_eq!(env.python_build_id, "cpython-3.12.8-windows-x86_64-none");
@@ -791,7 +792,7 @@ mod tests {
         let id = "dounai/omninexus@stable@main";
         assert!(!f.paths.deps_generation_dir(id).exists());
         assert!(!f.paths.runtime_state_path().exists());
-        assert!(!f.paths.instance_venv_python(id).exists());
+        assert!(!f.paths.instance_venvs_dir(id).exists());
     }
 
     #[test]

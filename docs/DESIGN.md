@@ -89,7 +89,7 @@ Windows 专属代码圈进 `process/win` 单一模块边界。`launcher-core` �
 
 [数据根 data_root：可写，始终用户级]
   ├─ runtime\python\
-  ├─ instances\<instance_id>\   （venv\ data\ logs\）
+  ├─ instances\<instance_key>\ （venvs\<generation>\ data\ logs\）
   ├─ state\
   └─ webview\
 ```
@@ -171,6 +171,8 @@ uv python install 3.12 --install-dir <data_root>/runtime/python --no-registry --
 三个上游都是 src layout，依赖同步不装项目自身。`PreparedEnv.env_vars` 在 `module_dir/src` 存在时注入 `PYTHONPATH`，让 `-m` 能找到包。
 
 解析结果按内容哈希写成 `state/deps/<instance_key>/<sha256>.lock`，内容是钉死版本加哈希的 pinned snapshot。元数据按 [deps-v1](../contracts/deps-v1.schema.json) 写进同名 `.json`。引擎把两者写进自己的 `state/`，不写回模块目录。文件写入后永不改写，`state/runtime.json` 是唯一的提交点。`runtime.json` 引用的 generation 必须先落盘，因此任何一步崩溃都不会留下锁新、哈希旧。残留 generation 的清理由旧版保留策略处理。
+
+venv 也按 generation 分目录，路径是 `instances/<instance_key>/venvs/<sha 前 16 位>/`。新建时先落在同级 `.staging` 目录。`uv venv`、依赖同步与离线 dry-run 全部通过后，才 rename 成正式目录。失败只删 `.staging`，旧 generation 的 venv 保持原样。`runtime.json` 切换前，没有任何正式目录会被改写。
 
 `prepare_instance` 按 `source_kind` 处理快照。zip 包必须比对签名 manifest 的 `runtime.snapshot_sha256`，缺字段或不符都报 `SnapshotMismatch`。dir 允许重解析，哈希变化写进 `runtime.json` 的 `snapshot_change`，由 M4 提示重新确认。运行时生成的哈希不写回包内。
 

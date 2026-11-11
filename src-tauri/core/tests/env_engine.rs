@@ -207,10 +207,7 @@ fn failed_resolve_keeps_previous_snapshot_and_venv() {
         fs::read(f.paths.content_lock_path(ID, &first.snapshot_sha256)).unwrap(),
         previous
     );
-    assert!(
-        f.paths.instance_venv_python(ID).exists(),
-        "上次成功的 venv 不得被清理"
-    );
+    assert!(first.venv_python.exists(), "上次成功的 venv 不得被清理");
     assert!(verify_instance_with(&f.paths, ID, &f.install).is_ok());
 }
 

@@ -74,7 +74,7 @@
         "python": { "type": "string", "minLength": 1, "description": "版本范围，例如 >=3.11,<3.14。" },
         "venv": {
           "const": "{instance_venv}",
-          "description": "解析到 instances/<instance_id>/venv。zip 与 dir 一致，不写进用户源码目录。"
+          "description": "解析到 instances/<instance_key>/venvs/<generation>。zip 与 dir 一致，不写进用户源码目录。generation 由依赖快照哈希决定，切换依赖时新建目录，不改写旧环境。"
         },
         "deps": {
           "type": "object",

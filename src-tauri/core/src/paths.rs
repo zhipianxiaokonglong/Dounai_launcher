@@ -128,11 +128,28 @@ impl Paths {
             .join(instance_key(instance_id))
     }
 
-    pub fn instance_venv_python(&self, instance_id: &str) -> PathBuf {
-        self.instance_dir_keyed(instance_id)
-            .join("venv")
+    /// venv 按 generation 分目录。`runtime.json` 指向哪一代就用哪一代，
+    /// 准备新依赖时不会原地改写旧环境。
+    pub fn instance_venvs_dir(&self, instance_id: &str) -> PathBuf {
+        self.instance_dir_keyed(instance_id).join("venvs")
+    }
+
+    pub fn generation_venv_dir(&self, instance_id: &str, sha256: &str) -> PathBuf {
+        self.instance_venvs_dir(instance_id)
+            .join(generation_tag(sha256))
+    }
+
+    pub fn generation_venv_python(&self, instance_id: &str, sha256: &str) -> PathBuf {
+        self.generation_venv_dir(instance_id, sha256)
             .join("Scripts")
             .join("python.exe")
+    }
+
+    /// 新建 venv 的临时目录。全部校验通过后 rename 成 generation 目录，
+    /// 崩溃只会留下 `.staging`，正式目录永远完整。
+    pub fn staging_venv_dir(&self, instance_id: &str, sha256: &str) -> PathBuf {
+        self.instance_venvs_dir(instance_id)
+            .join(format!("{}.staging", generation_tag(sha256)))
     }
 
     pub fn instance_data_dir_keyed(&self, instance_id: &str) -> PathBuf {
@@ -174,11 +191,21 @@ pub fn generation_sha(sha256: &str) -> &str {
     if hex.len() == 64
         && hex
             .bytes()
-            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     {
         hex
     } else {
         "invalid"
+    }
+}
+
+/// venv 目录名取哈希前 16 位，与锁文件的完整哈希区分开。
+pub fn generation_tag(sha256: &str) -> String {
+    let hex = generation_sha(sha256);
+    if hex.len() == 64 {
+        hex[..16].to_string()
+    } else {
+        "invalid".to_string()
     }
 }
 
@@ -352,7 +379,10 @@ mod tests {
         let sha = format!("sha256:{}", "a".repeat(64));
         for path in [
             p.instance_dir_keyed(id),
-            p.instance_venv_python(id),
+            p.instance_venvs_dir(id),
+            p.generation_venv_dir(id, &sha),
+            p.generation_venv_python(id, &sha),
+            p.staging_venv_dir(id, &sha),
             p.instance_data_dir_keyed(id),
             p.instance_logs_dir_keyed(id),
             p.deps_generation_dir(id),
@@ -372,8 +402,12 @@ mod tests {
         }
         assert!(p.bundled_uv_path().starts_with(&p.install_root));
         assert!(p
-            .instance_venv_python(id)
-            .ends_with("venv/Scripts/python.exe"));
+            .generation_venv_python(id, &sha)
+            .ends_with("Scripts/python.exe"));
+        assert!(p
+            .generation_venv_dir(id, &sha)
+            .to_string_lossy()
+            .contains(&generation_tag(&sha)));
     }
 
     #[test]

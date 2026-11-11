@@ -155,8 +155,9 @@ M1 新增两份状态 schema，不改 M0 已冻结的约束。
 |---|---|---|
 | 锁路径 | `state/deps/<instance_key>.lock` | `state/deps/<instance_key>/<sha256>.lock` |
 | 元数据路径 | `state/deps/<instance_key>.json` | `state/deps/<instance_key>/<sha256>.json` |
-| 提交点 | 锁、元数据、`runtime.json` 三次写 | 只有 `runtime.json` 一次原子写 |
-| 崩溃后果 | 可能留下锁新、哈希旧 | 旧 generation 仍在，旧 `runtime.json` 照常可读 |
+| venv 路径 | `instances/<instance_key>/venv`，原地 sync | `instances/<instance_key>/venvs/<generation>`，新建走 `.staging` 后原子 rename |
+| 提交点 | 锁、元数据、venv、`runtime.json` 多次写 | 只有 `runtime.json` 一次原子写 |
+| 崩溃后果 | 可能留下锁新、哈希旧，或环境新、状态旧 | 旧 generation 的锁与 venv 都还在，旧 `runtime.json` 照常可读 |
 
 `runtime.json` 引用的 generation 必须先落盘，写入后永不改写。同一 generation 重复提交是幂等的，元数据保留首次生成时间。残留 generation 的清理由 M2 旧版保留策略统一处理，不在环境引擎里删。
 
