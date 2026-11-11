@@ -18,6 +18,7 @@
 | `validate.mjs` | 零依赖契约校验器 | 启动器仓 |
 | `check-upstreams.mjs` | 核对角色声明与五个仓源码是否一致 | 启动器仓 |
 | `examples/*.v2.json` | 五个角色的 schema 校验样例 | 启动器仓 |
+| `examples/state/*.json` | `install.json` 与 `deps.json` 的状态数据样例 | 启动器仓 |
 
 ## 五个角色
 
@@ -67,7 +68,7 @@ node contracts/validate.mjs
 node contracts/check-upstreams.mjs
 ```
 
-`validate.mjs` 零依赖，按 `module-v2.schema.json` 校验五份样例，并核对角色枚举与样例的端口、health、依赖。当前 84 项断言全部通过。
+`validate.mjs` 零依赖，按 `module-v2.schema.json` 校验五份样例与两份状态样例，并核对角色枚举与样例的端口、health、依赖。当前 107 项断言全部通过。CI 另用 ajv 编译六份状态 schema，并对 manifest 与状态样例做数据级校验。
 
 负例覆盖未知 role、路径穿越、缺 `pubkey` 与未验证实例自动更新。M1 新增的负例覆盖相对路径、哈希格式与未知 `kind`。
 
@@ -115,6 +116,7 @@ cargo run --bin sign_catalog -- verify --pubkey k5.pub --catalog signed.json
 - `validate.mjs` 的失败项不得通过放宽 schema 消除。允许例外时，在断言里写明理由。
 - M1 新增 `install-v1.schema.json` 与 `deps-v1.schema.json`。`module-v2.schema.json` 只改 `runtime.deps` 与 `runtime.snapshot_sha256` 的 `description`，字段类型、必填与取值未变，不升文件名版本号。
 - M2 把 `deps-v1` 的落盘路径改成内容寻址 generation，只改 `description`，字段与取值不变，不升文件名版本号。
+- M2 收紧 `module-v2` 的 `entry.env` 键名与 `runtime.deps.path`、`deps-v1` 的 `instance_id`、`install-v1` 的绝对路径。新增约束只挡原先允许的非法值，不改已有合法样例，不升文件名版本号。
 
 警告：把 `unknown_role_policy` 改成降级为 `auxiliary`，第三方模块会绕过契约自检。不要改这个值。
 
@@ -162,5 +164,16 @@ M1 新增两份状态 schema，不改 M0 已冻结的约束。
 `runtime.json` 引用的 generation 必须先落盘，写入后永不改写。同一 generation 重复提交是幂等的，元数据保留首次生成时间。残留 generation 的清理由 M2 旧版保留策略统一处理，不在环境引擎里删。
 
 `prepare_instance` 按实例的 `source_kind` 决定快照语义。zip 包必须比对签名 manifest 的 `runtime.snapshot_sha256`，缺字段或不符都硬拒；dir 允许重解析，哈希变化时把 `previous_sha256`、`current_sha256` 与观察时间记进 `runtime.json`，交 M4 提示重新确认。
+
+## M2 契约收紧
+
+| 位置 | 新约束 |
+|---|---|
+| `module-v2` 的 `entry.env` | 键名只用大写字母、数字与下划线；禁止 `UV_` 前缀与 `PATH`、`PYTHONPATH`、`PYTHONHOME`、`VIRTUAL_ENV` 等引擎保留键 |
+| `module-v2` 的 `runtime.deps.path` | 拒绝绝对路径、盘符、反斜杠与 `..` 段 |
+| `deps-v1` 的 `instance_id` | 长度不超过 128，字符限白名单，斜杠分段不得为空、为 `.` 或为 `..` |
+| `install-v1` 的绝对路径 | 接受 UNC 双反斜杠前缀，拒绝控制字符、相对路径与尾部的点或空格 |
+
+`validate.mjs` 为四处收紧各配了正例与负例，合计从 84 项增至 107 项。`examples/state/` 放两份合法状态数据，CI 用 ajv 对这两份样例做数据级校验，不再只编译 schema。引擎按大小写不敏感判断保留键，比契约的大写键名约束更严，两层都要保留。
 
 `module-v2.schema.json` 只改了两处说明文字。`runtime.deps.kind` 由发布者声明，启动器不嗅探、不按优先级猜测；`runtime.snapshot_sha256` 是发布者预置的哈希，包签名后不可变，运行时生成的哈希另记在 `state/runtime.json`。

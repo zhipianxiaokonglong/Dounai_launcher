@@ -39,8 +39,9 @@
     "absolute_path": {
       "type": "string",
       "minLength": 2,
-      "pattern": "^(?:[A-Za-z]:[\\\\/]|/)",
-      "description": "绝对路径。Windows 盘符或 POSIX 根开头，不接受相对路径。"
+      "pattern": "^(?:[A-Za-z]:[\\\\/]|/|\\\\\\\\)[^\\x00-\\x1f]*$",
+      "not": { "pattern": "[. ]$" },
+      "description": "绝对路径。接受 Windows 盘符、POSIX 根与 UNC 双反斜杠前缀；拒绝控制字符、相对路径、尾部的点与空格。"
     }
   }
 }

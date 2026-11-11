@@ -85,7 +85,17 @@
               "enum": ["uv_lock", "requirements", "pyproject"],
               "description": "由发布者声明。启动器按 kind 分派，不嗅探文件，也不按优先级猜测。"
             },
-            "path": { "type": "string", "pattern": "^[A-Za-z0-9._/-]+$" },
+            "path": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._/-]+$",
+              "not": {
+                "anyOf": [
+                  { "pattern": "^/" },
+                  { "pattern": "(^|/)\\.\\.(/|$)" }
+                ]
+              },
+              "description": "包内相对路径。绝对路径、盘符、反斜杠与 .. 段都拒绝。"
+            },
             "extras": { "type": "array", "items": { "type": "string" }, "default": [] }
           },
           "description": "依赖来源只认包内声明。启动器只校验声明的文件存在且可读。"
@@ -110,8 +120,21 @@
         "working_dir": { "type": "string", "minLength": 1 },
         "env": {
           "type": "object",
+          "propertyNames": {
+            "allOf": [
+              { "pattern": "^[A-Z_][A-Z0-9_]*$" },
+              {
+                "not": {
+                  "anyOf": [
+                    { "pattern": "^UV_" },
+                    { "pattern": "^(?:PATH|PYTHONHOME|PYTHONPATH|VIRTUAL_ENV|CONDA_PREFIX|CONDA_DEFAULT_ENV|SYSTEMROOT|TEMP|TMP)$" }
+                  ]
+                }
+              }
+            ]
+          },
           "additionalProperties": { "type": "string" },
-          "description": "端口由启动器注入，非 active 实例使用备用端口段。"
+          "description": "键名只用大写字母、数字与下划线。禁止 UV_ 前缀变量，以及 PATH、PYTHONHOME、PYTHONPATH、VIRTUAL_ENV、CONDA_PREFIX、CONDA_DEFAULT_ENV、SYSTEMROOT、TEMP、TMP。引擎按大小写不敏感再复核一次。端口由启动器注入，非 active 实例使用备用端口段。"
         },
         "health": {
           "oneOf": [

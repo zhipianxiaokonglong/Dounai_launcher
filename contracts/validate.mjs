@@ -317,6 +317,47 @@ const { offline_capable: _omittedFlag, ...depsWithoutFlag } = depsState;
 rejects('deps-v1 拒绝缺 offline_capable', depsWithoutFlag, depsSchema);
 rejects('deps-v1 拒绝非法 generated_at', { ...depsState, generated_at: 'yesterday' }, depsSchema);
 
+report.push('== M2 契约收紧 ==');
+const envPatch = (env) => clone({ entry: { ...base.entry, env } });
+validates('module-v2 接受大写环境变量名', envPatch({ OMNI_PORT: '{port}' }), moduleSchema);
+rejects('module-v2 拒绝小写环境变量名', envPatch({ omni_port: '{port}' }), moduleSchema);
+rejects('module-v2 拒绝键名含连字符', envPatch({ 'OMNI-PORT': '1' }), moduleSchema);
+rejects('module-v2 拒绝 UV_ 前缀键', envPatch({ UV_CACHE_DIR: 'C:/evil' }), moduleSchema);
+rejects('module-v2 拒绝覆盖 PATH', envPatch({ PATH: 'C:/evil' }), moduleSchema);
+rejects('module-v2 拒绝覆盖 PYTHONPATH', envPatch({ PYTHONPATH: 'C:/evil' }), moduleSchema);
+
+const depsPatch = (path) => clone({
+  runtime: { ...base.runtime, deps: { ...base.runtime.deps, path } }
+});
+validates('module-v2 接受包内相对依赖路径', depsPatch('requirements/base.txt'), moduleSchema);
+rejects('module-v2 拒绝绝对依赖路径', depsPatch('/etc/requirements.txt'), moduleSchema);
+rejects('module-v2 拒绝 .. 段', depsPatch('../requirements.txt'), moduleSchema);
+rejects('module-v2 拒绝嵌套 .. 段', depsPatch('locks/../evil.txt'), moduleSchema);
+rejects('module-v2 拒绝反斜杠依赖路径', depsPatch('locks\\evil.txt'), moduleSchema);
+
+validates('deps-v1 接受带命名空间的 instance_id', {
+  ...depsState, instance_id: 'dounai/omninexus@stable@main'
+}, depsSchema);
+rejects('deps-v1 拒绝空段 instance_id', { ...depsState, instance_id: 'dounai//omninexus' }, depsSchema);
+rejects('deps-v1 拒绝 . 段 instance_id', { ...depsState, instance_id: 'dounai/./omninexus' }, depsSchema);
+rejects('deps-v1 拒绝 .. 段 instance_id', { ...depsState, instance_id: 'dounai/../omninexus' }, depsSchema);
+rejects('deps-v1 拒绝超长 instance_id', { ...depsState, instance_id: 'a'.repeat(129) }, depsSchema);
+rejects('deps-v1 拒绝含空格 instance_id', { ...depsState, instance_id: 'a b' }, depsSchema);
+
+validates('install-v1 接受 UNC 程序根', {
+  ...installState, install_root: '\\\\server\\share\\dounai'
+}, installSchema);
+rejects('install-v1 拒绝尾部空格路径', { ...installState, data_root: 'C:/Dounai/data ' }, installSchema);
+rejects('install-v1 拒绝尾部点路径', { ...installState, data_root: 'C:/Dounai/data.' }, installSchema);
+rejects('install-v1 拒绝控制字符路径', { ...installState, data_root: 'C:/Dounai/\u0001data' }, installSchema);
+
+for (const [name, file, schema] of [
+  ['install 状态样例', 'examples/state/install.json', installSchema],
+  ['deps 状态样例', 'examples/state/deps.json', depsSchema]
+]) {
+  validates(`${name} 通过 ${schema.$id.split('/').pop()}`, read(file), schema);
+}
+
 console.log(report.join('\n'));
 console.log('');
 console.log(`合计 ${report.filter((x) => x.startsWith('通过') || x.startsWith('失败')).length} 项，失败 ${failed} 项。`);

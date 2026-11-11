@@ -65,3 +65,17 @@ jobs:
             -c .ci/node_modules/ajv-formats \
             -s contracts/module-v2.schema.json \
             -d "contracts/examples/*.v2.json"
+
+      - name: Validate state examples
+        working-directory: launcher
+        run: |
+          .ci/node_modules/.bin/ajv validate \
+            --spec=draft2020 --strict=false \
+            -c .ci/node_modules/ajv-formats \
+            -s contracts/install-v1.schema.json \
+            -d contracts/examples/state/install.json || exit 1
+          .ci/node_modules/.bin/ajv validate \
+            --spec=draft2020 --strict=false \
+            -c .ci/node_modules/ajv-formats \
+            -s contracts/deps-v1.schema.json \
+            -d contracts/examples/state/deps.json || exit 1

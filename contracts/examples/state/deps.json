@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "instance_id": "dounai/omninexus@stable@main",
+  "kind": "pyproject",
+  "source_path": "pyproject.toml",
+  "extras": [],
+  "snapshot_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "python_build_id": "cpython-3.12.16-windows-x86_64-none",
+  "generated_at": "2026-11-11T00:00:00Z",
+  "offline_capable": true
+}

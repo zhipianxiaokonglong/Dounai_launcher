@@ -14,7 +14,17 @@
     "instance_id": {
       "type": "string",
       "minLength": 1,
-      "description": "与 installed.json 一致的逻辑标识。引擎先做安全编码再拼锁文件名，不把斜杠当目录分隔符。"
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._/@-]+$",
+      "not": {
+        "anyOf": [
+          { "pattern": "^/" },
+          { "pattern": "//" },
+          { "pattern": "/$" },
+          { "pattern": "(^|/)\\.\\.?($|/)" }
+        ]
+      },
+      "description": "与 installed.json 一致的逻辑标识。斜杠是命名空间分隔符；每段不得为空、不得是 . 或 ..。引擎先做安全编码再拼状态目录名。"
     },
     "kind": {
       "enum": ["uv_lock", "requirements", "pyproject"],
