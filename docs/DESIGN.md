@@ -176,6 +176,8 @@ venv 也按 generation 分目录，路径是 `instances/<instance_key>/venvs/<sh
 
 `prepare_instance` 按 `source_kind` 处理快照。zip 包必须比对签名 manifest 的 `runtime.snapshot_sha256`，缺字段或不符都报 `SnapshotMismatch`。dir 允许重解析，哈希变化写进 `runtime.json` 的 `snapshot_change`，由 M4 提示重新确认。运行时生成的哈希不写回包内。
 
+装包路径必须调用 `prepare_instance_with`，由 M2 从 installed.json 填 `source_kind`。默认入口 `prepare_instance` 用 `EnvOptions::default()`，按 dir 处理；zip 实例走默认入口不会锚定 pinned 哈希。
+
 每次 `prepare_instance` 在同步后追加一次离线 dry-run 复核。哈希变化时报 `SnapshotMismatch`，不静默重建，也不回退联网。`verify_instance` 只读状态、比对哈希与安装根，不启动任何子进程。缓存缺 wheels 时报 `OfflineCacheMiss`。
 
 警告：断网重跑必须全程带 `--offline`。只把 `UV_OFFLINE` 当可选项，验收会失败。

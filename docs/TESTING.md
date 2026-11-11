@@ -169,6 +169,17 @@ B1 新增 5 项单测，覆盖 zip 的缺 pinned、不符与相符三类。dir �
 
 B2 新增 2 项单测。一项断言新建失败后不留正式 generation 目录，另一项断言换 generation 时旧 venv 不被改写或删除。清理逻辑另有单测覆盖不完整目录会删、完整目录会留。
 
-镜像 crate 里 108 个单测与 3 个集成测试通过，1 个真 uv 测试仍标 `#[ignore]`。
+镜像 crate 里 111 个单测与 3 个集成测试通过，1 个真 uv 测试仍标 `#[ignore]`。
 
 夹具的 `--tamper` 改为按当前哈希定位内容寻址锁，翻转一字节后仍断言 `SnapshotMismatch`，并用 Drop guard 还原。**真机 `env_smoke` 本轮没有重跑**，上面的 health 200 与六条验收仍是 11-10 的结果，不能当作新格式的实测证据。真 uv 子进程路径、离线文案分类与 cwd 规范化都还等一次实机或夜间 workflow 复核。
+
+## 审查后的修复（2026-11-11）
+
+`write_bytes_once` 改为临时文件加 rename，崩溃不再留下“文件名是完整哈希、内容只有半截”的 generation 文件。`commit` 前清理这类残损文件，让重跑能自愈；内容冲突与元数据读取失败改报 `SnapshotMismatch`。回滚测试把 `venv_python` 一并改回旧代，并补上旧 venv 缺失时应失败的反向断言。`entry.env` 键名校验收紧为全大写，删掉 M1 遗留的 `instance_venv_dir`。`validate.mjs` 增加断言总数下界，误删断言不再判绿。本轮新增 3 项单测，覆盖残损文件修复、跨 generation 元数据拒绝与键名大小写。
+
+## 待真机或后续里程碑复核
+
+- `uv pip compile --generate-hashes` 对同一输入两次输出是否逐字节一致。generation 哈希依赖这份输出；不一致会让每轮都新建 generation。
+- `.staging` 路径按哈希固定，同一实例并发 prepare 会互相删除。M3 命令面需串行化，或给 staging 加唯一后缀。
+- CI 的数据级校验只覆盖 `examples/state/` 两份手写样例，挡不住 Rust 写端字段漂移。可在 Rust 侧把序列化结果喂给 schema，或由 CI 重新生成样例。
+- `write_json_once` 写 install.json 仍直接写目标文件，中途崩溃会留下半截 JSON。下次启动读失败后重装即可，不像 generation 文件那样永久卡住，暂不改动。

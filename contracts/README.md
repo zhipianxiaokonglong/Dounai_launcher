@@ -74,9 +74,9 @@ node contracts/check-upstreams.mjs
 
 `check-upstreams.mjs` 从组装层与三个上游的源码解析 GET 路由和端口，逐项比对 `roles-v1.json`。默认读取工作区根目录下的五个仓；用 `--root` 指向别的检出布局，用 `--roles` 指向另一份角色契约做负例测试。源码缺失、路径不一致或正则零匹配都判失败，不把检查不适用当成通过。
 
-[contracts.yml](../.github/workflows/contracts.yml) 在每次 push 与 PR 检出四个上游仓。job 依次运行两份校验器。ajv 接着编译六份状态 schema，并校验五份样例。workflow 不设跳过条件，也不使用 `continue-on-error`。
+[contracts.yml](../.github/workflows/contracts.yml) 在每次 push 与 PR 检出四个上游仓。job 依次运行两份校验器。ajv 接着编译六份状态 schema，校验五份 manifest 样例与两份状态样例。workflow 不设跳过条件，也不使用 `continue-on-error`。
 
-`validate.mjs` 不校验 `format` 关键字。draft 2020-12 把 `format` 当注释，所以 `written_at` 与 `generated_at` 另用 `pattern` 断言 UTC 时间格式，校验器会执行这条 `pattern`。CI 的 ajv 只编译状态 schema，不做状态文件的数据级校验；合规性由写端与断言共同保证。本地复核需装 `ajv-cli@5` 与 `ajv-formats@3`，命令见 workflow。
+`validate.mjs` 不校验 `format` 关键字。draft 2020-12 把 `format` 当注释，所以时间字段另用 `pattern` 断言 UTC 格式。CI 的 ajv 带 `-c ajv-formats` 编译六份状态 schema，对五份 manifest 样例与两份状态样例做数据级校验，`date-time` 在 CI 生效。本地复核命令见 workflow，需装 `ajv-cli@5` 与 `ajv-formats@3`。
 
 ## 发布工具
 
@@ -174,6 +174,6 @@ M1 新增两份状态 schema，不改 M0 已冻结的约束。
 | `deps-v1` 的 `instance_id` | 长度不超过 128，字符限白名单，斜杠分段不得为空、为 `.` 或为 `..` |
 | `install-v1` 的绝对路径 | 接受 UNC 双反斜杠前缀，拒绝控制字符、相对路径与尾部的点或空格 |
 
-`validate.mjs` 为四处收紧各配了正例与负例，合计从 84 项增至 107 项。`examples/state/` 放两份合法状态数据，CI 用 ajv 对这两份样例做数据级校验，不再只编译 schema。引擎按大小写不敏感判断保留键，比契约的大写键名约束更严，两层都要保留。
+`validate.mjs` 为四处收紧各配了正例与负例，合计从 84 项增至 107 项；脚本固定断言总数，增删断言必须同步更新常量。`examples/state/` 放两份合法状态数据，CI 用 ajv 对这两份样例做数据级校验，不再只编译 schema。引擎的键名格式与契约一致，只接受大写；保留键另按大小写不敏感判断，比契约多一层，两层都要保留。
 
 `module-v2.schema.json` 只改了两处说明文字。`runtime.deps.kind` 由发布者声明，启动器不嗅探、不按优先级猜测；`runtime.snapshot_sha256` 是发布者预置的哈希，包签名后不可变，运行时生成的哈希另记在 `state/runtime.json`。

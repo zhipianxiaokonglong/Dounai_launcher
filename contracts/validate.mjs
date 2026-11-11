@@ -358,7 +358,14 @@ for (const [name, file, schema] of [
   validates(`${name} 通过 ${schema.$id.split('/').pop()}`, read(file), schema);
 }
 
+// 断言数量固定。误删或跳过断言时，不能只靠 failed 判绿。
+const EXPECTED_ASSERTIONS = 107;
+const count = report.filter((x) => x.startsWith('通过') || x.startsWith('失败')).length;
 console.log(report.join('\n'));
 console.log('');
-console.log(`合计 ${report.filter((x) => x.startsWith('通过') || x.startsWith('失败')).length} 项，失败 ${failed} 项。`);
+console.log(`合计 ${count} 项，失败 ${failed} 项。`);
+if (count !== EXPECTED_ASSERTIONS) {
+  console.error(`断言数量应为 ${EXPECTED_ASSERTIONS} 项，实际 ${count} 项。增删断言后同步更新 EXPECTED_ASSERTIONS。`);
+  process.exit(1);
+}
 process.exit(failed ? 1 : 0);

@@ -31,11 +31,19 @@ Dounai 启动器管理模块的安装、环境与进程生命周期。产品主�
 
 ```bash
 node contracts/validate.mjs
-npx --yes ajv-cli@5 validate --spec=draft2020 --strict=false \
+npm install --no-save --no-package-lock --prefix .ci ajv-cli@5 ajv-formats@3
+.ci/node_modules/.bin/ajv validate --spec=draft2020 --strict=false \
+  -c .ci/node_modules/ajv-formats \
   -s contracts/module-v2.schema.json -d "contracts/examples/*.v2.json"
+.ci/node_modules/.bin/ajv validate --spec=draft2020 --strict=false \
+  -c .ci/node_modules/ajv-formats \
+  -s contracts/install-v1.schema.json -d contracts/examples/state/install.json
+.ci/node_modules/.bin/ajv validate --spec=draft2020 --strict=false \
+  -c .ci/node_modules/ajv-formats \
+  -s contracts/deps-v1.schema.json -d contracts/examples/state/deps.json
 ```
 
-六份状态 schema 由 [contracts.yml](.github/workflows/contracts.yml) 编译，字段与时间格式断言写在 [contracts/README.md](contracts/README.md)。
+命令与 [contracts.yml](.github/workflows/contracts.yml) 一致：ajv 编译六份状态 schema，并对 manifest 与状态样例做数据级校验；`-c ajv-formats` 让 `date-time` 生效。字段与时间格式断言写在 [contracts/README.md](contracts/README.md)。
 
 ## 文档
 
