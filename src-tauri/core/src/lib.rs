@@ -17,7 +17,7 @@ pub use admin_host::{AdminHost, AdminHostError, HostEvent, MountRequest, Recordi
 pub use env::{
     cache_usage, prepare_instance, prepare_instance_with, verify_instance, verify_instance_with,
     CacheUsage, EnvContext, EnvError, EnvErrorKind, EnvOptions, ManagedPython, PreparedEnv,
-    RuntimeState, UvBinary, UV_VERSION,
+    RuntimeState, SnapshotChange, SourceKind, UvBinary, UV_VERSION,
 };
 pub use install::{InstallState, InstallStateError};
 pub use manifest::{

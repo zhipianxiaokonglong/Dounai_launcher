@@ -160,3 +160,13 @@ cargo test --offline
 第 2 条的 `per_machine` 要先把 `$smoke` 里的 `--install-root` 与 `--data-root` 换成另一套目录，再加 `--mode per_machine`；两种模式不能共用同一个数据根。允许 `reg.exe` 的环境可在任一命令后加 `--check-registry`，检查跑不成会记进 `errors`，不会写成通过。
 
 夹具的参数还有 `--offline`、`--verify-only`、`--tamper`、`--mode per_machine`、`--no-spawn`、`--port-base` 与 `--check-registry`。最近一次报告写在 `<data_root>/state/env_smoke.json`。本次 health 200 的副本留在 `.internal/m1-reports/health-200.json`，该目录不入库。
+
+## M2 状态格式变更后的复核（2026-11-11）
+
+依赖锁与元数据改成内容寻址 generation，`runtime.json` 成为唯一提交点；`prepare_instance` 接了 `source_kind`，zip 包硬比 pinned 哈希，dir 实例把哈希变化记进 `runtime.json`。契约字段与取值未变，只改落盘路径与说明文字，细节见 [contracts/README.md](../contracts/README.md)。
+
+本轮新增 5 项单测，覆盖 zip 的缺 pinned、不符与相符三类。dir 侧覆盖哈希变化记录与旧 generation 保留。`write_bytes_once` 覆盖幂等与冲突，路径编码覆盖非法哈希。
+
+镜像 crate 里 106 个单测与 3 个集成测试通过，1 个真 uv 测试仍标 `#[ignore]`。
+
+夹具的 `--tamper` 改为按当前哈希定位内容寻址锁，翻转一字节后仍断言 `SnapshotMismatch`，并用 Drop guard 还原。**真机 `env_smoke` 本轮没有重跑**，上面的 health 200 与六条验收仍是 11-10 的结果，不能当作新格式的实测证据。真 uv 子进程路径、离线文案分类与 cwd 规范化都还等一次实机或夜间 workflow 复核。

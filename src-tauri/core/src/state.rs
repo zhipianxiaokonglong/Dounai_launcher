@@ -25,6 +25,8 @@ pub enum StateError {
     Json { path: String, message: String },
     #[error("状态路径没有文件名：{0}")]
     NoFileName(String),
+    #[error("内容寻址文件 {path} 已存在，但内容与本次写入不同")]
+    Conflict { path: String },
 }
 
 impl StateError {
@@ -80,6 +82,46 @@ pub fn write_json_once<T: Serialize>(path: &Path, value: &T) -> Result<(), State
         return Err(StateError::io(path, e));
     }
     Ok(())
+}
+
+/// 内容寻址写入：文件名含内容哈希，写入后永不改写。
+///
+/// 已存在且内容一致时直接复用，让同一 generation 可以被重复提交；内容不同时报错，
+/// 避免撞名或被篡改的文件冒充另一个快照。
+pub fn write_bytes_once(path: &Path, bytes: &[u8]) -> Result<(), StateError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| StateError::io(path, e))?;
+    }
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(mut file) => {
+            let write = (|| -> std::io::Result<()> {
+                file.write_all(bytes)?;
+                file.flush()?;
+                file.sync_all()
+            })();
+            if let Err(e) = write {
+                drop(file);
+                let _ = fs::remove_file(path);
+                return Err(StateError::io(path, e));
+            }
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let existing = fs::read(path).map_err(|err| StateError::io(path, err))?;
+            if existing == bytes {
+                Ok(())
+            } else {
+                Err(StateError::Conflict {
+                    path: path.display().to_string(),
+                })
+            }
+        }
+        Err(e) => Err(StateError::io(path, e)),
+    }
 }
 
 pub fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<(), StateError> {
@@ -197,5 +239,18 @@ mod tests {
         fs::write(&path, b"x").unwrap();
         remove_if_exists(&path).unwrap();
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn write_bytes_once_is_idempotent_and_detects_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("generation").join("abc.lock");
+        write_bytes_once(&path, b"same").unwrap();
+        write_bytes_once(&path, b"same").unwrap();
+        assert!(matches!(
+            write_bytes_once(&path, b"other"),
+            Err(StateError::Conflict { .. })
+        ));
+        assert_eq!(fs::read(&path).unwrap(), b"same");
     }
 }

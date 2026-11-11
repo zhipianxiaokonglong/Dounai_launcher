@@ -1,7 +1,8 @@
 //! 依赖来源按 manifest 声明的 `kind` 分派，启动器不嗅探文件，也不按优先级猜测。
 //!
-//! 解析结果先写 `.lock.new`，venv 与离线校验都成功后才提交成正式锁文件，
-//! 中途失败不会覆盖上一次成功的快照。
+//! 解析结果先写 `.lock.new`。venv 与离线校验都成功后，锁与元数据按内容哈希写进
+//! 各自的 generation 文件，写入后永不改写。`runtime.json` 是唯一的提交点：它
+//! 引用的 generation 必须先落盘，所以任何一步崩溃都不会留下「锁新、哈希旧」。
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -80,10 +81,7 @@ pub fn declared_source(
 }
 
 pub fn staging_path(paths: &Paths, instance_id: &str) -> PathBuf {
-    PathBuf::from(format!(
-        "{}.new",
-        paths.deps_lock_path(instance_id).display()
-    ))
+    paths.deps_staging_path(instance_id)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -153,7 +151,7 @@ pub fn resolve(
     let sha256 = state::file_sha256_prefixed(&staging)
         .map_err(|e| err(instance_id, format!("快照哈希计算失败：{e}")))?;
     Ok(ResolvedDeps {
-        lock_path: paths.deps_lock_path(instance_id),
+        lock_path: paths.content_lock_path(instance_id, &sha256),
         staging_path: staging,
         sha256: sha256.clone(),
         metadata: DepsMetadata {
@@ -170,33 +168,68 @@ pub fn resolve(
     })
 }
 
-/// venv 与离线校验都成功后调用。正式锁文件用原子写，元数据单独落盘。
+/// 把临时快照固化成不可变 generation。只有 `runtime.json` 切换后才算提交成功。
+///
+/// 同一 generation 重复写是幂等的：已存在且内容一致直接复用，内容不同视为篡改。
 pub fn commit(paths: &Paths, resolved: &mut ResolvedDeps) -> Result<(), EnvError> {
     let id = &resolved.metadata.instance_id;
     let bytes =
         fs::read(&resolved.staging_path).map_err(|e| err(id, format!("读取临时快照失败：{e}")))?;
-    state::write_bytes_atomic(&resolved.lock_path, &bytes)
-        .map_err(|e| err(id, format!("提交锁文件失败：{e}")))?;
+    let sha = state::file_sha256_prefixed(&resolved.staging_path)
+        .map_err(|e| err(id, format!("复核临时快照失败：{e}")))?;
+    if sha != resolved.sha256 {
+        return Err(EnvError::new(
+            EnvErrorKind::SnapshotMismatch,
+            id,
+            format!(
+                "临时快照在提交前被改动：期望 {}，实际 {sha}",
+                resolved.sha256
+            ),
+        ));
+    }
+    state::write_bytes_once(&paths.content_lock_path(id, &sha), &bytes)
+        .map_err(|e| err(id, format!("写 generation 锁失败：{e}")))?;
     resolved.metadata.offline_capable = true;
-    state::write_json(&paths.deps_meta_path(id), &resolved.metadata)
-        .map_err(|e| err(id, format!("写依赖元数据失败：{e}")))?;
+    let meta_path = paths.content_meta_path(id, &sha);
+    if meta_path.exists() {
+        // 同一 generation 重复提交时保留首次生成时间。其余字段必须逐项一致，
+        // 否则视为本地状态被改写，不静默覆盖。
+        let existing: DepsMetadata = state::read_json(&meta_path)
+            .map_err(|e| err(id, format!("读取已有 generation 元数据失败：{e}")))?;
+        let mut expected = resolved.metadata.clone();
+        expected.generated_at = existing.generated_at.clone();
+        if existing != expected {
+            return Err(EnvError::new(
+                EnvErrorKind::SnapshotMismatch,
+                id,
+                "同一 generation 的元数据与已有文件不一致",
+            ));
+        }
+    } else {
+        let mut meta = serde_json::to_vec_pretty(&resolved.metadata)
+            .map_err(|e| err(id, format!("序列化依赖元数据失败：{e}")))?;
+        meta.push(b'\n');
+        state::write_bytes_once(&meta_path, &meta)
+            .map_err(|e| err(id, format!("写 generation 元数据失败：{e}")))?;
+    }
     state::remove_if_exists(&resolved.staging_path)
         .map_err(|e| err(id, format!("清理临时快照失败：{e}")))?;
     Ok(())
 }
 
-/// 篡改锁文件时报 `SnapshotMismatch`，绝不覆盖锁文件，也不静默重建。
+/// 按 `runtime.json` 里的哈希定位不可变锁，并复核文件内容确实等于该哈希。
+/// 篡改任一字节都会报 `SnapshotMismatch`，绝不覆盖，也不静默重建。
 pub fn verify_snapshot(
     paths: &Paths,
     instance_id: &str,
     expected: &str,
 ) -> Result<String, EnvError> {
-    let lock = paths.deps_lock_path(instance_id);
+    let lock = paths.content_lock_path(instance_id, expected);
     let actual = state::file_sha256_prefixed(&lock).map_err(|e| {
         EnvError::new(
-            EnvErrorKind::State,
+            EnvErrorKind::SnapshotMismatch,
             instance_id,
-            format!("读取锁文件 {} 失败：{e}", lock.display()),
+            format!("找不到或读不了 generation 锁 {}：{e}", lock.display()),
         )
     })?;
     if actual != expected {
@@ -208,6 +241,31 @@ pub fn verify_snapshot(
         .with_command_line(&format!("verify {}", lock.display())));
     }
     Ok(actual)
+}
+
+/// 元数据与锁同属一个 generation，单独落盘并按哈希取名，不参与一致性判定之外
+/// 的任何写入。读不到或哈希对不上都按 `SnapshotMismatch` 处理。
+pub fn verify_metadata(
+    paths: &Paths,
+    instance_id: &str,
+    expected: &str,
+) -> Result<DepsMetadata, EnvError> {
+    let path = paths.content_meta_path(instance_id, expected);
+    let meta: DepsMetadata = state::read_json(&path).map_err(|e| {
+        EnvError::new(
+            EnvErrorKind::SnapshotMismatch,
+            instance_id,
+            format!("读取 generation 元数据 {} 失败：{e}", path.display()),
+        )
+    })?;
+    if meta.snapshot_sha256 != expected || meta.instance_id != instance_id {
+        return Err(EnvError::new(
+            EnvErrorKind::SnapshotMismatch,
+            instance_id,
+            "依赖元数据与 generation 哈希或实例 ID 不一致",
+        ));
+    }
+    Ok(meta)
 }
 
 #[cfg(test)]
@@ -408,7 +466,8 @@ mod tests {
         .unwrap();
         commit(&paths, &mut resolved).unwrap();
         assert!(!resolved.staging_path.exists());
-        let meta: serde_json::Value = state::read_json(&paths.deps_meta_path("mod@a")).unwrap();
+        let meta: serde_json::Value =
+            state::read_json(&paths.content_meta_path("mod@a", &resolved.sha256)).unwrap();
         assert_eq!(meta["schema_version"], 1);
         assert_eq!(meta["offline_capable"], true);
         assert_eq!(meta["kind"], "pyproject");

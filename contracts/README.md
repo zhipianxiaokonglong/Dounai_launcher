@@ -13,7 +13,7 @@
 | `trust-v1.schema.json` | `state/trust.json` 的公钥信任列表 | 启动器 |
 | `retention-v1.schema.json` | `state/retention.json` 的旧版保留策略 | 启动器 |
 | `install-v1.schema.json` | `state/install.json` 的双根、安装模式与 uv 定位 | M5 安装器写，M1 夹具可写 |
-| `deps-v1.schema.json` | `state/deps/<instance_id>.json` 的依赖快照元数据 | 环境引擎 |
+| `deps-v1.schema.json` | `state/deps/<instance_key>/<sha256>.json` 的 generation 元数据 | 环境引擎 |
 | `source-adapter-v1.md` | `SourceAdapter` trait 的接口与不变式 | 启动器仓 |
 | `validate.mjs` | 零依赖契约校验器 | 启动器仓 |
 | `check-upstreams.mjs` | 核对角色声明与五个仓源码是否一致 | 启动器仓 |
@@ -114,6 +114,7 @@ cargo run --bin sign_catalog -- verify --pubkey k5.pub --catalog signed.json
 - 字段语义不兼容时升文件名版本号，不在原文件里叠加兼容分支。
 - `validate.mjs` 的失败项不得通过放宽 schema 消除。允许例外时，在断言里写明理由。
 - M1 新增 `install-v1.schema.json` 与 `deps-v1.schema.json`。`module-v2.schema.json` 只改 `runtime.deps` 与 `runtime.snapshot_sha256` 的 `description`，字段类型、必填与取值未变，不升文件名版本号。
+- M2 把 `deps-v1` 的落盘路径改成内容寻址 generation，只改 `description`，字段与取值不变，不升文件名版本号。
 
 警告：把 `unknown_role_policy` 改成降级为 `auxiliary`，第三方模块会绕过契约自检。不要改这个值。
 
@@ -138,12 +139,27 @@ M1 新增两份状态 schema，不改 M0 已冻结的约束。
 | 状态文件 | 契约 | 写入方 |
 |---|---|---|
 | `state/install.json` | [install-v1.schema.json](install-v1.schema.json) | 安装器写一次，之后只读 |
-| `state/deps/<instance_id>.json` | [deps-v1.schema.json](deps-v1.schema.json) | 环境引擎 |
-| `state/deps/<instance_id>.lock` | 无 schema，内容是 uv 的 pinned snapshot | 环境引擎 |
+| `state/deps/<instance_key>/<sha256>.json` | [deps-v1.schema.json](deps-v1.schema.json) | 环境引擎 |
+| `state/deps/<instance_key>/<sha256>.lock` | 无 schema，内容是 uv 的 pinned snapshot | 环境引擎 |
 | `state/runtime.json` | 无 schema，引擎内部状态 | 环境引擎 |
 
 说明：`state/runtime.json` 记 `install_mode`、`python_install_dir`、`python_build_id`、`uv_version` 与每个实例的 `snapshot_sha256`，不进跨仓契约。锁文件的哈希放在这里，是为了让篡改锁文件时有一个独立比对点。这只防意外改动，不防本地恶意改写。
 
-注意：`source-v1.schema.json` 的 `instance_id` 允许含 `/`，例如 `dounai/omninexus@stable@main`。引擎拼锁文件名前先做安全编码，不把斜杠当目录分隔符。`install-v1` 的两个根不得相同，这条由 `Paths::new` 校验，schema 表达不了跨字段比较。
+注意：`source-v1.schema.json` 的 `instance_id` 允许含 `/`，例如 `dounai/omninexus@stable@main`。引擎拼状态路径前先把标识编码成不含斜杠的 key。`install-v1` 的两个根不得相同，这条由 `Paths::new` 校验，schema 表达不了跨字段比较。
+
+## M2 状态格式变更
+
+锁与元数据从每个实例一份可变文件，改成按内容哈希命名的不可变 generation。改动只在 `state/` 内，`deps-v1` 的字段与取值不变。
+
+| 项 | M1 | M2 |
+|---|---|---|
+| 锁路径 | `state/deps/<instance_key>.lock` | `state/deps/<instance_key>/<sha256>.lock` |
+| 元数据路径 | `state/deps/<instance_key>.json` | `state/deps/<instance_key>/<sha256>.json` |
+| 提交点 | 锁、元数据、`runtime.json` 三次写 | 只有 `runtime.json` 一次原子写 |
+| 崩溃后果 | 可能留下锁新、哈希旧 | 旧 generation 仍在，旧 `runtime.json` 照常可读 |
+
+`runtime.json` 引用的 generation 必须先落盘，写入后永不改写。同一 generation 重复提交是幂等的，元数据保留首次生成时间。残留 generation 的清理由 M2 旧版保留策略统一处理，不在环境引擎里删。
+
+`prepare_instance` 按实例的 `source_kind` 决定快照语义。zip 包必须比对签名 manifest 的 `runtime.snapshot_sha256`，缺字段或不符都硬拒；dir 允许重解析，哈希变化时把 `previous_sha256`、`current_sha256` 与观察时间记进 `runtime.json`，交 M4 提示重新确认。
 
 `module-v2.schema.json` 只改了两处说明文字。`runtime.deps.kind` 由发布者声明，启动器不嗅探、不按优先级猜测；`runtime.snapshot_sha256` 是发布者预置的哈希，包签名后不可变，运行时生成的哈希另记在 `state/runtime.json`。

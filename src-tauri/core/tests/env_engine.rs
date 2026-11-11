@@ -8,7 +8,8 @@ use std::process::Command;
 
 use launcher_core::env::{
     prepare_instance_with, verify_instance_with, CurlUvFetcher, EnvContext, EnvError, EnvErrorKind,
-    EnvOptions, MockConfig, MockFailure, MockUvRunner, SystemUvRunner, UvFetcher, UV_VERSION,
+    EnvOptions, MockConfig, MockFailure, MockUvRunner, SourceKind, SystemUvRunner, UvFetcher,
+    UV_VERSION,
 };
 use launcher_core::manifest::ModuleManifestV2;
 use launcher_core::{file_sha256_prefixed, InstallMode, InstallState, Paths};
@@ -89,6 +90,7 @@ impl Fixture {
                 offline: false,
                 allow_uv_download: false,
                 port: Some(18102),
+                source_kind: SourceKind::Dir,
             },
             runner: &self.runner,
             fetcher: &self.fetcher,
@@ -177,8 +179,8 @@ fn uv_lock_branch_keeps_source_clean_and_uses_frozen() {
 fn failed_resolve_keeps_previous_snapshot_and_venv() {
     let f = Fixture::new(MANIFEST, MockUvRunner::default());
     let manifest: ModuleManifestV2 = serde_json::from_str(MANIFEST).unwrap();
-    f.prepare(&manifest).unwrap();
-    let previous = fs::read(f.paths.deps_lock_path(ID)).unwrap();
+    let first = f.prepare(&manifest).unwrap();
+    let previous = fs::read(f.paths.content_lock_path(ID, &first.snapshot_sha256)).unwrap();
 
     let failing = MockUvRunner::new(MockConfig {
         fail: Some(MockFailure {
@@ -194,13 +196,17 @@ fn failed_resolve_keeps_previous_snapshot_and_venv() {
             offline: false,
             allow_uv_download: false,
             port: None,
+            source_kind: SourceKind::Dir,
         },
         runner: &failing,
         fetcher: &NoDownload,
     };
     let e = prepare_instance_with(&f.paths, ID, &manifest, &f.module, &ctx).unwrap_err();
     assert_eq!(e.kind, EnvErrorKind::DepsResolve);
-    assert_eq!(fs::read(f.paths.deps_lock_path(ID)).unwrap(), previous);
+    assert_eq!(
+        fs::read(f.paths.content_lock_path(ID, &first.snapshot_sha256)).unwrap(),
+        previous
+    );
     assert!(
         f.paths.instance_venv_python(ID).exists(),
         "上次成功的 venv 不得被清理"
@@ -228,6 +234,7 @@ fn real_uv_prepares_venv_without_touching_source() {
             offline: false,
             allow_uv_download: true,
             port: Some(18102),
+            source_kind: SourceKind::Dir,
         },
         runner: &runner,
         fetcher: &CurlUvFetcher,
@@ -237,5 +244,5 @@ fn real_uv_prepares_venv_without_touching_source() {
     assert!(env.venv_python.exists());
     assert_eq!(git_status(&f.module), before);
     assert!(verify_instance_with(&f.paths, ID, &f.install).is_ok());
-    let _ = file_sha256_prefixed(&f.paths.deps_lock_path(ID)).unwrap();
+    let _ = file_sha256_prefixed(&f.paths.content_lock_path(ID, &env.snapshot_sha256)).unwrap();
 }

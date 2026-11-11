@@ -101,7 +101,7 @@ Windows 专属代码圈进 `process/win` 单一模块边界。`launcher-core` �
 3. `perMachine` 只放只读二进制。Python、venv、模块与状态每个 Windows 用户各一份，避免 ACL 问题与“一个用户装模块影响所有人”。
 4. `UV_PYTHON_INSTALL_DIR` 与 `UV_CACHE_DIR` 都指向数据根。便携版优先 exe 同级，写探针失败再回退到 `%LOCALAPPDATA%`。
 
-说明：`source-v1.schema.json` 与 `deps-v1.schema.json` 的 `instance_id` 都允许含 `/`。引擎先编码成不含路径分隔符的 key，再拼 `instances/` 下的目录名与 `state/deps/` 下的文件名，不把斜杠当目录分隔符。落盘文件名用编码后的 key，不是逻辑标识本身。
+说明：`source-v1.schema.json` 与 `deps-v1.schema.json` 的 `instance_id` 都允许含 `/`。引擎先编码成不含路径分隔符的 key，再拼 `instances/` 与 `state/deps/` 下的目录名，不把斜杠当目录分隔符。落盘目录名用编码后的 key，不是逻辑标识本身。
 
 警告：升级或切换安装模式时，先重建 venv。uv 明确说明更改 Python 安装位置不会自动反映到现有虚拟环境。`state` 要记 `install_mode`、`python_install_dir` 与 `python_build_id`，不一致时提示重建，不能让模块带着失效解释器启动。
 
@@ -170,7 +170,11 @@ uv python install 3.12 --install-dir <data_root>/runtime/python --no-registry --
 
 三个上游都是 src layout，依赖同步不装项目自身。`PreparedEnv.env_vars` 在 `module_dir/src` 存在时注入 `PYTHONPATH`，让 `-m` 能找到包。
 
-解析结果写成 `state/deps/<instance_id>.lock`，内容是钉死版本加哈希的 pinned snapshot。引擎把快照写进自己的 `state/`，不写回模块目录。快照哈希记在 `state/runtime.json`，另有一份元数据按 [deps-v1](../contracts/deps-v1.schema.json) 写。`module-v2.schema.json` 的 `runtime.snapshot_sha256` 在签名包内不可变，只表示发布者预置的快照哈希，运行时生成的哈希不写回包内。每次 `prepare_instance` 在同步后追加一次离线 dry-run 复核。哈希变化时报 `SnapshotMismatch`，不静默重建，也不回退联网。`verify_instance` 只读状态、比对哈希与安装根，不启动任何子进程。缓存缺 wheels 时报 `OfflineCacheMiss`。
+解析结果按内容哈希写成 `state/deps/<instance_key>/<sha256>.lock`，内容是钉死版本加哈希的 pinned snapshot。元数据按 [deps-v1](../contracts/deps-v1.schema.json) 写进同名 `.json`。引擎把两者写进自己的 `state/`，不写回模块目录。文件写入后永不改写，`state/runtime.json` 是唯一的提交点。`runtime.json` 引用的 generation 必须先落盘，因此任何一步崩溃都不会留下锁新、哈希旧。残留 generation 的清理由旧版保留策略处理。
+
+`prepare_instance` 按 `source_kind` 处理快照。zip 包必须比对签名 manifest 的 `runtime.snapshot_sha256`，缺字段或不符都报 `SnapshotMismatch`。dir 允许重解析，哈希变化写进 `runtime.json` 的 `snapshot_change`，由 M4 提示重新确认。运行时生成的哈希不写回包内。
+
+每次 `prepare_instance` 在同步后追加一次离线 dry-run 复核。哈希变化时报 `SnapshotMismatch`，不静默重建，也不回退联网。`verify_instance` 只读状态、比对哈希与安装根，不启动任何子进程。缓存缺 wheels 时报 `OfflineCacheMiss`。
 
 警告：断网重跑必须全程带 `--offline`。只把 `UV_OFFLINE` 当可选项，验收会失败。
 

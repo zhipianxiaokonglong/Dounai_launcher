@@ -24,7 +24,7 @@ use crate::state;
 pub use bootstrap::{
     locate_uv, CurlUvFetcher, UvBinary, UvFetcher, UV_DOWNLOAD_URL, UV_MIN_VERSION, UV_VERSION,
 };
-pub use deps::{commit, verify_snapshot, DepsMetadata, ResolvedDeps};
+pub use deps::{commit, verify_metadata, verify_snapshot, DepsMetadata, ResolvedDeps};
 pub use error::{EnvError, EnvErrorKind, FailureContext};
 pub use python::{ensure_python, ManagedPython};
 pub use runner::{
@@ -32,6 +32,18 @@ pub use runner::{
 };
 pub use usage::{cache_usage, CacheUsage};
 pub use venv::{prepare_venv, VenvOutcome};
+
+/// 实例来源。取值与 `source-v1.json` 的 `source_kind` 一致，由组装层判定后传入，
+/// manifest 不自述这一字段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SourceKind {
+    /// 签名 zip 包。必须比对 manifest 里的 pinned 快照哈希，不符硬拒。
+    Zip,
+    /// 源码工作区。允许重解析，哈希变化记进 `runtime.json` 交 M4 提示重新确认。
+    #[default]
+    Dir,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnvOptions {
@@ -41,6 +53,8 @@ pub struct EnvOptions {
     pub allow_uv_download: bool,
     /// 备用端口段由调用方给；None 时用 manifest 的规范端口。
     pub port: Option<u16>,
+    /// 实例来源，决定快照是锚定还是只记录变化。M2 从 installed.json 填。
+    pub source_kind: SourceKind,
 }
 
 impl Default for EnvOptions {
@@ -51,6 +65,7 @@ impl Default for EnvOptions {
                 .unwrap_or(false),
             allow_uv_download: true,
             port: None,
+            source_kind: SourceKind::Dir,
         }
     }
 }
@@ -84,10 +99,23 @@ pub struct RuntimeState {
     pub instances: BTreeMap<String, InstanceRuntime>,
 }
 
+/// dir 实例重解析导致快照哈希变化时留下的记录。M4 据此提示「依赖已变化，需重新确认」。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotChange {
+    pub previous_sha256: String,
+    pub current_sha256: String,
+    pub observed_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstanceRuntime {
     pub env: PreparedEnv,
     pub prepared_at: String,
+    /// 旧版 runtime.json 没有这两个字段，读旧文件时按默认值补齐。
+    #[serde(default)]
+    pub source_kind: SourceKind,
+    #[serde(default)]
+    pub snapshot_change: Option<SnapshotChange>,
 }
 
 impl RuntimeState {
@@ -237,6 +265,34 @@ pub fn prepare_instance_with(
             ctx.runner,
         )?;
         resolved_seen = Some(resolved.clone());
+        // zip 包的 manifest 已签名，pinned 哈希是不可变锚点；dir 是源码工作区，
+        // 允许重解析，但把变化记进 runtime.json 供 M4 提示重新确认。
+        if ctx.options.source_kind == SourceKind::Zip {
+            let pinned = manifest
+                .runtime
+                .as_ref()
+                .and_then(|r| r.snapshot_sha256.as_deref());
+            match pinned {
+                None => {
+                    return Err(EnvError::new(
+                        EnvErrorKind::SnapshotMismatch,
+                        instance_id,
+                        "zip 实例缺少 manifest.runtime.snapshot_sha256，无法锚定依赖快照",
+                    ));
+                }
+                Some(pinned) if pinned != resolved.sha256 => {
+                    return Err(EnvError::new(
+                        EnvErrorKind::SnapshotMismatch,
+                        instance_id,
+                        format!(
+                            "依赖快照与签名 manifest 不符：pinned {pinned}，解析得到 {}",
+                            resolved.sha256
+                        ),
+                    ));
+                }
+                Some(_) => {}
+            }
+        }
         let outcome = venv::prepare_venv(
             paths,
             instance_id,
@@ -272,11 +328,23 @@ pub fn prepare_instance_with(
         runtime.python_install_dir = paths.python_dir();
         runtime.python_build_id = python.build_id.clone();
         runtime.uv_version = uv.version.clone();
+        let snapshot_change = runtime
+            .instances
+            .get(instance_id)
+            .map(|old| old.env.snapshot_sha256.clone())
+            .filter(|previous| previous != &resolved.sha256)
+            .map(|previous_sha256| SnapshotChange {
+                previous_sha256,
+                current_sha256: resolved.sha256.clone(),
+                observed_at: crate::time::utc_now(),
+            });
         runtime.instances.insert(
             instance_id.to_string(),
             InstanceRuntime {
                 env: prepared.clone(),
                 prepared_at: crate::time::utc_now(),
+                source_kind: ctx.options.source_kind,
+                snapshot_change,
             },
         );
         Ok((prepared, runtime))
@@ -346,14 +414,8 @@ pub fn verify_instance_with(
         ));
     }
     let hash = deps::verify_snapshot(paths, instance_id, &instance.env.snapshot_sha256)?;
-    let meta: DepsMetadata = state::read_json(&paths.deps_meta_path(instance_id)).map_err(|e| {
-        EnvError::new(
-            EnvErrorKind::SnapshotMismatch,
-            instance_id,
-            format!("读取依赖元数据失败：{e}"),
-        )
-    })?;
-    if meta.snapshot_sha256 != hash || meta.python_build_id != runtime.python_build_id {
+    let meta = deps::verify_metadata(paths, instance_id, &hash)?;
+    if meta.python_build_id != runtime.python_build_id {
         return Err(EnvError::new(
             EnvErrorKind::SnapshotMismatch,
             instance_id,
@@ -602,6 +664,7 @@ mod tests {
                 offline: false,
                 allow_uv_download: false,
                 port: Some(18102),
+                source_kind: crate::env::SourceKind::Dir,
             },
             PYPROJECT,
             MockUvRunner::default(),
@@ -617,14 +680,10 @@ mod tests {
         assert_eq!(env.env_vars["OMNI_PORT"], "18102");
         assert!(env.env_vars["OMNI_DATA_DIR"].contains("data"));
         assert_eq!(env.env_vars["UV_MANAGED_PYTHON"], "1");
-        assert!(f.paths.deps_lock_path(id).exists());
-        assert!(f.paths.deps_meta_path(id).exists());
+        assert!(f.paths.content_lock_path(id, &env.snapshot_sha256).exists());
+        assert!(f.paths.content_meta_path(id, &env.snapshot_sha256).exists());
         assert!(f.paths.runtime_state_path().exists());
-        assert!(!f
-            .paths
-            .deps_lock_path(id)
-            .with_extension("lock.new")
-            .exists());
+        assert!(!f.paths.deps_staging_path(id).exists());
 
         let calls = f.runner.calls();
         assert!(calls
@@ -649,13 +708,14 @@ mod tests {
                 offline: false,
                 allow_uv_download: false,
                 port: None,
+                source_kind: crate::env::SourceKind::Dir,
             },
             PYPROJECT,
             MockUvRunner::default(),
         );
         let prepared = f.prepare().unwrap();
         let id = "dounai/omninexus@stable@main";
-        let lock = f.paths.deps_lock_path(id);
+        let lock = f.paths.content_lock_path(id, &prepared.snapshot_sha256);
         fs::write(&lock, b"tampered").unwrap();
         let e = verify_instance_with(&f.paths, id, &f.install).unwrap_err();
         assert_eq!(e.kind, EnvErrorKind::SnapshotMismatch);
@@ -670,6 +730,7 @@ mod tests {
                 offline: false,
                 allow_uv_download: false,
                 port: None,
+                source_kind: crate::env::SourceKind::Dir,
             },
             PYPROJECT,
             MockUvRunner::default(),
@@ -696,6 +757,7 @@ mod tests {
                 offline: false,
                 allow_uv_download: false,
                 port: None,
+                source_kind: crate::env::SourceKind::Dir,
             },
             ui,
             MockUvRunner::default(),
@@ -719,6 +781,7 @@ mod tests {
                 offline: false,
                 allow_uv_download: false,
                 port: None,
+                source_kind: crate::env::SourceKind::Dir,
             },
             PYPROJECT,
             runner,
@@ -726,7 +789,7 @@ mod tests {
         let e = f.prepare().unwrap_err();
         assert_eq!(e.kind, EnvErrorKind::DepsResolve);
         let id = "dounai/omninexus@stable@main";
-        assert!(!f.paths.deps_lock_path(id).exists());
+        assert!(!f.paths.deps_generation_dir(id).exists());
         assert!(!f.paths.runtime_state_path().exists());
         assert!(!f.paths.instance_venv_python(id).exists());
     }
@@ -738,6 +801,7 @@ mod tests {
                 offline: false,
                 allow_uv_download: false,
                 port: None,
+                source_kind: crate::env::SourceKind::Dir,
             },
             PYPROJECT,
             MockUvRunner::default(),
@@ -748,6 +812,7 @@ mod tests {
             offline: true,
             allow_uv_download: false,
             port: None,
+            source_kind: crate::env::SourceKind::Dir,
         };
         let ctx = EnvContext {
             install: &f.install,
@@ -785,19 +850,106 @@ mod tests {
                 offline: false,
                 allow_uv_download: false,
                 port: None,
+                source_kind: crate::env::SourceKind::Dir,
             },
             PYPROJECT,
             MockUvRunner::default(),
         );
         let id = "dounai/omninexus@stable@main";
+        let sha = format!("sha256:{}", "a".repeat(64));
         assert!(f
             .paths
-            .deps_lock_path(id)
+            .content_lock_path(id, &sha)
             .to_string_lossy()
             .contains(&instance_key(id)));
         assert_eq!(
             expand_placeholders("{module_dir}", &[("module_dir", "X:/m")]),
             "X:/m"
         );
+    }
+
+    fn with_pinned(pinned: &str) -> String {
+        let mut value: serde_json::Value = serde_json::from_str(PYPROJECT).unwrap();
+        value["runtime"]["snapshot_sha256"] = serde_json::Value::String(pinned.into());
+        serde_json::to_string(&value).unwrap()
+    }
+
+    #[test]
+    fn zip_instance_requires_pinned_snapshot_and_rejects_mismatch() {
+        let options = EnvOptions {
+            source_kind: SourceKind::Zip,
+            ..EnvOptions::default()
+        };
+        let missing = Fixture::new(options.clone(), PYPROJECT, MockUvRunner::default());
+        let e = missing.prepare().unwrap_err();
+        assert_eq!(e.kind, EnvErrorKind::SnapshotMismatch);
+        assert!(e.message.contains("缺少"));
+
+        let wrong = format!("sha256:{}", "0".repeat(64));
+        let mismatched = Fixture::new(options, &with_pinned(&wrong), MockUvRunner::default());
+        let e = mismatched.prepare().unwrap_err();
+        assert_eq!(e.kind, EnvErrorKind::SnapshotMismatch);
+        assert!(e.message.contains("pinned"));
+        assert!(!mismatched.paths.runtime_state_path().exists());
+    }
+
+    #[test]
+    fn zip_instance_accepts_matching_pinned_snapshot() {
+        let probe = Fixture::new(EnvOptions::default(), PYPROJECT, MockUvRunner::default())
+            .prepare()
+            .unwrap();
+        let f = Fixture::new(
+            EnvOptions {
+                source_kind: SourceKind::Zip,
+                ..EnvOptions::default()
+            },
+            &with_pinned(&probe.snapshot_sha256),
+            MockUvRunner::default(),
+        );
+        let env = f.prepare().unwrap();
+        assert_eq!(env.snapshot_sha256, probe.snapshot_sha256);
+        assert!(verify_instance_with(&f.paths, "dounai/omninexus@stable@main", &f.install).is_ok());
+    }
+
+    #[test]
+    fn dir_instance_records_snapshot_change_and_keeps_old_generation() {
+        let mut f = Fixture::new(
+            EnvOptions::default(),
+            PYPROJECT,
+            MockUvRunner::new(MockConfig {
+                snapshot: "first\n".into(),
+                ..MockConfig::default()
+            }),
+        );
+        let id = "dounai/omninexus@stable@main";
+        let first = f.prepare().unwrap();
+        f.runner = MockUvRunner::new(MockConfig {
+            snapshot: "second\n".into(),
+            ..MockConfig::default()
+        });
+        let second = f.prepare().unwrap();
+        assert_ne!(first.snapshot_sha256, second.snapshot_sha256);
+
+        let runtime: RuntimeState = crate::state::read_json(&f.paths.runtime_state_path()).unwrap();
+        let change = runtime
+            .instances
+            .get(id)
+            .unwrap()
+            .snapshot_change
+            .clone()
+            .unwrap();
+        assert_eq!(change.previous_sha256, first.snapshot_sha256);
+        assert_eq!(change.current_sha256, second.snapshot_sha256);
+        assert!(f
+            .paths
+            .content_lock_path(id, &first.snapshot_sha256)
+            .exists());
+
+        // 模拟 runtime.json 停在旧 generation：旧锁与旧元数据仍在，只读校验照常通过。
+        let mut runtime: RuntimeState =
+            crate::state::read_json(&f.paths.runtime_state_path()).unwrap();
+        runtime.instances.get_mut(id).unwrap().env.snapshot_sha256 = first.snapshot_sha256.clone();
+        crate::state::write_json(&f.paths.runtime_state_path(), &runtime).unwrap();
+        assert!(verify_instance_with(&f.paths, id, &f.install).is_ok());
     }
 }

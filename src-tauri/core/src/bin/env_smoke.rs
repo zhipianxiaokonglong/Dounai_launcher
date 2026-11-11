@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use launcher_core::env::{
     prepare_instance_with, verify_instance, CurlUvFetcher, EnvContext, EnvOptions, PreparedEnv,
-    SystemUvRunner, UV_VERSION,
+    SourceKind, SystemUvRunner, UV_VERSION,
 };
 use launcher_core::manifest::ModuleManifestV2;
 use launcher_core::{file_sha256_prefixed, InstallMode, InstallState, Paths};
@@ -390,6 +390,7 @@ fn run() -> Result<Report, String> {
                     offline,
                     allow_uv_download: true,
                     port: Some(*port),
+                    source_kind: SourceKind::Dir,
                 },
                 runner: &runner,
                 fetcher: &fetcher,
@@ -445,7 +446,10 @@ fn run() -> Result<Report, String> {
 
     if tamper {
         let id = "dounai/omninexus@stable@main";
-        let lock = paths.deps_lock_path(id);
+        let sha = verify_instance(&paths, id)
+            .map_err(|e| format!("读取当前快照失败：{}", e.describe()))?
+            .snapshot_sha256;
+        let lock = paths.content_lock_path(id, &sha);
         let original = fs::read(&lock).map_err(|e| format!("读锁文件失败：{e}"))?;
         let mut bytes = original.clone();
         if let Some(first) = bytes.first_mut() {

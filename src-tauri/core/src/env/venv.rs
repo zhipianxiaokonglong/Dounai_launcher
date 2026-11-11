@@ -272,17 +272,18 @@ mod tests {
         let staging = super::super::deps::staging_path(&p, "mod@a");
         fs::create_dir_all(p.deps_dir()).unwrap();
         fs::write(&staging, b"pinned").unwrap();
+        let sha = format!("sha256:{}", "a".repeat(64));
         let resolved = ResolvedDeps {
-            lock_path: p.deps_lock_path("mod@a"),
+            lock_path: p.content_lock_path("mod@a", &sha),
             staging_path: staging,
-            sha256: "sha256:abc".into(),
+            sha256: sha.clone(),
             metadata: DepsMetadata {
                 schema_version: 1,
                 instance_id: "mod@a".into(),
                 kind: DepsKind::Pyproject,
                 source_path: "pyproject.toml".into(),
                 extras: vec![],
-                snapshot_sha256: "sha256:abc".into(),
+                snapshot_sha256: sha,
                 python_build_id: python.build_id.clone(),
                 generated_at: "2026-11-10T00:00:00Z".into(),
                 offline_capable: false,
@@ -445,6 +446,7 @@ mod tests {
     #[test]
     fn failed_sync_keeps_previous_lock_and_existing_venv() {
         let (_dir, paths, _module, _uv, _python, resolved) = setup();
+        fs::create_dir_all(paths.deps_generation_dir("mod@a")).unwrap();
         fs::write(&resolved.lock_path, b"previous").unwrap();
         fs::create_dir_all(venv_dir(&paths, "mod@a").join("Scripts")).unwrap();
         let runner = MockUvRunner::new(MockConfig {

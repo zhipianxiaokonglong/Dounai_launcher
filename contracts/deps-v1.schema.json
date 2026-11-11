@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://dounai.local/contracts/deps-v1.schema.json",
   "title": "Dounai deps metadata v1",
-  "description": "单个实例的依赖快照元数据。锁文件本体在 state/deps/<instance_id>.lock，运行时哈希另记在 state/runtime.json。",
+  "description": "依赖快照元数据。锁与元数据按内容哈希存成不可变 generation，路径为 state/deps/<instance_key>/<sha256>.lock 与同名 .json。runtime.json 里的哈希决定读哪一代，该文件是唯一的提交点。",
   "type": "object",
   "additionalProperties": false,
   "required": [

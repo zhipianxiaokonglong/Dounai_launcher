@@ -143,14 +143,42 @@ impl Paths {
         self.instance_dir_keyed(instance_id).join("logs")
     }
 
-    pub fn deps_lock_path(&self, instance_id: &str) -> PathBuf {
-        self.deps_dir()
-            .join(format!("{}.lock", instance_key(instance_id)))
+    /// 每个实例的 generation 目录。锁与元数据都按内容哈希命名，写入后永不改写。
+    pub fn deps_generation_dir(&self, instance_id: &str) -> PathBuf {
+        self.deps_dir().join(instance_key(instance_id))
     }
 
-    pub fn deps_meta_path(&self, instance_id: &str) -> PathBuf {
+    /// 内容寻址锁：`state/deps/<key>/<sha256>.lock`。
+    pub fn content_lock_path(&self, instance_id: &str, sha256: &str) -> PathBuf {
+        self.deps_generation_dir(instance_id)
+            .join(format!("{}.lock", generation_sha(sha256)))
+    }
+
+    /// 内容寻址元数据，与锁同一个 generation。
+    pub fn content_meta_path(&self, instance_id: &str, sha256: &str) -> PathBuf {
+        self.deps_generation_dir(instance_id)
+            .join(format!("{}.json", generation_sha(sha256)))
+    }
+
+    /// 解析阶段的临时文件。它不参与一致性判定，每次 resolve 先删。
+    pub fn deps_staging_path(&self, instance_id: &str) -> PathBuf {
         self.deps_dir()
-            .join(format!("{}.json", instance_key(instance_id)))
+            .join(format!("{}.lock.new", instance_key(instance_id)))
+    }
+}
+
+/// 生成路径只接受 `sha256:` 加 64 位小写十六进制。非法值落到不存在的文件名上，
+/// 由读取方报 SnapshotMismatch，不把未校验的字符串拼进路径。
+pub fn generation_sha(sha256: &str) -> &str {
+    let hex = sha256.strip_prefix("sha256:").unwrap_or(sha256);
+    if hex.len() == 64
+        && hex
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        hex
+    } else {
+        "invalid"
     }
 }
 
@@ -321,13 +349,16 @@ mod tests {
     fn keyed_and_state_paths_stay_under_data_root() {
         let p = paths();
         let id = "dounai/omninexus@stable@main";
+        let sha = format!("sha256:{}", "a".repeat(64));
         for path in [
             p.instance_dir_keyed(id),
             p.instance_venv_python(id),
             p.instance_data_dir_keyed(id),
             p.instance_logs_dir_keyed(id),
-            p.deps_lock_path(id),
-            p.deps_meta_path(id),
+            p.deps_generation_dir(id),
+            p.content_lock_path(id, &sha),
+            p.content_meta_path(id, &sha),
+            p.deps_staging_path(id),
             p.install_state_path(),
             p.runtime_state_path(),
             p.downloaded_uv_path(),
@@ -343,5 +374,17 @@ mod tests {
         assert!(p
             .instance_venv_python(id)
             .ends_with("venv/Scripts/python.exe"));
+    }
+
+    #[test]
+    fn generation_sha_only_accepts_lowercase_digest() {
+        let hex = "a".repeat(64);
+        assert_eq!(generation_sha(&format!("sha256:{hex}")), hex.as_str());
+        assert_eq!(generation_sha("sha256:XYZ"), "invalid");
+        assert_eq!(
+            generation_sha(&format!("sha256:{}", "A".repeat(64))),
+            "invalid"
+        );
+        assert_eq!(generation_sha("../../etc/passwd"), "invalid");
     }
 }
