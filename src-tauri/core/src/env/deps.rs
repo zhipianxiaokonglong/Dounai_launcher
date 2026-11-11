@@ -44,6 +44,51 @@ fn err(instance_id: &str, message: impl Into<String>) -> EnvError {
     EnvError::new(EnvErrorKind::DepsResolve, instance_id, message)
 }
 
+/// 内容冲突说明状态被改写，不是依赖解析失败。其余 I/O 错误仍归 `DepsResolve`。
+fn state_write_err(instance_id: &str, context: &str, e: state::StateError) -> EnvError {
+    if matches!(e, state::StateError::Conflict { .. }) {
+        EnvError::new(
+            EnvErrorKind::SnapshotMismatch,
+            instance_id,
+            format!("{context}：{e}"),
+        )
+    } else {
+        err(instance_id, format!("{context}：{e}"))
+    }
+}
+
+/// 清掉「文件名是完整哈希、内容却是半截」的残损 generation 文件。
+///
+/// 旧实现在写入中途崩溃会留下这种文件，重跑时因内容不符会永久报冲突。只在
+/// `commit` 前执行：此时临时快照已复核为 `sha`，哈希不符的锁不可能是合法内容。
+/// 只删哈希不符的锁与无法解析的元数据；权限等读取错误保留，交由上层报错。
+fn discard_corrupt_generation_files(
+    paths: &Paths,
+    instance_id: &str,
+    sha: &str,
+) -> Result<(), EnvError> {
+    let lock = paths.content_lock_path(instance_id, sha);
+    if lock.exists() {
+        let actual = state::file_sha256_prefixed(&lock)
+            .map_err(|e| err(instance_id, format!("复核已有 generation 锁失败：{e}")))?;
+        if actual != sha {
+            state::remove_if_exists(&lock)
+                .map_err(|e| err(instance_id, format!("清理残损 generation 锁失败：{e}")))?;
+        }
+    }
+    let meta = paths.content_meta_path(instance_id, sha);
+    if meta.exists()
+        && matches!(
+            state::read_json::<DepsMetadata>(&meta),
+            Err(state::StateError::Json { .. })
+        )
+    {
+        state::remove_if_exists(&meta)
+            .map_err(|e| err(instance_id, format!("清理残损 generation 元数据失败：{e}")))?;
+    }
+    Ok(())
+}
+
 /// 声明的文件必须存在且可读。绝对路径、盘符与 `..` 一律拒绝。
 pub fn declared_source(
     module_dir: &Path,
@@ -187,15 +232,21 @@ pub fn commit(paths: &Paths, resolved: &mut ResolvedDeps) -> Result<(), EnvError
             ),
         ));
     }
+    discard_corrupt_generation_files(paths, id, &sha)?;
     state::write_bytes_once(&paths.content_lock_path(id, &sha), &bytes)
-        .map_err(|e| err(id, format!("写 generation 锁失败：{e}")))?;
+        .map_err(|e| state_write_err(id, "写 generation 锁失败", e))?;
     resolved.metadata.offline_capable = true;
     let meta_path = paths.content_meta_path(id, &sha);
     if meta_path.exists() {
         // 同一 generation 重复提交时保留首次生成时间。其余字段必须逐项一致，
         // 否则视为本地状态被改写，不静默覆盖。
-        let existing: DepsMetadata = state::read_json(&meta_path)
-            .map_err(|e| err(id, format!("读取已有 generation 元数据失败：{e}")))?;
+        let existing: DepsMetadata = state::read_json(&meta_path).map_err(|e| {
+            EnvError::new(
+                EnvErrorKind::SnapshotMismatch,
+                id,
+                format!("读取已有 generation 元数据失败：{e}"),
+            )
+        })?;
         let mut expected = resolved.metadata.clone();
         expected.generated_at = existing.generated_at.clone();
         if existing != expected {
@@ -210,7 +261,7 @@ pub fn commit(paths: &Paths, resolved: &mut ResolvedDeps) -> Result<(), EnvError
             .map_err(|e| err(id, format!("序列化依赖元数据失败：{e}")))?;
         meta.push(b'\n');
         state::write_bytes_once(&meta_path, &meta)
-            .map_err(|e| err(id, format!("写 generation 元数据失败：{e}")))?;
+            .map_err(|e| state_write_err(id, "写 generation 元数据失败", e))?;
     }
     state::remove_if_exists(&resolved.staging_path)
         .map_err(|e| err(id, format!("清理临时快照失败：{e}")))?;
@@ -483,5 +534,64 @@ mod tests {
             EnvErrorKind::SnapshotMismatch
         );
         assert_eq!(fs::read_to_string(&resolved.lock_path).unwrap(), "tampered");
+    }
+
+    #[test]
+    fn commit_repairs_truncated_generation_files() {
+        let (_dir, paths, module, uv, python) = setup();
+        let runner = MockUvRunner::default();
+        let mut resolved = resolve(
+            &paths,
+            "mod@a",
+            &manifest(PYPROJECT),
+            &module,
+            &uv,
+            &python,
+            &EnvOptions::default(),
+            &runner,
+        )
+        .unwrap();
+        let lock = paths.content_lock_path("mod@a", &resolved.sha256);
+        let meta = paths.content_meta_path("mod@a", &resolved.sha256);
+        fs::create_dir_all(lock.parent().unwrap()).unwrap();
+        // 模拟写入中途崩溃：文件名是完整哈希，内容只有半截。
+        fs::write(&lock, b"half").unwrap();
+        fs::write(&meta, b"{ broken").unwrap();
+
+        commit(&paths, &mut resolved).unwrap();
+        assert_eq!(
+            verify_snapshot(&paths, "mod@a", &resolved.sha256).unwrap(),
+            resolved.sha256
+        );
+        let stored: DepsMetadata = state::read_json(&meta).unwrap();
+        assert_eq!(stored.snapshot_sha256, resolved.sha256);
+    }
+
+    #[test]
+    fn commit_rejects_metadata_from_another_generation() {
+        let (_dir, paths, module, uv, python) = setup();
+        let runner = MockUvRunner::default();
+        let mut resolved = resolve(
+            &paths,
+            "mod@a",
+            &manifest(PYPROJECT),
+            &module,
+            &uv,
+            &python,
+            &EnvOptions::default(),
+            &runner,
+        )
+        .unwrap();
+        let meta = paths.content_meta_path("mod@a", &resolved.sha256);
+        fs::create_dir_all(meta.parent().unwrap()).unwrap();
+        let mut wrong = resolved.metadata.clone();
+        wrong.snapshot_sha256 = format!("sha256:{}", "b".repeat(64));
+        wrong.offline_capable = true;
+        fs::write(&meta, serde_json::to_vec_pretty(&wrong).unwrap()).unwrap();
+
+        assert_eq!(
+            commit(&paths, &mut resolved).unwrap_err().kind,
+            EnvErrorKind::SnapshotMismatch
+        );
     }
 }

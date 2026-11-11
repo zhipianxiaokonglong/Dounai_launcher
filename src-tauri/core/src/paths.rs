@@ -81,10 +81,6 @@ impl Paths {
         Ok(self.data_root.join("instances").join(instance_id))
     }
 
-    pub fn instance_venv_dir(&self, instance_id: &str) -> Result<PathBuf, PathsError> {
-        Ok(self.instance_dir(instance_id)?.join("venv"))
-    }
-
     pub fn instance_data_dir(&self, instance_id: &str) -> Result<PathBuf, PathsError> {
         Ok(self.instance_dir(instance_id)?.join("data"))
     }
@@ -281,7 +277,7 @@ mod tests {
             p.state_dir(),
             p.webview_dir(),
             p.instance_dir(id).unwrap(),
-            p.instance_venv_dir(id).unwrap(),
+            p.instance_venvs_dir(id),
             p.instance_data_dir(id).unwrap(),
             p.instance_logs_dir(id).unwrap(),
         ] {

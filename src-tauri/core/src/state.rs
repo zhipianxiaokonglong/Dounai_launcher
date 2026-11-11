@@ -86,41 +86,54 @@ pub fn write_json_once<T: Serialize>(path: &Path, value: &T) -> Result<(), State
 
 /// 内容寻址写入：文件名含内容哈希，写入后永不改写。
 ///
-/// 已存在且内容一致时直接复用，让同一 generation 可以被重复提交；内容不同时报错，
-/// 避免撞名或被篡改的文件冒充另一个快照。
+/// 先写临时文件再 rename。崩溃只会留下 `.tmp-*` 文件，不会留下「名字是完整哈希、
+/// 内容却是半截」的正式 generation 文件。已存在且内容一致时直接复用，让同一
+/// generation 可以被重复提交；内容不同时报错，避免撞名或被篡改的文件冒充另一个快照。
 pub fn write_bytes_once(path: &Path, bytes: &[u8]) -> Result<(), StateError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| StateError::io(path, e))?;
     }
-    match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-    {
-        Ok(mut file) => {
-            let write = (|| -> std::io::Result<()> {
-                file.write_all(bytes)?;
-                file.flush()?;
-                file.sync_all()
-            })();
-            if let Err(e) = write {
-                drop(file);
-                let _ = fs::remove_file(path);
-                return Err(StateError::io(path, e));
-            }
-            Ok(())
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            let existing = fs::read(path).map_err(|err| StateError::io(path, err))?;
-            if existing == bytes {
-                Ok(())
+    if path.exists() {
+        return compare_existing(path, bytes);
+    }
+    let name = path
+        .file_name()
+        .ok_or_else(|| StateError::NoFileName(path.display().to_string()))?
+        .to_string_lossy();
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_file_name(format!("{name}.tmp-{}-{seq}", std::process::id()));
+    let write = (|| -> std::io::Result<()> {
+        let mut f = File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.flush()?;
+        f.sync_all()
+    })();
+    if let Err(e) = write {
+        let _ = fs::remove_file(&tmp);
+        return Err(StateError::io(path, e));
+    }
+    match fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            // 并发写入或系统不允许覆盖时，别的进程已落盘，读回比较即可。
+            if path.exists() {
+                compare_existing(path, bytes)
             } else {
-                Err(StateError::Conflict {
-                    path: path.display().to_string(),
-                })
+                Err(StateError::io(path, e))
             }
         }
-        Err(e) => Err(StateError::io(path, e)),
+    }
+}
+
+fn compare_existing(path: &Path, bytes: &[u8]) -> Result<(), StateError> {
+    let existing = fs::read(path).map_err(|e| StateError::io(path, e))?;
+    if existing == bytes {
+        Ok(())
+    } else {
+        Err(StateError::Conflict {
+            path: path.display().to_string(),
+        })
     }
 }
 

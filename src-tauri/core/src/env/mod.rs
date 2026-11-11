@@ -79,7 +79,7 @@ pub struct EnvContext<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreparedEnv {
-    /// `instances/<key>/venv/Scripts/python.exe`
+    /// `instances/<key>/venvs/<generation>/Scripts/python.exe`
     pub venv_python: PathBuf,
     pub working_dir: PathBuf,
     pub env_vars: BTreeMap<String, String>,
@@ -167,6 +167,9 @@ impl RuntimeState {
 }
 
 /// 生产入口：读 install.json，用随包自带的 uv 跑真命令。
+///
+/// 本入口用 `EnvOptions::default()`，按 dir 实例处理，不比对签名包的 pinned 哈希。
+/// 装包路径必须调用 `prepare_instance_with`，从 installed.json 填 `source_kind`。
 pub fn prepare_instance(
     paths: &Paths,
     instance_id: &str,
@@ -498,10 +501,11 @@ fn reserved_env_key(key: &str) -> bool {
         )
 }
 
+/// 与 `module-v2` 的 `entry.env.propertyNames` 一致：键名只用大写字母、数字与下划线。
 fn valid_env_key(key: &str) -> bool {
     let mut chars = key.chars();
-    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    matches!(chars.next(), Some(c) if c.is_ascii_uppercase() || c == '_')
+        && chars.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -946,11 +950,26 @@ mod tests {
             .content_lock_path(id, &first.snapshot_sha256)
             .exists());
 
-        // 模拟 runtime.json 停在旧 generation：旧锁与旧元数据仍在，只读校验照常通过。
+        // 模拟 runtime.json 停在旧 generation：锁、元数据与 venv 都指回第一代。
         let mut runtime: RuntimeState =
             crate::state::read_json(&f.paths.runtime_state_path()).unwrap();
-        runtime.instances.get_mut(id).unwrap().env.snapshot_sha256 = first.snapshot_sha256.clone();
+        let entry = runtime.instances.get_mut(id).unwrap();
+        entry.env.snapshot_sha256 = first.snapshot_sha256.clone();
+        entry.env.venv_python = f.paths.generation_venv_python(id, &first.snapshot_sha256);
         crate::state::write_json(&f.paths.runtime_state_path(), &runtime).unwrap();
         assert!(verify_instance_with(&f.paths, id, &f.install).is_ok());
+
+        // 旧 generation 的 venv 缺失时校验必须失败，证明检查的是 runtime.json 指向的那一代。
+        std::fs::remove_dir_all(f.paths.generation_venv_dir(id, &first.snapshot_sha256)).unwrap();
+        assert!(verify_instance_with(&f.paths, id, &f.install).is_err());
+    }
+
+    #[test]
+    fn env_keys_require_uppercase_names() {
+        assert!(valid_env_key("OMNI_PORT"));
+        assert!(valid_env_key("_PRIVATE2"));
+        assert!(!valid_env_key("omni_port"));
+        assert!(!valid_env_key("Omni_Port"));
+        assert!(!valid_env_key("2PORT"));
     }
 }
