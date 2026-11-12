@@ -31,7 +31,7 @@ fn build_trust_policy() -> TrustPolicy {
 }
 
 fn main() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.show();
@@ -54,6 +54,11 @@ fn main() {
             let state = AppState::with_trust(data_root, allowlist, build_trust_policy())
                 .map_err(|e| format!("初始化状态失败：{e}"))?;
             app.manage(state);
+
+            let supervisor =
+                dounai_launcher::lifecycle_runtime::Supervisor::new(app.handle().clone())
+                    .map_err(|e| format!("初始化生命周期失败：{e}"))?;
+            app.manage(supervisor);
 
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.show();
@@ -84,6 +89,17 @@ fn main() {
             dounai_launcher::commands::enable_dev_mode,
             dounai_launcher::env_probe::probe_environment,
         ])
-        .run(tauri::generate_context!())
-        .expect("启动器启动失败");
+        .build(tauri::generate_context!())
+        .expect("启动器构建失败");
+
+    // 退出时先停全部子进程；强杀启动器则由每个实例的 Job Object 兜底。
+    app.run(|handle, event| {
+        if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
+            if let Some(supervisor) =
+                handle.try_state::<dounai_launcher::lifecycle_runtime::Supervisor>()
+            {
+                supervisor.stop_all();
+            }
+        }
+    });
 }

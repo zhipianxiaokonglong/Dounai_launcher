@@ -1,0 +1,186 @@
+//! Windows 进程托管。桌面壳只有本文件调用 Win32 API。
+//! Job Object 用于生命周期清理与强杀兜底，不是安全隔离边界。
+
+use std::collections::BTreeMap;
+use std::ffi::c_void;
+use std::os::windows::io::AsRawHandle;
+use std::os::windows::process::CommandExt;
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
+
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+use windows_sys::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+    SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+};
+use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+
+#[derive(Debug, thiserror::Error)]
+pub enum WinError {
+    #[error("创建 Job Object 失败，系统错误码 {0}")]
+    CreateJob(i32),
+    #[error("设置 Job 限制失败，系统错误码 {0}")]
+    SetLimit(i32),
+    #[error("启动进程失败：{0}")]
+    Spawn(String),
+    #[error("把进程加入 Job 失败，系统错误码 {0}")]
+    Assign(i32),
+    #[error("终止 Job 失败，系统错误码 {0}")]
+    Terminate(i32),
+}
+
+fn last_error() -> i32 {
+    std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+}
+
+fn lock_child(slot: &Arc<Mutex<Option<Child>>>) -> MutexGuard<'_, Option<Child>> {
+    slot.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[derive(Debug, Clone)]
+pub struct SpawnSpec {
+    pub program: PathBuf,
+    pub args: Vec<String>,
+    pub working_dir: PathBuf,
+    pub env: BTreeMap<String, String>,
+}
+
+/// job 存成 usize，让整个结构可以跨 Tauri 的命令线程传递。
+pub struct WinProcess {
+    job: usize,
+    pub pid: u32,
+    child: Arc<Mutex<Option<Child>>>,
+}
+
+impl WinProcess {
+    fn handle(&self) -> HANDLE {
+        self.job as HANDLE
+    }
+
+    pub fn spawn(spec: &SpawnSpec) -> Result<Self, WinError> {
+        let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if job.is_null() {
+            return Err(WinError::CreateJob(last_error()));
+        }
+
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let set = unsafe {
+            SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &limits as *const _ as *const c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if set == 0 {
+            let code = last_error();
+            unsafe { CloseHandle(job) };
+            return Err(WinError::SetLimit(code));
+        }
+
+        let mut command = Command::new(&spec.program);
+        command
+            .args(&spec.args)
+            .current_dir(&spec.working_dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW);
+        for (key, value) in &spec.env {
+            command.env(key, value);
+        }
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                unsafe { CloseHandle(job) };
+                return Err(WinError::Spawn(error.to_string()));
+            }
+        };
+
+        let assigned = unsafe { AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE) };
+        if assigned == 0 {
+            let code = last_error();
+            let _ = child.kill();
+            let _ = child.wait();
+            unsafe { CloseHandle(job) };
+            return Err(WinError::Assign(code));
+        }
+
+        let pid = child.id();
+        Ok(Self {
+            job: job as usize,
+            pid,
+            child: Arc::new(Mutex::new(Some(child))),
+        })
+    }
+
+    /// watcher 独占这份 Child，用 try_wait 轮询，退出即把槽清空。
+    pub fn watcher_slot(&self) -> Arc<Mutex<Option<Child>>> {
+        self.child.clone()
+    }
+
+    /// 先请求优雅退出，超时后由 Job 一次性终止整棵进程树。
+    pub fn stop_graceful(&self, timeout: Duration) -> Result<(), WinError> {
+        let pid = self.pid.to_string();
+        let _ = Command::new("taskkill")
+            .args(["/PID", pid.as_str(), "/T"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+
+        let deadline = Instant::now() + timeout;
+        loop {
+            if lock_child(&self.child).is_none() {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        self.kill()?;
+        Ok(())
+    }
+
+    pub fn kill(&self) -> Result<(), WinError> {
+        let terminated = unsafe { TerminateJobObject(self.handle(), 1) };
+        if terminated == 0 {
+            return Err(WinError::Terminate(last_error()));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for WinProcess {
+    fn drop(&mut self) {
+        unsafe {
+            TerminateJobObject(self.handle(), 1);
+            CloseHandle(self.handle());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec(program: &str) -> SpawnSpec {
+        SpawnSpec {
+            program: PathBuf::from(program),
+            args: Vec::new(),
+            working_dir: std::env::current_dir().unwrap(),
+            env: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn missing_program_fails_without_leaking_a_job() {
+        let result = WinProcess::spawn(&spec("definitely-not-a-real-program.exe"));
+        assert!(matches!(result, Err(WinError::Spawn(_))));
+    }
+}
