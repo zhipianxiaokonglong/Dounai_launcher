@@ -1,34 +1,13 @@
 //! 启动器可执行入口。
 //!
-//! 只负责装配：初始化数据根、注册命令、创建窗口。
+//! 只负责装配：双根路径、v2 状态、生命周期 Supervisor 与命令注册。
 //! 所有业务逻辑都在 `dounai_launcher` 库里，便于独立测试。
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::path::PathBuf;
 
-use dounai_launcher::catalog::Allowlist;
-use dounai_launcher::commands::AppState;
-use dounai_launcher::trust::TrustPolicy;
 use tauri::Manager;
-
-/// 构造 manifest 信任策略。
-///
-/// 调试构建：允许未签名（仓库里的样例 manifest 尚未签名，便于开发）。
-/// 发布构建：**拒绝未签名**。发布时可在此填入可信公钥，
-/// 发布时可在此填入可信公钥。
-fn build_trust_policy() -> TrustPolicy {
-    #[cfg(debug_assertions)]
-    {
-        TrustPolicy::permissive()
-    }
-    #[cfg(not(debug_assertions))]
-    {
-        // 尚未配置公钥时，严格策略会拒绝一切安装（fail-closed）。
-        // 这是刻意的：宁可装不上，也不能装来路不明的模块。
-        TrustPolicy::strict(Vec::new())
-    }
-}
 
 fn main() {
     let app = tauri::Builder::default()
@@ -40,19 +19,20 @@ fn main() {
             }
         }))
         .setup(|app| {
-            // 数据根：用户本地应用数据目录，不写入安装目录（避免权限问题）
+            // 双根：安装根是只读的程序目录，数据根是用户本地应用数据目录。
+            // 两者必须不同，Paths::new 会校验，避免把用户数据写进 Program Files。
+            let install_root = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+                .ok_or_else(|| "无法确定安装目录".to_string())?;
             let data_root: PathBuf = app
                 .path()
                 .app_local_data_dir()
                 .map_err(|e| format!("无法确定数据目录：{e}"))?
                 .join("launcher");
 
-            // 出网白名单：一期为空集，即完全不允许联网（最保守）。
-            // 配置真实下载源时在此加入域名。
-            let allowlist = Allowlist::new(Vec::<String>::new());
-
-            let state = AppState::with_trust(data_root, allowlist, build_trust_policy())
-                .map_err(|e| format!("初始化状态失败：{e}"))?;
+            let state = dounai_launcher::state_v2::AppStateV2::new(install_root, data_root)
+                .map_err(|e| format!("初始化 v2 状态失败：{e}"))?;
             app.manage(state);
 
             let supervisor =
@@ -66,28 +46,41 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            dounai_launcher::commands::list_module_states,
-            dounai_launcher::commands::set_module_enabled,
-            dounai_launcher::commands::uninstall_module,
-            dounai_launcher::commands::install_module,
-            dounai_launcher::commands::download_package,
-            dounai_launcher::commands::refresh_catalog,
-            dounai_launcher::commands::trust_info,
-            dounai_launcher::commands::hash_file,
-            dounai_launcher::commands::purge_local_data,
-            dounai_launcher::commands::read_module_manifests,
-            dounai_launcher::commands::open_admin_window,
-            dounai_launcher::commands::start_module,
-            dounai_launcher::commands::stop_module,
-            dounai_launcher::commands::start_all,
-            dounai_launcher::commands::stop_all,
-            dounai_launcher::commands::scan_local_modules,
-            dounai_launcher::commands::add_local_module,
-            dounai_launcher::commands::add_local_modules_bulk,
-            dounai_launcher::commands::remove_local_module,
-            dounai_launcher::commands::dev_mode_status,
-            dounai_launcher::commands::enable_dev_mode,
+            // v1 命令名与返回形状原样保留，内部改走 v2；前端 bridge.ts 不用改。
+            dounai_launcher::commands_v2::list_module_states,
+            dounai_launcher::commands_v2::set_module_enabled,
+            dounai_launcher::commands_v2::uninstall_module,
+            dounai_launcher::commands_v2::install_module,
+            dounai_launcher::commands_v2::download_package,
+            dounai_launcher::commands_v2::refresh_catalog,
+            dounai_launcher::commands_v2::trust_info,
+            dounai_launcher::commands_v2::hash_file,
+            dounai_launcher::commands_v2::purge_local_data,
+            dounai_launcher::commands_v2::read_module_manifests,
+            dounai_launcher::commands_v2::open_admin_window,
+            dounai_launcher::commands_v2::start_module,
+            dounai_launcher::commands_v2::stop_module,
+            dounai_launcher::commands_v2::start_all,
+            dounai_launcher::commands_v2::stop_all,
+            dounai_launcher::commands_v2::scan_local_modules,
+            dounai_launcher::commands_v2::add_local_module,
+            dounai_launcher::commands_v2::add_local_modules_bulk,
+            dounai_launcher::commands_v2::remove_local_module,
+            dounai_launcher::commands_v2::dev_mode_status,
+            dounai_launcher::commands_v2::enable_dev_mode,
             dounai_launcher::env_probe::probe_environment,
+            // v2 新增命令。
+            dounai_launcher::commands_v2::list_instances,
+            dounai_launcher::commands_v2::restart_instance,
+            dounai_launcher::commands_v2::switch_active,
+            dounai_launcher::commands_v2::confirm_local_source,
+            dounai_launcher::commands_v2::get_lifecycle_snapshot,
+            dounai_launcher::commands_v2::read_instance_logs,
+            dounai_launcher::commands_v2::prepare_instance_env,
+            dounai_launcher::commands_v2::set_keep_versions,
+            dounai_launcher::commands_v2::set_k5_pubkey,
+            dounai_launcher::commands_v2::confirm_trusted_key,
+            dounai_launcher::commands_v2::revoke_trusted_key,
         ])
         .build(tauri::generate_context!())
         .expect("启动器构建失败");

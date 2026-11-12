@@ -1,4 +1,9 @@
-//! Tauri 命令层：把启动器能力暴露给前端。
+//! v1 命令层（M3.3 起不再注册到 Tauri）。
+//!
+//! `#[tauri::command]` 生成的辅助宏名是 crate 级全局的，同名命令无法在同一
+//! crate 内存在两份，因此 v2 命令面一旦落地就必须把注册面整体切过去，
+//! 不能让两代命令同时编译。本模块现在只保留纯逻辑函数，供 `tests/` 下六份
+//! v1 集成测试继续使用；M3.4 连同这些测试、`runtime.rs` 与 `state.rs` 一起删除。
 //!
 //! 安全要点：
 //! - 前端**不能**传任意 URL/路径进来执行；所有路径都以 `app_data_dir` 为根拼接；
@@ -284,7 +289,6 @@ impl AppState {
 /* 模块运行（启动 / 停止）                                             */
 /* ------------------------------------------------------------------ */
 
-#[tauri::command]
 pub fn start_module(
     state: State<AppState>,
     module_id: String,
@@ -305,7 +309,6 @@ pub fn start_module_inner(
     state.processes().start(&spec).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
 pub fn stop_module(
     state: State<AppState>,
     module_id: String,
@@ -382,7 +385,6 @@ pub fn start_order(state: &AppState) -> Vec<String> {
     ordered
 }
 
-#[tauri::command]
 pub fn start_all(state: State<AppState>) -> Vec<crate::runtime::RunView> {
     start_all_inner(&state)
 }
@@ -405,7 +407,6 @@ pub fn start_all_inner(state: &AppState) -> Vec<crate::runtime::RunView> {
     out
 }
 
-#[tauri::command]
 pub fn stop_all(state: State<AppState>) -> Vec<crate::runtime::RunView> {
     state.processes().stop_all()
 }
@@ -488,7 +489,6 @@ fn parse_run(s: &str) -> RunState {
     }
 }
 
-#[tauri::command]
 pub fn list_module_states(state: State<AppState>) -> Result<Vec<ModuleView>, String> {
     // ⚠ 顺序很重要：entry_spec 内部会去锁 store（经 module_root）。
     // std 的 Mutex 不可重入，若在持锁状态下调 entry_spec 会**死锁**。
@@ -521,7 +521,6 @@ pub struct SetEnabledRequest {
     pub category: String,
 }
 
-#[tauri::command]
 pub fn set_module_enabled(
     state: State<AppState>,
     request: SetEnabledRequest,
@@ -543,7 +542,6 @@ pub struct UninstallRequest {
     pub remove_files: bool,
 }
 
-#[tauri::command]
 pub fn uninstall_module(state: State<AppState>, request: UninstallRequest) -> Result<(), String> {
     uninstall_module_inner(&state, request)
 }
@@ -736,7 +734,6 @@ pub fn precheck_install(
     Ok((trust, zip_bytes))
 }
 
-#[tauri::command]
 pub fn install_module(
     state: State<AppState>,
     request: InstallRequest,
@@ -814,7 +811,6 @@ pub struct CatalogResponse {
     pub reason: Option<String>,
 }
 
-#[tauri::command]
 pub fn refresh_catalog(state: State<AppState>, catalog_url: String) -> CatalogResponse {
     let cache = state.data_root.join("catalog-cache.json");
 
@@ -870,7 +866,6 @@ fn find_manifest(dir: &Path) -> Option<PathBuf> {
 ///
 /// 为什么要扫描而不是让用户逐个试：用户把仓库 clone 到一个大目录后，
 /// 往往不记得哪个子目录才是模块根。扫描把候选列出来，减少盲目试错。
-#[tauri::command]
 pub fn scan_local_modules(
     state: State<AppState>,
     root: String,
@@ -1050,7 +1045,6 @@ pub struct AddLocalModuleRequest {
 /// - 必须存在 `manifest.json`，且 `module_id` 通过文件名校验；
 /// - `working_dir` 被限制在该模块根内，仍然越不出去；
 /// - 卸载只解除登记，**绝不删除用户文件**。
-#[tauri::command]
 pub fn add_local_module(
     state: State<AppState>,
     request: AddLocalModuleRequest,
@@ -1170,7 +1164,6 @@ pub fn add_local_module_inner(state: &AppState, raw_path: &str) -> Result<Module
 }
 
 /// 解除本地模块登记（不删除文件）。
-#[tauri::command]
 pub fn remove_local_module(state: State<AppState>, module_id: String) -> Result<(), String> {
     require_dev_mode(&state)?;
     remove_local_module_inner(&state, &module_id)
@@ -1221,7 +1214,6 @@ pub struct BulkAddLocalModulesRequest {
 /// 语义与单条 `add_local_module` 完全一致（跳过签名、只登记路径、不复制文件），
 /// 只是循环执行并**逐条汇报成败**——一个失败不影响其余。
 /// 同样受开发者模式门限制。
-#[tauri::command]
 pub fn add_local_modules_bulk(
     state: State<AppState>,
     request: BulkAddLocalModulesRequest,
@@ -1269,7 +1261,6 @@ pub struct ModuleManifestView {
 /// 因此"卡片显示什么"与"实际跑什么"不再分裂。
 ///
 /// 内置 `manifests/*.json` 退化为商店元数据/未安装占位，不再用于展示已装模块。
-#[tauri::command]
 pub fn read_module_manifests(state: State<AppState>) -> Vec<ModuleManifestView> {
     read_module_manifests_inner(&state)
 }
@@ -1361,7 +1352,6 @@ pub struct OpenAdminUiRequest {
 ///   **不接受前端传入的任意 URL**；
 /// - 只允许回环地址；
 /// - 窗口 label 按模块派生，重复点击复用同一窗口。
-#[tauri::command]
 pub async fn open_admin_window(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
@@ -1529,7 +1519,6 @@ pub struct PurgeResponse {
 /// 用户的对话、记忆、密钥属于上游模块，本层不接触也不清除，
 /// 需要在对应模块里操作——这一点必须在 UI 上说明，否则用户会以为
 /// 「清除完了」而实际对话数据还在。
-#[tauri::command]
 pub fn purge_local_data(state: State<AppState>, request: PurgeRequest) -> PurgeResponse {
     purge_local_data_inner(&state, request)
 }
@@ -1632,7 +1621,6 @@ pub struct DownloadResponse {
 ///
 /// 白名单在下载前逐一校验每个源：任一源不在白名单内就整体拒绝，
 /// 而不是"跳过它继续试下一个"——后者会让配置错误被静默忽略。
-#[tauri::command]
 pub fn download_package(
     state: State<AppState>,
     request: DownloadRequest,
@@ -1693,7 +1681,6 @@ pub struct TrustInfo {
     pub open: bool,
 }
 
-#[tauri::command]
 pub fn trust_info(state: State<AppState>) -> TrustInfo {
     let p = state.trust_policy();
     TrustInfo {
@@ -1731,14 +1718,12 @@ impl AppState {
     }
 }
 
-#[tauri::command]
 pub fn dev_mode_status(state: State<AppState>) -> DevModeInfo {
     DevModeInfo {
         enabled: state.dev_mode(),
     }
 }
 
-#[tauri::command]
 pub fn enable_dev_mode(state: State<AppState>) -> DevModeInfo {
     state.enable_dev_mode();
     DevModeInfo { enabled: true }
@@ -1770,7 +1755,6 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
 }
 
 /// 计算文件哈希（供前端校验已下载内容）。
-#[tauri::command]
 pub fn hash_file(path: String, state: State<AppState>) -> Result<String, String> {
     // 只允许读 data_root 内的文件，防止被当作任意文件读取原语
     let p = PathBuf::from(&path);
