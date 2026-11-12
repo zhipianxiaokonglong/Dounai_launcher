@@ -34,7 +34,7 @@ jobs:
       # 分两步：生产依赖阻断，开发依赖只报告。
       #
       # 理由（实测）：
-pm audit --omit=dev 为 0 漏洞；
+      # 实测 `npm audit --omit=dev` 为 0 漏洞；
       # 完整审计报告的 6 项全部来自 devDependencies
       # （vitest / vite / esbuild / tinypool 的测试工具链），
       # 且 dist/ 产物中不含它们——不会进入用户安装的包。
