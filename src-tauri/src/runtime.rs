@@ -60,6 +60,12 @@ pub struct RunView {
     pub pid: Option<u32>,
     pub last_error: Option<String>,
     pub healthy: bool,
+    /// 该服务是否由外部启动（不在本启动器的进程表里）。
+    ///
+    /// 健康探测通过但进程表里没有它时置 true——UI 据此禁用「停止」按钮，
+    /// 因为启动器无权停掉别人的进程。
+    #[serde(default)]
+    pub external: bool,
 }
 
 impl RunView {
@@ -69,6 +75,7 @@ impl RunView {
             run: "stopped".into(),
             pid: None,
             last_error: None,
+            external: false,
             healthy: false,
         }
     }
@@ -164,6 +171,7 @@ impl ProcessManager {
                 pid: None,
                 last_error: p.last_error.clone(),
                 healthy: false,
+                external: false,
             };
         }
 
@@ -173,6 +181,7 @@ impl ProcessManager {
             pid: Some(p.pid),
             last_error: p.last_error.clone(),
             healthy: p.healthy,
+            external: false,
         }
     }
 

@@ -83,6 +83,8 @@ fn main() {
             dounai_launcher::commands::dev_mode_status,
             dounai_launcher::commands::enable_dev_mode,
             dounai_launcher::env_probe::probe_environment,
+            // 以数据根所在卷判断磁盘空间（修 D-3：原来硬编码 D 盘）
+            dounai_launcher::commands::probe_environment_here,
         ])
         .run(tauri::generate_context!())
         .expect("启动器启动失败");

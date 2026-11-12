@@ -110,6 +110,19 @@ impl Category {
     pub fn can_disable(self) -> bool {
         matches!(self, Self::Optional | Self::Experimental)
     }
+
+    /// 分类的规范小写字符串（与 manifest 中的写法一致）。
+    ///
+    /// 用于面向用户的错误信息：{category:?} 会打印成 Core，
+    /// 而用户在 manifest 里看到的是 core，对不上容易困惑。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Core => "core",
+            Self::Optional => "optional",
+            Self::Reserved => "reserved",
+            Self::Experimental => "experimental",
+        }
+    }
 }
 
 /// 状态操作错误。

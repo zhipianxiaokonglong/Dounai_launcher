@@ -97,6 +97,59 @@ impl AppState {
         self.module_dir(module_id)
     }
 
+    /// 读取模块**真实**的分类（来自模块根目录的 manifest）。
+    ///
+    /// ## 为什么必须有这个函数
+    ///
+    /// 「core 不可卸载 / 不可禁用」是写进 README、SECURITY.md、ACCEPTANCE 的
+    /// 硬约束。原先 `set_module_enabled` / `uninstall_module` 直接用前端传来的
+    /// `category` 做权限判断，等于让调用方自己声明"我是什么分类"——
+    /// 前端伪造 `optional` 就能卸载 core 模块。
+    ///
+    /// 分类是**安全判据**，只能由后端从磁盘上的 manifest 读取。
+    ///
+    /// ## 与 install 的关系
+    ///
+    /// 安装时用包内 manifest 的 category 是可以的（那份 manifest 刚从包里读出）。
+    /// 但落库之后，一切权限判断都必须以磁盘上的 manifest 为准——
+    /// 因为落库记录可被篡改，而 manifest 是模块自身的声明。
+    pub fn category_of(&self, module_id: &str) -> Result<Category, String> {
+        let root = self.module_root(module_id)?;
+        let manifest_path = find_manifest(&root).ok_or_else(|| {
+            format!(
+                "模块 {} 的目录里没有 manifest.json，无法确定其分类；                 为避免误判，已拒绝该操作。",
+                module_id
+            )
+        })?;
+
+        let text = std::fs::read_to_string(&manifest_path)
+            .map_err(|e| format!("读取 {} 的 manifest 失败：{e}", module_id))?;
+        let manifest: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| format!("{} 的 manifest 不是合法 JSON：{e}", module_id))?;
+
+        let raw = manifest
+            .get("category")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+
+        if raw.is_empty() {
+            // 缺省按最严格处理：视为 core，从而禁止卸载/禁用。
+            // 宁可拒绝合法操作，也不能放过一次越权。
+            return Err(format!(
+                "模块 {} 的 manifest 没有声明 category。                 出于安全考虑，未声明分类的模块按 Core 处理，不允许该操作。",
+                module_id
+            ));
+        }
+
+        Category::parse(raw).ok_or_else(|| {
+            format!(
+                "模块 {} 的 manifest 声明了未知分类 `{raw}`；                 无法判断其保护级别，已拒绝该操作。",
+                module_id
+            )
+        })
+    }
+
     /// 模块是否为外部链接（文件由用户管理）。
     pub fn is_linked(&self, module_id: &str) -> bool {
         self.store
@@ -301,6 +354,25 @@ pub fn start_module_inner(
     if state.processes().is_active(module_id) {
         return Ok(state.processes().view(module_id));
     }
+
+    // 进程表里没有，但服务可能已经在跑（D-4）。
+    //
+    // 两种常见来源：
+    //  1. 用户自己用命令行起了上游（调试时很常见）
+    //  2. 启动器重启过，之前拉起的进程成了孤儿（进程表是内存态）
+    //
+    // 此时若直接 spawn，新进程会因端口被占用而立即退出（退出码 3），
+    // 界面显示「启动失败」——而服务其实一直健康。用户会以为模块坏了。
+    //
+    // 因此先探一次健康端点：探通就以「外部运行」返回，不再拉起。
+    if let Some(true) = module_service_alive(state, module_id) {
+        let mut view = state.processes().view(module_id);
+        view.run = "running".to_string();
+        view.healthy = true;
+        view.external = true;
+        return Ok(view);
+    }
+
     let spec = state.precheck_start(module_id)?;
     state.processes().start(&spec).map_err(|e| e.to_string())
 }
@@ -399,6 +471,7 @@ pub fn start_all_inner(state: &AppState) -> Vec<crate::runtime::RunView> {
                 pid: None,
                 last_error: Some(e),
                 healthy: false,
+                external: false,
             }),
         }
     }
@@ -514,6 +587,23 @@ pub fn list_module_states(state: State<AppState>) -> Result<Vec<ModuleView>, Str
         .collect())
 }
 
+/// 环境体检（以启动器数据根所在卷判断磁盘空间）。
+///
+/// 为什么要单独包一层：env_probe::probe_environment 无法拿到 AppState，
+/// 只能猜工作目录所在卷。而模块实际装在数据根下——两者可能不是同一个盘
+/// （历史缺陷 D-3 就是把 D 盘硬编码进去，导致检查了错误的卷）。
+#[tauri::command]
+pub async fn probe_environment_here(state: State<'_, AppState>) -> Result<String, String> {
+    let root = state.data_root().to_path_buf();
+    // 体检本身要跑若干外部命令，放到阻塞线程池，避免占住 async 运行时
+    let report = tauri::async_runtime::spawn_blocking(move || {
+        crate::env_probe::probe_environment_with(&root)
+    })
+    .await
+    .map_err(|e| format!("环境体检失败：{e}"))?;
+    serde_json::to_string(&report).map_err(|e| format!("体检结果序列化失败：{e}"))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SetEnabledRequest {
     pub module_id: String,
@@ -526,8 +616,22 @@ pub fn set_module_enabled(
     state: State<AppState>,
     request: SetEnabledRequest,
 ) -> Result<(), String> {
-    let category = Category::parse(&request.category)
+    // 分类以 manifest 为准，不信前端。
+    let category = state.category_of(&request.module_id)?;
+    // 前端传的 category 仅作一致性校验：不一致通常意味着界面状态过期，
+    // 或者有人在试探。两种都该拒绝并说清原因，而不是静默采信后端值。
+    let claimed = Category::parse(&request.category)
         .ok_or_else(|| format!("未知分类：{}", request.category))?;
+    if claimed != category {
+        return Err(format!(
+            "分类不一致：界面认为 {} 是 {}，但其 manifest 声明为 {}。\
+             请刷新模块列表后重试。",
+            request.module_id,
+            claimed.as_str(),
+            category.as_str()
+        ));
+    }
+
     let mut store = state.store.lock().map_err(|_| "状态锁不可用")?;
     store
         .set_enabled(&request.module_id, request.enabled, category)
@@ -550,8 +654,19 @@ pub fn uninstall_module(state: State<AppState>, request: UninstallRequest) -> Re
 
 /// 卸载的实际实现（与 Tauri 解耦，便于测试链接模块不删文件这一关键行为）。
 pub fn uninstall_module_inner(state: &AppState, request: UninstallRequest) -> Result<(), String> {
-    let category = Category::parse(&request.category)
+    // 分类以 manifest 为准（D-1：原先前端传什么都信，可绕过 Core 保护）。
+    let category = state.category_of(&request.module_id)?;
+    let claimed = Category::parse(&request.category)
         .ok_or_else(|| format!("未知分类：{}", request.category))?;
+    if claimed != category {
+        return Err(format!(
+            "分类不一致：界面认为 {} 是 {}，但其 manifest 声明为 {}。\
+             请刷新模块列表后重试。",
+            request.module_id,
+            claimed.as_str(),
+            category.as_str()
+        ));
+    }
 
     // 卸载前必须先停止：进程还开着就删目录，Windows 上会因文件占用失败，
     // 而且会留下"目录已删、进程还在跑"的错乱状态。

@@ -229,8 +229,8 @@ docs/                用户文档、验收、交接、测试说明
 ## 测试
 
 ```powershell
-cd src-tauri && cargo test      # Rust：190 项
-npm test                        # 前端：57 项
+cd src-tauri && cargo test      # Rust：212 项
+npm test                        # 前端：65 项
 cd reserved/memory && pytest    # Reserved 插件：24 项
 ```
 

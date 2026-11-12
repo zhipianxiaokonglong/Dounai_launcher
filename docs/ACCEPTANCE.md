@@ -27,7 +27,7 @@
 | 仓库 | 测试证据 | 本轮是否重跑 |
 |---|---|---|
 | `Dounai`（模块 D） | `docs/TEST_REPORT.md`；97 项前端 + 12 项 Rust | ✅ 本轮跑过 |
-| `Dounai_launcher`（启动器） | Rust 151 项 + 前端 52 项 + Python 24 项 | ✅ 本轮跑过 |
+| `Dounai_launcher`（启动器） | Rust 212 项 + 前端 65 项 + Python 24 项 | ✅ 本轮跑过 |
 | `Dounai_input`（模块 A） | `docs/testing-report.md` | ❌ 待复核 |
 | `OmniNexus`（模块 B） | `docs/test-report.md` | ❌ 待复核 |
 | `MoodVoice`（模块 C） | `docs/TEST_REPORT.md`（60 项） | ❌ 待复核 |
