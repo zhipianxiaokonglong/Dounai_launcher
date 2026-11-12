@@ -4,11 +4,11 @@ Dounai 启动器管理模块的安装、环境与进程生命周期。产品主�
 
 ## 当前状态
 
-本仓库处于 v2 重构期。`refactor/launcher-v2` 分支已冻结 M0 契约，M1 环境引擎已按契约落到 `launcher-core`。Tauri 命令面仍待 M2 起改写。
+本仓库处于 v2 重构期。`refactor/launcher-v2` 分支已冻结 M0 契约，M1 环境引擎与 M2 双源包信任的纯逻辑已落到 `launcher-core`。Tauri 命令面待 M3 起改写。
 
 - 仅支持 Windows 10 与 Windows 11。
 - 不读取 v1 包格式，不设兼容层。v1 包格式从未打包分发。
-- `src/` 与 `src-tauri/src/` 仍是 v1 代码。`src-tauri/core/` 是不依赖 Tauri 的独立 crate，M1 的环境引擎与状态契约在这里。
+- `src/` 与 `src-tauri/src/` 仍是 v1 代码。`src-tauri/core/` 是不依赖 Tauri 的独立 crate，环境引擎、状态格式与 M2 的包信任逻辑在这里。
 - 本版本不能在线安装模块。官方 catalog 与 K1、K5 两把密钥尚未生成。
 
 注意：安装程序启动时会索要管理员权限。安装模式定为 `both`，这一行为已接受并写进 M5 验收项。`both` 只是安装器的运行时选项；落盘到 `state/install.json` 时写成 `current_user` 或 `per_machine`，便携 exe 写 `portable`，`install-v1` 契约不收 `both`。

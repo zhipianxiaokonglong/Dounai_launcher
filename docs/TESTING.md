@@ -177,6 +177,22 @@ B2 新增 2 项单测。一项断言新建失败后不留正式 generation 目�
 
 `write_bytes_once` 改为临时文件加 rename，崩溃不再留下“文件名是完整哈希、内容只有半截”的 generation 文件。`commit` 前清理这类残损文件，让重跑能自愈；内容冲突与元数据读取失败改报 `SnapshotMismatch`。回滚测试把 `venv_python` 一并改回旧代，并补上旧 venv 缺失时应失败的反向断言。`entry.env` 键名校验收紧为全大写，删掉 M1 遗留的 `instance_venv_dir`。`validate.mjs` 增加断言总数下界，误删断言不再判绿。本轮新增 3 项单测，覆盖残损文件修复、跨 generation 元数据拒绝与键名大小写。
 
+## M2 主体离线验收（2026-11-12）
+
+M2 主体逻辑落在 `src-tauri/core/src/m2/`，含 10 个模块。网络只经 `HttpFetcher` trait 进入，测试用 FakeHttp 注入。Tauri 命令面未接线。
+
+`tests/m2_engine.rs` 的 9 个端到端测试串起双源、验签、安装、信任、状态与导入：
+
+- 一源不可用时从另一源拉 catalog 并装完；catalog 版本回退、签名被改、两源都不可用都被拒。
+- zip 改一个字节被拒；`files` 清单多一个、少一个、哈希不符都整体拒绝，安装目录不落盘。
+- 删签名段、换签名公钥、发布者指纹变化都判硬拒。未登记公钥先按 B 级处理，TOFU 后升为 A，撤销后重回硬拒。首次本地导入填写的期望指纹不符，或填了指纹却删掉签名段，同样硬拒；没有包外锚时未签名包才走 C 级单次确认。
+- 版本单调只在同 `variant` 内比较；契约不匹配的包不激活；清理保留 active 实例，只标记 `data_dir` 不删。`keep_versions=3`、pinned 与运行中实例的保护有单测。
+- 目录导入不复制源码，HEAD 变化后要求重新确认。源码目录与启动器根目录的路径边界、无 `.git` 时改用快照哈希都有单测。
+
+镜像 crate 里 143 个单测、3 个集成测试与 9 个 M2 端到端测试通过，1 个真 uv 测试仍标 `#[ignore]`。`cargo fmt --check` 与 `cargo clippy --all-targets -- -D warnings` 通过。契约校验器 107 项断言、CI 等价的 ajv schema 编译与状态样例数据级校验通过。
+
+以上只验证逻辑层。真实两源重定向与签名 catalog 分发没有实测。UI 确认框、默认焦点与第三方模块卡片文案也没有实测。这些结果不能当作 [ROADMAP.md](ROADMAP.md) 的真机验收。
+
 ## 待真机或后续里程碑复核
 
 - `uv pip compile --generate-hashes` 对同一输入两次输出是否逐字节一致。generation 哈希依赖这份输出；不一致会让每轮都新建 generation。
