@@ -6,6 +6,7 @@
 pub mod admin_host;
 pub mod env;
 pub mod install;
+pub mod lifecycle;
 pub mod m2;
 pub mod manifest;
 pub mod paths;
