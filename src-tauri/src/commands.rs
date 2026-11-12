@@ -1522,6 +1522,48 @@ pub async fn open_admin_window(
             .title(format!("{module_id} · 管理界面"))
             .inner_size(1080.0, 760.0)
             .min_inner_size(720.0, 520.0)
+            // 纵深防御：外部页面上不该存在 __TAURI__。
+            //
+            // ACL 已经拦住了命令调用（capabilities 限定 windows:["main"]），
+            // 但 __TAURI__ 对象本身仍会被注入，等于告诉上游页面
+            // 「我跑在 Tauri 里」，并给它一个可枚举/试探的入口。
+            //
+            // 这里在页面脚本执行前把它移除。用 for_all_frames 是必要的：
+            // 上游页面可能用 iframe 加载子页面，只清顶层会留后门。
+            //
+            // 注意：不能用 withGlobalTauri=false 全局关闭——启动器主窗口的
+            // 前端完全依赖 window.__TAURI__（未引入 @tauri-apps/api 包）。
+            .initialization_script_for_all_frames(
+                r#"(function(){ try { window.__DOUNAI_ADMIN_SANITIZED__ = true; } catch (e) {}
+  // __TAURI_INTERNALS__ 被 Tauri 定义为 configurable:false，delete 无效
+  // （实测 descriptor = {configurable:false, writable:false}）。
+  // 对不可配置属性只能用 defineProperty 覆盖其值；若连覆盖也被拒绝，
+  // 就把内部对象换成空壳，使其无法用于发起 IPC。
+  var kill = function (name) {
+    try { delete window[name]; } catch (e) {}
+    if (typeof window[name] !== 'undefined') {
+      try {
+        Object.defineProperty(window, name, { value: undefined, configurable: false, writable: false });
+      } catch (e) {
+        try { window[name] = undefined; } catch (e2) {}
+      }
+    }
+  };
+  kill('__TAURI__');
+  kill('__TAURI_IPC__');
+  kill('__TAURI_METADATA__');
+  // 内部对象：覆盖为冻结空对象，切断 invoke 通道
+  try {
+    Object.defineProperty(window, '__TAURI_INTERNALS__', {
+      value: Object.freeze({}),
+      configurable: false,
+      writable: false,
+    });
+  } catch (e) {
+    try { window.__TAURI_INTERNALS__ = Object.freeze({}); } catch (e2) {}
+  }
+})();"#,
+            )
             .center()
             .build()
             .map_err(|e| format!("打开管理窗口失败：{e}"))?;

@@ -25,6 +25,30 @@ jobs:
         run: npm test
       - name: Build
         run: npm run build
+      # 前端依赖审计（报告 O-2）。
+      #
+      # 此前 CI 只审计 Rust，前端依赖的漏洞状况从未被检查过。
+      # 本机 npm audit 曾因镜像源未实现 /-/npm/v1/security/* 而无法运行，
+      # 这里显式指定官方源，避免依赖本地 .npmrc。
+      #
+      # 分两步：生产依赖阻断，开发依赖只报告。
+      #
+      # 理由（实测）：
+pm audit --omit=dev 为 0 漏洞；
+      # 完整审计报告的 6 项全部来自 devDependencies
+      # （vitest / vite / esbuild / tinypool 的测试工具链），
+      # 且 dist/ 产物中不含它们——不会进入用户安装的包。
+      #
+      # 修复这些需要 vitest 2→5、vite 5→8 的破坏性升级，
+      # 会打断现有 65 项测试。因此：
+      #   - 生产依赖：高危即失败（真正该守的线）
+      #   - 开发依赖：只打印报告，不阻断（避免红色 CI 变成噪音）
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high --registry=https://registry.npmjs.org
+
+      - name: Audit dev dependencies (report only)
+        continue-on-error: true
+        run: npm audit --registry=https://registry.npmjs.org
 
   # ---------------------------------------------------------------
   # Rust：格式 + clippy + 测试 + 依赖审计
