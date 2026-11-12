@@ -10,12 +10,15 @@ pub mod download;
 pub mod env_probe;
 pub mod http_client;
 pub mod install;
+pub mod lifecycle_ops;
 pub mod lifecycle_runtime;
+pub mod m2_http;
 pub mod module_probe;
 pub mod process;
 pub mod release;
 pub mod runtime;
 pub mod state;
+pub mod state_v2;
 pub mod trust;
 
 // 供应链安全、路径与管理页宿主契约住在 launcher-core。
