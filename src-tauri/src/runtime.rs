@@ -215,6 +215,18 @@ impl ProcessManager {
             .stderr(Stdio::null())
             .stdin(Stdio::null());
 
+        // Windows 上启动控制台程序（python.exe 等）时，系统会默认给子进程
+        // 分配一个新的控制台窗口。由于上面已把输出全部丢弃，那个窗口是**空的**，
+        // 纯粹是副作用：既无信息量，还会在桌面/任务栏留下一个黑框。
+        //
+        // CREATE_NO_WINDOW 让子进程完全不分配控制台。这比"最小化"更彻底
+        // （窗口根本不创建），且因为输出本来就是 null，不会丢失任何信息。
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+
         let child = cmd.spawn().map_err(|e| StartError::Spawn(e.to_string()))?;
         let pid = child.id();
 
@@ -585,11 +597,20 @@ pub fn http_ok(url: &str, timeout: Duration) -> bool {
     ok_status && has_body
 }
 
+/// 创建子进程时不分配控制台窗口。
+///
+/// Windows 上启动控制台程序（python.exe / taskkill 等）默认会给子进程
+/// 分配一个新控制台，表现为桌面/任务栏闪一个黑框。加此标志后窗口不创建。
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 #[cfg(windows)]
 fn graceful_kill(pid: u32) {
     // 不带 /F：先请求正常退出
+    use std::os::windows::process::CommandExt;
     let _ = Command::new("taskkill")
         .args(["/PID", &pid.to_string()])
+        .creation_flags(CREATE_NO_WINDOW)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
@@ -598,8 +619,10 @@ fn graceful_kill(pid: u32) {
 #[cfg(windows)]
 fn force_kill_tree(pid: u32) {
     // /T 终止整棵进程树，/F 强制
+    use std::os::windows::process::CommandExt;
     let _ = Command::new("taskkill")
         .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .creation_flags(CREATE_NO_WINDOW)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
