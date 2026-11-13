@@ -230,7 +230,7 @@ zip 根下放 `manifest.json` 与模块文件。签名放 manifest 的 `signatur
 2. 用 `peek_manifest_from_zip` 读 manifest，不落盘。
 3. 判定信任结果。需确认的走确认框，硬拒的立即终止。
 4. 解压到 staging。保留现有两遍路径与符号链接检查，补解压前按 zip 元数据算总大小上限。
-5. 逐文件核 `files` 哈希。多一个、少一个、不符都回滚。路径统一用 `/`，禁 `..`、绝对路径、反斜杠与 Windows 保留名。
+5. 逐文件核 `files` 哈希。多一个、少一个、不符都回滚。路径统一用 `/`，禁 `..`、绝对路径、反斜杠与 Windows 保留名；点开头的文件名（`.gitignore`、`.env.example`）允许，因为上游仓库普遍带这类开发配置，禁掉只会让打包方在装包时才收到报错。这条规则只有一份：`core::m2::manifest::validate_relative_path`，`pack` 工具的 `safe_package_path` 直接调用它，打包与安装不会各判一套。
 6. 提交事务。启动前再核入口文件哈希，堵住验签与 spawn 之间的 TOCTOU。
 
 `files` 只为 zip 发布包服务，由 `pack` 工具生成。目录实例不校验 `files`，也不参与信任判定。字段在 manifest v2 里一律存在，目录实例可用空对象，这样两种来源共用一份 schema。

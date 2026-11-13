@@ -330,3 +330,22 @@ SourceForge 上传通道已实测。2026-11-13 用本机 SSH 公钥通过 `tonyj
 门禁：`npm run typecheck`、`npm test` 65 项、`vite build` 通过。截图核对（无头 Chrome 1200×780，深浅两套）确认投放区、检查结果与两处路径输入框的排版正常。
 
 未实测：真机拖拽事件与高亮。无头浏览器不产生 OS 级拖拽，这段只能在装好的启动器里验证。
+
+## 自打包装不上自己的包：包内路径两套规则（2026-11-13）
+
+现象：导入 `dounai-input-0.2.1.zip` 时界面报「读包失败：契约数据不合法：非法的包内路径：.dockerignore」。
+
+根因不是包坏了，是两处规则各写了一套：
+
+- `core::m2::manifest::validate_relative_path` 要求每个包内路径**首字符是字母或下划线**，安装与检查都走它，`.dockerignore` 直接拒；
+- `release::safe_package_path` 是打包侧另一套，字符白名单里含 `.`，`release.rs` 的测试里还明确断言 `.gitignore` **应当通过**。
+
+于是 `pack` 打出的包天然过不了 `pack` 自己的校验，只是打包后那次自检走的是 `verify_zip`，没经过清单解析，所以没暴露。任何带 `.gitignore`、`.dockerignore`、`.env.example` 的上游仓库都会踩。
+
+修法：规则收敛到一处。`validate_relative_path` 改为按段校验——空路径、反斜杠、控制字符、首尾斜杠、空段与 `.`/`..` 一律拒，绝对路径、盘符与 Windows 保留名交给 `security::safe_join`，点开头的名字放行；`release::safe_package_path` 不再自己实现，直接调用 core 那个函数并转换错误类型。安全性没有下降：拦穿越的是 `safe_join`，首字符限制从来没负责过这件事。
+
+单测：core 新增 `relative_paths_accept_dot_files`、`relative_paths_reject_traversal_and_devices`、`manifest_parses_when_files_contain_dot_names`；app 侧把 `unsigned_package()` 改成带 `.gitignore` 的包，`local_package_needs_confirmation_then_installs` 因此覆盖了「点开头文件能装进去」。另用临时集成测试把三个真实包（77 / 69 / 104 个文件）过了一遍清单解析，确认全部通过后已删除该测试文件。
+
+门禁：core 155 项、app lib 102 项、`clippy --all-targets -- -D warnings`、契约 109 项通过。
+
+未实测：真机重新导入这三个包并启动模块。规则层已证明可通过，端到端仍要在界面上点一次。
