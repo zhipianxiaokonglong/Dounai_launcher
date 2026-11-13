@@ -13,11 +13,15 @@ import {
   confirmTrustedKey,
   setChildOutput,
   setKeepVersions,
+  storageFacts,
   type CatalogResponse,
+  type StorageFacts,
 } from "../../bridge.js";
 import { confirmModal, esc, openModal, toast } from "../dom.js";
 import { icon } from "../icons.js";
 import { describeError, refreshSettings, store } from "../store.js";
+import { humanBytes } from "../loglines.js";
+import { startTour } from "../tour.js";
 import { currentThemeMode, setThemeMode, type ThemeMode } from "../theme.js";
 import type { ViewSlots } from "./modules.js";
 
@@ -45,7 +49,15 @@ function renderHead(head: HTMLElement): void {
       <h1>设置</h1>
       <div class="sub">launcher ${esc(__APP_VERSION__)} · schema v2</div>
     </div>
+    <div class="sp">
+      <button class="btn btn--sm" type="button" data-act="start-tour">走一遍引导</button>
+    </div>
   `;
+  // 放在页头而不是某个 tab 里：设置页默认停在「外观」，藏在末尾「诊断」
+  // 分组的按钮基本没人找得到。页头在五个分组下都可见。
+  head.querySelector('[data-act="start-tour"]')?.addEventListener("click", () => {
+    startTour();
+  });
 }
 
 function renderBody(body: HTMLElement): void {
@@ -228,6 +240,11 @@ function storageHtml(): string {
       `<p class="cap" style="margin:0">目录实例指向你自己的文件夹。启动器只登记路径，卸载时不会删除文件。</p>`,
     ) +
     row(
+      "磁盘占用",
+      "解压后的大小",
+      `<div id="storage-usage"><p class="cap" style="margin:0">正在统计…</p></div>`
+    ) +
+    row(
       "清理",
       "先停进程再删",
       `<div><button class="btn btn--sm" type="button" data-act="goto-env">到环境页清除本地数据…</button></div>`,
@@ -277,7 +294,18 @@ function networkHtml(): string {
 
 function diagnosticsHtml(): string {
   const env = store.env;
+  const onboarded = store.onboarding;
   return (
+    row(
+      "入门引导",
+      onboarded?.completed ? (onboarded.skipped ? "上次是中途关掉" : "已走完") : "还没走过",
+      `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <span class="chip ${onboarded?.completed && !onboarded.skipped ? "chip--run" : "chip--stop"}">${
+          onboarded?.completed ? (onboarded.skipped ? "已跳过" : "已完成") : "未完成"
+        }</span>
+      </div>
+      <p class="cap" style="margin:6px 0 0">引导是聚光灯，指着真实界面讲，不挡点击——可以边看边装、边改设置。想重看就点页头「走一遍引导」；自动弹出只发生在「没走过」且「一个实例都没装」时。</p>`
+    ) +
     row(
       "日志",
       "每实例一份",
@@ -432,6 +460,10 @@ function bindSection(form: Element): void {
     window.dispatchEvent(new CustomEvent("dounai:navigate", { detail: "env" }));
   });
 
+  // 存储占用要遍历数据根，几十毫秒到几百毫秒。先渲染占位，回来再填，
+  // 不让整个设置页等一次全盘扫描。
+  if (form.querySelector("#storage-usage")) void fillStorageUsage();
+
   form.querySelector('[data-act="dev-mode"]')?.addEventListener("click", () => {
     void openDevMode();
   });
@@ -451,6 +483,35 @@ function bindSection(form: Element): void {
   form.querySelector('[data-act="goto-import"]')?.addEventListener("click", () => {
     window.dispatchEvent(new CustomEvent("dounai:navigate", { detail: "import" }));
   });
+}
+
+async function fillStorageUsage(): Promise<void> {
+  const host = document.getElementById("storage-usage");
+  if (!host) return;
+  let facts: StorageFacts;
+  try {
+    facts = await storageFacts();
+  } catch (error) {
+    host.innerHTML = `<p class="cap" style="margin:0">读不到占用：${esc(describeError(error))}</p>`;
+    return;
+  }
+  const parts: Array<[string, number]> = [
+    ["数据根", facts.data_bytes],
+    ["解释器", facts.python_bytes],
+    ["依赖缓存", facts.cache_bytes],
+  ];
+  host.innerHTML = `
+    <div class="usage">
+      ${parts
+        .map(
+          ([label, bytes]) =>
+            `<span class="usage-i"><i>${esc(label)}</i><b>${esc(humanBytes(bytes))}</b></span>`,
+        )
+        .join("")}
+      <span class="usage-i"><i>实例</i><b>${facts.instances}</b></span>
+    </div>
+    <p class="cap usage-path" title="${esc(facts.data_root)}">${esc(facts.data_root)}</p>
+  `;
 }
 
 /**

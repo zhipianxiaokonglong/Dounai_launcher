@@ -1542,6 +1542,179 @@ select.input:focus-visible {
 
 /* ---------------- 模态 ---------------- */
 
+/* ---------------- 入门引导 ---------------- */
+
+/*
+  层级放在模态之下（overlay 是 60）：用户在引导里点开一个确认框时，
+  模态要盖在引导之上正常可用，而不是被引导的暗色遮罩压住。
+*/
+#tour {
+  position: fixed;
+  inset: 0;
+  z-index: 55;
+  /* 整层点击穿透：用户要能边看边配，这是与被换掉的四屏向导最大的区别。 */
+  pointer-events: none;
+}
+
+#tour[hidden] {
+  display: none;
+}
+
+/*
+  挖洞靠一亿像素的 box-shadow 画暗区，而不是四条遮罩拼出来：
+  目标移动时只要改这个盒子的位置，暗区自动跟着走，不用同步四个元素。
+*/
+.tour-hole {
+  position: fixed;
+  border-radius: 8px;
+  outline: 1px solid rgba(76, 141, 255, 0.55);
+  box-shadow: 0 0 0 9999px rgba(6, 10, 18, 0.62);
+  pointer-events: none;
+  transition:
+    top 0.16s ease-out,
+    left 0.16s ease-out,
+    width 0.16s ease-out,
+    height 0.16s ease-out;
+}
+
+.tour-hole[hidden] {
+  display: none;
+}
+
+.tour-pop {
+  position: fixed;
+  width: 344px;
+  max-width: calc(100vw - 24px);
+  background: var(--panel);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-l);
+  padding: 12px 14px 10px;
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.42);
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  transition:
+    top 0.16s ease-out,
+    left 0.16s ease-out;
+}
+
+/*
+  无目标步骤与目标丢失时居中。只留视觉差异：坐标由 JS 按可见视口算好写进
+  style，这里不能再写 `top/left: 50%`——百分比跟着 layout viewport 走，
+  WebView 冷启动尺寸没同步时会把气泡放到窗口外。
+*/
+.tour-pop.is-center {
+  box-shadow: 0 28px 70px rgba(0, 0, 0, 0.55);
+}
+
+.tour-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.tour-count {
+  font: 400 10.5px var(--mono);
+  color: var(--fg-3);
+  letter-spacing: 0.02em;
+}
+
+.tour-dots {
+  display: flex;
+  gap: 4px;
+}
+
+.tour-dots i {
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--stop-weak);
+}
+
+.tour-dots i.is-on {
+  background: var(--accent);
+}
+
+.tour-dots i.is-past {
+  background: var(--run);
+}
+
+.tour-x {
+  margin-left: auto;
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: var(--r-s);
+  background: transparent;
+  color: var(--fg-3);
+  font: 400 15px/1 var(--sans);
+  cursor: pointer;
+}
+
+.tour-x:hover {
+  background: var(--panel-3);
+  color: var(--fg);
+}
+
+.tour-title {
+  font: 500 13.5px/1.5 var(--sans);
+  color: var(--fg);
+}
+
+.tour-body {
+  margin: 0;
+  font: 400 12px/1.75 var(--sans);
+  color: var(--fg-2);
+}
+
+.tour-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.tour-foot .sp {
+  margin-left: auto;
+}
+
+.tour-foot .btn[disabled] {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* 设置页的占用统计 */
+.usage {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+}
+
+.usage-i {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  font: 400 11.5px var(--sans);
+}
+
+.usage-i i {
+  color: var(--fg-3);
+  font-style: normal;
+}
+
+.usage-i b {
+  font: 400 11.5px var(--mono);
+  color: var(--fg);
+}
+
+.usage-path {
+  margin: 6px 0 0;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  word-break: break-all;
+}
+
 #overlay {
   position: fixed;
   inset: 0;
@@ -1626,111 +1799,6 @@ select.input:focus-visible {
   accent-color: var(--accent);
 }
 
-/* ---------------- 向导 ---------------- */
-
-.wiz {
-  display: grid;
-  grid-template-columns: 208px 1fr;
-  width: 720px;
-  max-width: 100%;
-  height: 470px;
-  max-height: 100%;
-  background: var(--panel);
-  border: 1px solid var(--line-2);
-  border-radius: var(--r-l);
-  overflow: hidden;
-}
-
-.wsteps {
-  border-right: 1px solid var(--line);
-  padding: 16px 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  background: var(--rail);
-}
-
-.wstep {
-  display: flex;
-  gap: 9px;
-  align-items: center;
-  padding: 6px 8px;
-  border-radius: var(--r-s);
-  font-size: 11.5px;
-  color: var(--fg-3);
-}
-
-.wstep .n {
-  width: 17px;
-  height: 17px;
-  border-radius: 50%;
-  border: 1px solid var(--line-2);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-family: var(--mono);
-  font-size: 9.5px;
-  flex: 0 0 auto;
-}
-
-.wstep.is-done .n {
-  border-color: rgba(34, 197, 94, 0.5);
-  color: var(--run-fg);
-  background: rgba(34, 197, 94, 0.1);
-}
-
-.wstep.is-now {
-  background: var(--panel-2);
-  color: var(--fg);
-}
-
-.wstep.is-now .n {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: var(--accent-soft);
-}
-
-.wmain {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-
-.wpanel {
-  padding: 22px 24px;
-  overflow: auto;
-  flex: 1;
-  min-height: 0;
-}
-
-.wpanel h2 {
-  margin: 0 0 4px;
-  font-size: 16px;
-  font-weight: 500;
-}
-
-.wpanel .lead {
-  font-size: 12.5px;
-  color: var(--fg-2);
-  margin: 0 0 16px;
-  line-height: 1.65;
-}
-
-.wfoot {
-  height: 56px;
-  flex: 0 0 auto;
-  border-top: 1px solid var(--line);
-  background: var(--rail);
-  display: flex;
-  align-items: center;
-  padding: 0 20px;
-  gap: 10px;
-}
-
-.wfoot .sp {
-  margin-left: auto;
-}
-
 /* ---------------- toast ---------------- */
 
 .toast {
@@ -1788,6 +1856,7 @@ select.input:focus-visible {
   .logsearch {
     width: 150px;
   }
+
 }
 
 /* 拖拽投放区：整块都是投放目标，不只输入框。 */

@@ -11,12 +11,14 @@ import {
   isDesktop,
   listInstanceViews,
   probeEnvironmentCmd,
+  onboardingState,
   settingsSnapshot,
   trustInfo,
   devModeStatus,
   BridgeUnavailableError,
   type EnvPhaseName,
   type EnvProgressEvent,
+  type OnboardingState,
   type InstanceRuntimeView,
   type RustEnvReport,
   type SettingsSnapshot,
@@ -48,6 +50,8 @@ export interface Store {
   envCheckedAt: Date | null;
   settings: SettingsSnapshot | null;
   trust: TrustInfo | null;
+  /** 入门引导是否走过；设置页据此写「已完成 / 已跳过」。 */
+  onboarding: OnboardingState | null;
   devMode: boolean;
   /** 依赖安装的进行中/失败状态，按 instance_id 存。 */
   envJobs: Record<string, EnvJob>;
@@ -59,6 +63,7 @@ export const store: Store = {
   envCheckedAt: null,
   settings: null,
   trust: null,
+  onboarding: null,
   devMode: false,
   envJobs: {},
 };
@@ -96,11 +101,17 @@ export async function refreshSettings(): Promise<void> {
   if (!isDesktop()) {
     store.settings = null;
     store.trust = null;
+    store.onboarding = null;
     return;
   }
-  const [snapshot, trust] = await Promise.all([settingsSnapshot(), trustInfo()]);
+  const [snapshot, trust, onboarding] = await Promise.all([
+    settingsSnapshot(),
+    trustInfo(),
+    onboardingState(),
+  ]);
   store.settings = snapshot;
   store.trust = trust;
+  store.onboarding = onboarding;
 }
 
 export async function refreshDevMode(): Promise<void> {

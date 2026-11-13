@@ -6,7 +6,12 @@
  * 没有「后退到上一页」的语义，浏览器历史只会让 Backspace 误触。
  */
 
-import { isDesktop, onEnvProgress, onLifecycleChanged } from "../bridge.js";
+import {
+  completeOnboarding,
+  isDesktop,
+  onEnvProgress,
+  onLifecycleChanged,
+} from "../bridge.js";
 import { esc, must, toast } from "./dom.js";
 import { initTheme } from "./theme.js";
 import {
@@ -24,6 +29,7 @@ import { renderImport } from "./views/import.js";
 import { disposeLogs, focusInstance, renderLogs } from "./views/logs.js";
 import { patchEnvJob, refreshModules, renderModules } from "./views/modules.js";
 import { renderSettings } from "./views/settings.js";
+import { startTour } from "./tour.js";
 
 type ViewId = "modules" | "env" | "logs" | "settings" | "import";
 
@@ -183,6 +189,22 @@ async function boot(): Promise<void> {
     toast(`部分状态没有读到：${describeError(failure.reason)}`, "error");
   }
   await renderView(current);
+
+  // 引导放在最后：等实例表回来才知道该不该弹（装过模块的人不用看）。
+  void maybeStartTour();
+}
+
+/**
+ * 首次是否自动弹引导。
+ *
+ * 三个条件必须同时成立：桌面端、没看过、一个实例都没装。第三条是给老用户的
+ * ——升级后已经装过模块的人不需要再被教一遍「模块是什么」，想看就去设置页。
+ */
+async function maybeStartTour(): Promise<void> {
+  if (!isDesktop()) return;
+  if (store.onboarding?.completed) return;
+  if (store.views.length > 0) return;
+  startTour();
 }
 
 /** 生命周期推送：模块页整页刷新，其它页只更新计数与状态栏。 */
@@ -217,6 +239,17 @@ function wireEvents(): void {
   });
 
   window.addEventListener("dounai:views-updated", () => updateChrome());
+
+  // 引导结束时落盘：走完与跳过的区别只体现在 skipped 上，两者都不再自动弹。
+  window.addEventListener("dounai:tour-done", (event) => {
+    const skipped = Boolean((event as CustomEvent<unknown>).detail);
+    void completeOnboarding(skipped)
+      .then((next) => {
+        store.onboarding = next;
+        window.dispatchEvent(new CustomEvent("dounai:settings-updated"));
+      })
+      .catch(() => undefined);
+  });
 
   window.addEventListener("dounai:settings-updated", () => {
     void refreshSettings()

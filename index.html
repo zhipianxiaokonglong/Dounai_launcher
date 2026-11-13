@@ -57,8 +57,14 @@
       <footer class="sbar" id="sbar"></footer>
     </div>
 
-    <!-- 模态与向导都挂在这里，避免各视图各自持有一份遮罩 -->
+    <!-- 模态挂在这里，避免各视图各自持有一份遮罩 -->
     <div id="overlay" hidden></div>
+
+    <!--
+      入门引导是独立一层，不复用 #overlay：模态会把它清空，而引导要在
+      模态之上、且允许点击穿透（用户边看边配）。层级由 CSS 的 z-index 定。
+    -->
+    <div id="tour" hidden></div>
 
     <div id="toast" class="toast" hidden role="status" aria-live="polite"></div>
 

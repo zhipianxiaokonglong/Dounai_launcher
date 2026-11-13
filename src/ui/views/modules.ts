@@ -50,32 +50,8 @@ import {
   store,
   type EnvJob,
 } from "../store.js";
+import { ROLE_DESC, ROLE_ORDER, ROLE_SHORT, ROLE_TITLE } from "../roles.js";
 
-const ROLE_ORDER: Role[] = ["input", "llm", "output", "shell", "auxiliary"];
-
-const ROLE_TITLE: Record<Role, string> = {
-  input: "输入",
-  llm: "模型",
-  output: "输出",
-  shell: "总装",
-  auxiliary: "旁路",
-};
-
-const ROLE_SHORT: Record<Role, string> = {
-  input: "in",
-  llm: "llm",
-  output: "out",
-  shell: "sh",
-  auxiliary: "aux",
-};
-
-const ROLE_DESC: Record<Role, string> = {
-  input: "输入接入层：把麦克风、文本与图像送进模型层。",
-  llm: "模型编排层：推理、上下文与情绪标签。",
-  output: "输出表达层：把模型输出合成为语音。",
-  shell: "总装与界面：本地 exe，不占用固定端口。",
-  auxiliary: "旁路模块：不进组装层事件流，端口由启动器动态分配。",
-};
 
 /** 渲染上下文：页头与正文容器由外壳传入。 */
 export interface ViewSlots {
