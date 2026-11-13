@@ -125,12 +125,17 @@ M3 结束时 v1 的进程管理、状态库与命令面已全部删除。下表�
 | `state.rs` 的 `StateStore` | 已删除 | 由 `state_v2.rs` 的 `AppStateV2` 与 `state/installed.json` 取代 |
 | `commands.rs` 旧命令体 | 已删除 | 由 `commands_v2.rs` 的 21 个同名命令取代，另加 11 个 v2 命令 |
 | `tests/` 六份 v1 集成测试 | 已删除 | 断言绑死 v1 状态格式，不再适用 |
-| `install.rs` 安装事务 | 保留 | `fuzz_invariants` 依赖 `extract_zip_into` 与 `InstallTransaction`；v2 安装走 `m2::package::install_package` |
+| `install.rs` 安装事务 | 已删除 | 产品侧零调用；`fuzz_invariants` 已改压 `m2::package::{verify_zip, install_package}`，并补了一条「真实包落盘后目标目录外无产物」的正向用例 |
+| `catalog.rs` 旧解析与白名单 | 已删除 | 不验签、可回退磁盘缓存，与「只认本次会话验签过的 doc」直接冲突；解析 fuzz 已改压 `CatalogDocument::parse` |
+| `trust.rs` 二态策略 | 已删除 | 零调用；判级在 `core::m2::trust::classify`（A/B/C/D 四级） |
+| `module_probe.rs` | 已删除 | 零调用；第三个手写 HTTP 客户端，管理页地址改由 `roles` 的规范端口拼 |
+| `download.rs` / `http_client.rs` | 保留，接在线安装 | 断点续传、镜像回退与 sha256 校验仍在用；命令面收敛成 `install_from_catalog` 一条，不再暴露裸 `download_package` |
 | `security.rs` / `signature.rs` | 保留重导出 | `fuzz_invariants` 与 `sign_real_manifests` 依赖；v2 验签走 `m2::manifest` 与 core `signature` |
-| `download.rs` / `http_client.rs` | 复用 | `download_package` 沿用断点续传、镜像回退与 sha256 校验 |
-| `catalog.rs` / `trust.rs` | 保留只读 | v2 的 catalog 裁决与信任判定在 `m2::catalog` 与 `m2::trust` |
-| `env_probe.rs` / `module_probe.rs` | 保留 | 只读体检与回环地址推导 |
-| `src/ui/main.ts` | 留 M4 重做 | 命令名与返回形状保持 v1，界面暂不改动 |
+| `core/src/admin_host.rs` | 保留 | M0 冻结契约，M4 的内嵌子 WebView 要用；当前只有独立窗口实现，删了等于让 M4 重新推一遍 |
+| `src/manifest.ts` + `manifests/` | 已删除 | v1 schema（module_id 无 namespace），与实例的 v2 id 永不相等，查表恒落空；展示名与 `admin_ui` 改由 `list_instance_views` 提供 |
+| `src/bundle.ts` + `bundles/` + 套装页 | 已删除 | 数据模型是 v1 的 module_id 列表，安装单位为 `module_id@variant`；「开始安装」一直是 disabled，删除后导航变五个视图 |
+| `src/localinstall.ts` | 已删除 | base64 IPC 装包通道；v2 传路径由 Rust 读文件 |
+| `env_probe.rs` | 保留 | 只读体检 |
 | `bin/sign_manifests.rs` | 已删除，替换为 `pack.rs` 与 `sign_catalog.rs` | 原工具只签单个 JSON，无 `files` 清单、无打包，没有给 catalog 签名的工具 |
 | `tauri.conf.json` | 分两步改 | `unstable` 与固定版本已在 M0 落到 `Cargo.toml`，升级检查清单见 [TAURI_UPGRADE.md](TAURI_UPGRADE.md)；`nsis.installMode`、`webviewInstallMode` 与 `installerHooks` 留 M5 |
 
@@ -193,7 +198,7 @@ venv 也按 generation 分目录，路径是 `instances/<instance_key>/venvs/<sh
 
 启动器选一源拉索引、验签、按 URL 下包、验包哈希，不需要理解发布平台的 API。
 
-已知约束：GitHub REST API 未认证时每小时每 IP 限 60 次，不能每次启动查 `/releases/latest`；asset 会重定向，白名单要覆盖目标域名。SourceForge 的 `/download` 跳动态镜像域名，没有稳定 host，改用域名后缀集加逐跳重定向校验，最终以 sha256 为准。当前确定使用 SourceForge，GitHub 适配器保留但未启用。
+已知约束：GitHub REST API 未认证时每小时每 IP 限 60 次，不能每次启动查 `/releases/latest`；asset 会重定向，白名单要覆盖目标域名。SourceForge 的下载域现在**全链路 302**：`master.dl`/`downloads.sourceforge.net` 跳 `xxx.dl.sourceforge.net`，没有稳定 host。处理方式是「逐跳跟随 + 每跳都校验域名后缀」，上限 5 跳，任何一跳落在白名单外立即中止；最终仍以 sha256 为准。实现见 `m2_http.rs` 与 `http_client.rs`：两处都必须手动跟跳，用 reqwest 的自动跟随会因为看不到中间跳而绕过白名单。当前确定使用 SourceForge，GitHub 适配器保留为第二源但目录未上传。
 
 `SourceAdapter` 按 catalog URL 注册，官方两源内置，第三方源由用户在设置里显式添加 URL 后生效。添加源不需要配置源公钥，信任来自包内签名。接口与不变式见 [contracts/source-adapter-v1.md](../contracts/source-adapter-v1.md)。
 
@@ -210,7 +215,23 @@ catalog 用 K5 签名，签的是索引、版本单调性与新鲜度。K1 只�
 
 私钥离线保管，不进 CI 变量、不入库。GitHub token 只允许用户在设置里自填，绝不内置。
 
-K1 与 K5 均已于 2026-11-13 生成并内置，规程见 [SIGNING.md](SIGNING.md)。模块包托管在 SourceForge 的 `dounai-releases` 项目，官方 catalog 尚未签发，远程分发未启用。
+K1 与 K5 均已于 2026-11-13 生成并内置，规程见 [SIGNING.md](SIGNING.md)。
+
+远程分发已于 2026-11-13 接通，链路固定为：
+
+```
+模块目录（模块页 → 右上「模块目录」）
+  ① refresh_catalog("")           内置源，空串即用 https://downloads.sourceforge.net/project/dounai-releases
+  ② 逐源验签（K5）→ select_catalog 裁决序号与新鲜度 → 会话内缓存
+  ③ install_from_catalog(id, variant, confirm=false)
+       按目录条目取 sources → 逐条 validate_download_url → download（断点续传/重试/哈希）
+       大小与目录声明比对 → commit_install（同一条本地包安装链路）
+  ④ 需要确认的 B/C 类包由 Rust 拒绝并说明原因，界面把同一按钮改成「确认并安装」再带 true 重试
+```
+
+三处用的是**同一个** sha256 与 size：目录条目、下载校验、安装校验。界面不负责判断可信，只负责把用户的决定回传。下载到的包落在 `<data_root>/downloads/<module_id_>@<variant>.zip`，重装与离线排障可以直接复用。
+
+catalog 有效期上限 7 天，过期后 `refresh_catalog` 会返回不可用并说明原因，不会把过期目录当成功结果展示；回退只允许回退**本次会话内已验签过**的 doc。
 
 ### 7.3 包信任
 
@@ -224,7 +245,7 @@ zip 根下放 `manifest.json` 与模块文件。签名放 manifest 的 `signatur
 2. 算该公钥的 SHA-256 指纹，查信任列表。
 3. `signature.pubkey` 自己验不通时硬拒，不给确认入口。
 
-`key_id` 与 `publisher.name` 只作展示。指纹一律从签名公钥字节推出，不让包自述。`trust.rs` 因此从“遍历已配公钥验签”改成“包内公钥验签加指纹白名单”。四级结果的分流见 [SECURITY.md](SECURITY.md) 的安全边界。
+`key_id` 与 `publisher.name` 只作展示。指纹一律从签名公钥字节推出，不让包自述。信任判定因此从 v1 的“遍历已配公钥验签”（`trust.rs`，已删除）改成“包内公钥验签加指纹白名单”（`core::m2::trust`）。四级结果的分流见 [SECURITY.md](SECURITY.md) 的安全边界。
 
 安装顺序如下：
 
@@ -323,7 +344,7 @@ M3 已按 role 拓扑启动、Job Object 托管与异步探测重写生命周期
 
 管理页看起来像启动器自带的页面，容易让人误解密钥归属。启动器主 UI 要渲染一条常驻横幅，写明边界。
 
-实现状态（2026-11-13 重写）：界面分为骨架、共享层与六个视图。`index.html` 只放左侧栏、页头、正文容器、状态栏与模态挂点；`styles/app.css` 存两套语义令牌；`src/ui/main.ts` 做内存路由与全局刷新。六个视图在 `src/ui/views/`：模块、套装、环境、日志、设置、导入本地。共享层三件：`store.ts` 管数据与派生查询，`dom.ts` 管转义、toast 与模态，`theme.ts` 管深浅切换。
+实现状态（2026-11-13 重写）：界面分为骨架、共享层与五个视图。`index.html` 只放左侧栏、页头、正文容器、状态栏与模态挂点；`styles/app.css` 存两套语义令牌；`src/ui/main.ts` 做内存路由与全局刷新。五个视图在 `src/ui/views/`：模块、环境、日志、设置、导入本地。原「套装」页已删除：它按 v1 的 `module_id` 列表规划安装，而 v2 的安装单位是 `module_id@variant`，页面上的「开始安装」从来没接通。在线安装改放在模块页的「模块目录」弹窗里，见 7.7。共享层三件：`store.ts` 管数据与派生查询，`dom.ts` 管转义、toast 与模态，`theme.ts` 管深浅切换。
 
 数据只认一处来源：实例与端口取 `list_instance_views`，环境取 `probe_environment`，信任表与保留数取 `settings_snapshot`。界面层不推算端口、不拼指纹，避免与后端分叉。
 

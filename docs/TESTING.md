@@ -224,7 +224,7 @@ M3 代码落在四处：core 的 `lifecycle/` 纯逻辑、app 的 `process/win.r
 3. `switch_active` 已按 `activation_steps` 执行停旧、起新、探测、提交与回滚。限制有两条：目标实例由外部进程提供时直接拒绝（验不了契约、也无法回滚）；目标已是 active 且在跑时只重新探测，不重启进程。
 4. 卸载的 `remove_files` 会清包目录、venv 与日志，`data_dir` 按契约保留；`purge_local_data` 先停托管实例再删目录，外部实例停不掉，跳过并记进 `errors`。
 5. `purge_local_data` 的 `state` 只重置 catalog 水位，保留实例表，与 v1 的清状态语义不同。
-6. `list_module_states` 仍按 `module_id` 返回单行，多实例细节走 `list_instances`。
+6. 实例视图只走 `list_instance_views`：它已内嵌生命周期快照、端口、active、prepared 与清单摘要（`name`/`admin_ui`），`list_module_states` 与 `list_instances` 已删除。
 
 ## M3 收尾四项（2026-11-13）
 
@@ -387,3 +387,58 @@ Tauri 的同步命令在主线程执行。`start_all` 对每个实例先做端�
 门禁：app lib 103 项、core 155 项、契约 109 项、`tsc`、`npm test` 65 项、`vite build`、`clippy -D warnings` 通过。深浅两套截图核对过菜单、依赖未装状态与实例行排版。
 
 未实测：真机点「安装依赖」跑通 `uv sync`、以及三个实例真起来后的健康检查；无头浏览器造不出子进程与系统对话框。
+
+## 遗留代码清理与在线安装接通（2026-11-13）
+
+这一轮先做了只读审计，再按「零引用 → 有测试引用 → 数据模型」的顺序改，每一步都跑门禁。
+
+**一、删掉的死代码**
+
+`install.rs`（v1 安装事务）、`catalog.rs`（v1 清单解析，不验签且可回退磁盘缓存）、`trust.rs`（二态信任策略）、`module_probe.rs`（第三个手写 HTTP 客户端）、`src/localinstall.ts`（base64 装包通道）在审计里都已没有产品侧调用者。删前把 `fuzz_invariants` 的不变量搬到 v2 活路径上：
+
+- 任意字节不 panic → `verify_zip`，并新增「验包阶段不落盘」的断言；
+- 恶意条目名整体拒绝 → `verify_zip`，另加一条**正向**用例：用 `valid_package()` 造一个字段完整、`files` 哈希正确的包，走 `install_package` 落盘，断言目标目录的父目录下只多出目标目录本身。没有这条，「全部拒绝」也能让 fuzz 通过；
+- `parse_catalog` 不 panic → `CatalogDocument::parse`。
+
+`install.rs` 一删，`base64_decode` 与 `install_module` 就近失去了唯一调用者，一起收掉。
+
+**二、删掉的死命令**
+
+`list_module_states`、`install_module`、`list_instances`、`hash_file`、`get_lifecycle_snapshot`、`download_package` 六个命令在注册表里，但界面零调用。逐个确认后删除；`ModuleView` / `InstallStateView` / `InstallResponse` 三个 DTO 保留，`add_local_module` 与 `install_local_package` 仍在用。`admin_host` **没删**：它是 M0 冻结契约，M4 的内嵌子 WebView 要用，删了等于让 M4 重新推一遍。
+
+**三、SourceForge 全链路 302**
+
+接通在线安装时先撞到这一条：`master.dl.sourceforge.net` → `downloads.sourceforge.net` → `zenlayer.dl.sourceforge.net`，每一跳都是 301/302。原先两个客户端都是 `redirect: none` 且把 3xx 当错误，于是**目录和包都取不到**。
+
+修法：两处都改成手动跟跳，每跳校验 host 是否仍落在 `ALL_HOST_SUFFIXES` 内，上限 5 跳。用 reqwest 的自动跟随不行——看不到中间跳，等于绕过白名单。
+
+**四、清单数据模型对不上，管理页按钮永远不出现**
+
+`manifests/*.json` 是 v1 清单：`module_id` 是 `dounai-input`，而实例是 `dounai/dounai-input`；`store.manifests` 用前者建键，`manifestOf(instance.module_id)` 于是恒为 null。连带三处症状：卡片描述退化、**「打开管理界面」按钮永不渲染**、未安装清单把已装模块又列一遍。
+
+修法：`InstanceRuntimeView` 增加 `name` 与 `admin_ui`（读自模块根 manifest 的 `admin_ui.web_ui`），前端不再自备一份清单；`manifests/`、`src/manifest.ts`、`tests/admin-ui.test.ts` 与未安装清单一起删除。`sign_real_manifests.rs` 改指 `contracts/examples/*.v2.json`，并补上 v2 必填字段与 `module_id` 必须含一个 `/` 的断言。
+
+**五、套装页删除，在线安装改放模块目录**
+
+套装页的数据是 v1 的 `module_id` 列表，安装单位是 `module_id@variant`，「开始安装」一直是 disabled。按决定删掉整套功能（`bundle.ts`、`bundles/*.json`、`views/bundles.ts`、导航入口、对应测试），视图由六个变五个；在线安装放进模块页右上角的「模块目录」弹窗。
+
+**六、`enable_dev_mode` 从未被调用**
+
+四个本地模块命令都 `require_dev_mode`，但前端只显示状态、按钮只是跳转，等于「登记本地目录」整条支线不可达。设置页那颗按钮现在会先真的开开关，再跳转。
+
+**门禁**
+
+app lib 67 项、core 6 项、其余集成 20 项（`live_source` 2 项按设计 ignored）、契约 109 项、`tsc`、`npm test` 20 项、`vite build`、`clippy --workspace --all-targets -D warnings` 全绿。
+
+**真源冒烟（`cargo test --test live_source -- --ignored`）**
+
+2026-11-13 19:10 实跑通过：
+
+```
+目录可用：3 个模块，expires=2026-11-16T11:07:53Z
+下载成功：dounai/dounai-input -> 1702593 字节，尝试 1 次
+```
+
+即：线上 catalog 用内置 K5 验签通过、三个条目的 sha256/size 与本地打包产物一致、整包下载后哈希与目录声明一致且能过 `verify_zip`。这两条不进 CI——CI 不该依赖第三方站点可用性。
+
+**未实测**：真机点「模块目录」→「安装」→ 自动装依赖 → 启动的完整一条；catalog 7 天过期后的表现只能靠改系统时间或等过期验证。

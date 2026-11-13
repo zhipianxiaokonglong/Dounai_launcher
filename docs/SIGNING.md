@@ -82,14 +82,35 @@ cargo run --bin pack -- verify --pubkey <K1 公钥文件> --zip <zip>
 `https://sourceforge.net/projects/dounai-releases/files/`
 
 1. 用 K1 打包并自检，记下 `sha256`、`size` 与 `publisher_fp`。
-2. 把 zip 上传到项目 Files。目录按 `modules/<namespace>/<name>/<version>/` 分层，文件名不带路径分隔符。
-3. 生成 catalog，条目 `sources` 指向 SourceForge 下载地址，`sha256` 与 `size` 用第 1 步的值。
+2. 把 zip 上传到项目 Files。当前实际布局是平的 `modules/<文件名>.zip`（例：`modules/dounai-input-0.2.1.zip`），文件名不带路径分隔符。多个版本并存时文件名里必须带版本号，否则新版会覆盖旧版。
+3. 生成 catalog，条目 `sources` 用 `https://downloads.sourceforge.net/project/dounai-releases/modules/<文件名>.zip`，`sha256` 与 `size` 用第 1 步的值。
 4. 用 K5 签 catalog，`expires` 不超过 7 天，再用 K5 公钥自检一次。
-5. 上传 `catalog.json`，回读一次核对 `sha256`。
+5. 上传 `catalog.json` 到项目根（不是 `modules/`），回读一次核对 `sha256`。
+
+2026-11-13 实际执行过一次，可直接照抄：
+
+```bash
+# 1. 打包（每个仓一次），产物落在 Dounai-modules-<日期>/
+# 2. 生成 catalog.json 草稿（schema_version=2，sequence 递增，expires=now+3d）
+cd src-tauri && cargo run --bin sign_catalog -- sign   --key <K5 私钥> --catalog <catalog.json>
+
+# 3. 上传（SF 只开放 SFTP，restricted shell 不接受普通 ssh 命令）
+sftp tonyjh07@frs.sourceforge.net <<'EOF'
+mkdir /home/frs/project/dounai-releases/modules
+put catalog.json /home/frs/project/dounai-releases/catalog.json
+put <包>.zip /home/frs/project/dounai-releases/modules/<包>.zip
+EOF
+
+# 4. 回读核对（must 与本地逐字节一致）
+curl -sSL -o /tmp/c.json   https://downloads.sourceforge.net/project/dounai-releases/catalog.json
+sha256sum /tmp/c.json <catalog.json>
+```
+
+上传后 SF 需要几十秒同步镜像，此时 `master.dl` 仍可能 404。
 
 上传通道是 SFTP 与 `rsync`/`scp`。2026-11-13 已把本机 SSH 公钥登记到 SourceForge，实测 `tonyjh07@frs.sourceforge.net` 认证通过，`/home/frs/project/dounai-releases/` 可上传、列出与删除。上传仍未脚本化，发布时逐次执行。K1 私钥、K5 私钥与上传凭据分开保管，任一泄露都按密钥泄露流程处理。
 
-启动器侧的顺序固定，见 [DESIGN.md](DESIGN.md) 7.3。
+启动器侧的顺序固定，见 [DESIGN.md](DESIGN.md) 7.3。源站会 302 到镜像主机，两个 HTTP 客户端都逐跳校验域名后再跟随（见 7.2）。
 
 1. 核对整包 `sha256` 与字节数。
 2. 读取包内 `manifest.json`，不落盘。
@@ -122,7 +143,7 @@ K5 泄露时按以下顺序处理。
 
 ## 7. 当前状态
 
-K1 与 K5 都已生成并内置。模块包托管在 SourceForge 的 `dounai-releases` 项目，官方 catalog 尚未签发。
+K1 与 K5 都已生成并内置。模块包与已签名的 `catalog.json` 已上传到 SourceForge 的 `dounai-releases` 项目，在线安装链路已打通。
 
 | 项 | 状态 |
 |---|---|
@@ -132,7 +153,7 @@ K1 与 K5 都已生成并内置。模块包托管在 SourceForge 的 `dounai-rel
 | K5 私钥 | 已生成，仓库外，ACL 仅限当前用户 |
 | K5 公钥与指纹 | 已登记在 `keys/K5.json` 与 `state_v2.rs` |
 | K5 签出的 catalog | 离线验签通过，篡改条目被硬拒 |
-| SourceForge 项目 | 已创建，包尚未上传 |
+| SourceForge 项目 | 已创建，3 个模块包与 catalog.json 已上传（2026-11-13） |
 | SourceForge 上传通道 | 已实测，SSH 认证与目录写入通过 |
 | 远程 catalog 分发 | 未启用，尚无签名 catalog |
 | 真机安装 | 未实测 |

@@ -4,7 +4,7 @@ Dounai 启动器管理模块的安装、环境与进程生命周期。产品主�
 
 ## 当前状态
 
-本仓库处于 v2 重构期。`refactor/launcher-v2` 分支已冻结 M0 契约。M1 到 M3 的代码已提交到该分支，含环境引擎、双源包信任与生命周期命令面。v1 的进程管理、状态库与命令面已删除，Tauri 命令面由 `src-tauri/src/commands_v2.rs` 提供。界面已在 M4 重写为六个视图与深浅双主题，首次向导与内嵌子 WebView 尚未开始。
+本仓库处于 v2 重构期。`refactor/launcher-v2` 分支已冻结 M0 契约。M1 到 M3 的代码已提交到该分支，含环境引擎、双源包信任与生命周期命令面。v1 的进程管理、状态库与命令面已删除，Tauri 命令面由 `src-tauri/src/commands_v2.rs` 提供。界面已在 M4 重写为五个视图与深浅双主题，在线安装（SourceForge 签名目录）已接通，首次向导与内嵌子 WebView 尚未开始。
 
 - 仅支持 Windows 10 与 Windows 11。
 - 不读取 v1 包格式，不设兼容层。v1 包格式从未打包分发。
