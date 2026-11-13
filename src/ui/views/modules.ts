@@ -65,7 +65,7 @@ const ROLE_DESC: Record<Role, string> = {
   input: "输入接入层：把麦克风、文本与图像送进模型层。",
   llm: "模型编排层：推理、上下文与情绪标签。",
   output: "输出表达层：把模型输出合成为语音。",
-  shell: "总装与界面：本地 exe，不占规范端口，不做契约探测。",
+  shell: "总装与界面：本地 exe，不占用固定端口。",
   auxiliary: "旁路模块：不进组装层事件流，端口由启动器动态分配。",
 };
 
@@ -802,7 +802,7 @@ function showManifest(moduleId: string): void {
     subtitle: `${manifest.module_id} · ${manifest.category} · v${manifest.version}`,
     wide: true,
     bodyHtml: `<pre class="fp" style="white-space:pre-wrap">${esc(lines.join("\n"))}</pre>
-      <p class="cap" style="margin:0">权限声明仅供参考，当前版本不强制。判级与验签以包内 manifest 为准。</p>`,
+      <p class="cap" style="margin:0">权限声明仅供参考，当前版本不强制。是否可信以包内的清单文件为准。</p>`,
     actions: [{ label: "关闭", tone: "quiet", autofocus: true }],
   });
 }

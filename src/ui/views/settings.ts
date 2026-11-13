@@ -118,7 +118,7 @@ function appearanceHtml(): string {
   return (
     row(
       "主题",
-      "只换令牌，不重建界面",
+      "深色、浅色或跟随系统",
       `<div class="seg">${seg("dark", "深色")}${seg("light", "浅色")}${seg("auto", "跟随系统")}</div>`,
     ) +
     row(
@@ -126,7 +126,7 @@ function appearanceHtml(): string {
       "紧凑为默认",
       `<div class="inputbox"><span>紧凑 · 13px 基准</span><span class="hint">固定</span></div>`,
     ) +
-    `<p class="cap">深浅两套共用同一组语义令牌：主色只表示「可点 / 当前」，绿色只表示「进程健康」。切换不会丢失滚动位置与展开状态。</p>`
+    `<p class="cap">「跟随系统」取 Windows 的深浅设置。切换不会打断正在进行的操作，也不会改变模块状态。</p>`
   );
 }
 
@@ -140,13 +140,11 @@ function trustHtml(): string {
       : `<p class="empty">浏览器模式没有信任表。</p>`;
   }
 
-  const k1 = settings.trust.builtin.find((key) => key.key_id === "K1");
-  const k5 = settings.trust.builtin.find((key) => key.key_id === "K5");
   const trusted = settings.trust.trusted;
 
   const trustedHtml =
     trusted.length === 0
-      ? `<p class="cap" style="margin:0">还没有登记额外的发布者。TOFU 只在你确认过某个指纹后才会写入。</p>`
+      ? `<p class="cap" style="margin:0">还没有登记额外的发布者。你确认过某个指纹后，它才会出现在这里。</p>`
       : trusted
           .map(
             (key) => `
@@ -192,11 +190,8 @@ function trustHtml(): string {
     row(
       "判级规则",
       "A/B/C/D 四级",
-      `<p class="cap" style="margin:0">A 类已验签可直接安装；B/C 类需逐次确认；D 类硬拒，不写入实例表，也不提供确认入口。</p>`,
-    ) +
-    `<p class="cap">指纹全量等宽展示而非截断：截断会让人误以为「差不多就行」，而指纹变更正是必须一眼看出来的东西。${
-      k1 && k5 ? ` 内置 ${esc(k1.key_id)} / ${esc(k5.key_id)} 两把钥匙职责分离，互不复用。` : ""
-    }</p>`
+      `<p class="cap" style="margin:0">A 类已验签可直接安装；B/C 类需要你逐次确认；D 类直接拒绝，也没有确认入口。</p>`,
+    )
   );
 }
 
@@ -284,7 +279,7 @@ function diagnosticsHtml(): string {
     row(
       "日志",
       "每实例一份",
-      `<p class="cap" style="margin:0">启动器事件始终记录：拉起、退出码、health 与契约探测、停止。单文件超过 2 MiB 轮转，保留 3 份。</p>`
+      `<p class="cap" style="margin:0">启动器事件始终记录：拉起、退出码、健康检查、停止。单个文件超过 2 MiB 轮转，保留最近 3 份。</p>`
     ) +
     row(
       "子进程输出",
