@@ -390,7 +390,7 @@ async function doInstall(preview: LocalPackagePreview, confirm: boolean): Promis
     pkgState.preview = null;
     pkgState.note = `已安装 ${result.module_id}（${result.files} 个文件，${fmtBytes(result.bytes)}）${
       result.replaced ? "，覆盖了原有包目录" : ""
-    }。回模块页先点「安装依赖」，装完再启动。`;
+    }${result.activated ? "，已设为该角色的主实例" : ""}。回模块页先点「安装依赖」，装完再启动。`;
     toast(`已安装 ${result.module_id}`, "ok");
     await refreshViews();
     window.dispatchEvent(new CustomEvent("dounai:views-updated"));

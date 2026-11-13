@@ -1015,7 +1015,8 @@ async function runCatalogInstall(button: HTMLElement, confirm: boolean): Promise
   try {
     const res = await installFromCatalog(moduleId, variant || null, confirm);
     closeModal();
-    toast(`已安装 ${res.module_id}：${res.files} 个文件，${formatBytes(res.bytes)}`, "ok");
+    const slot = res.activated ? "，已设为该角色的主实例（占用规范端口）" : "";
+    toast(`已安装 ${res.module_id}：${res.files} 个文件，${formatBytes(res.bytes)}${slot}`, "ok");
     await refreshModules();
   } catch (error) {
     const message = describeError(error);

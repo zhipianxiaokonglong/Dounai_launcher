@@ -77,6 +77,13 @@ export interface InstallResponse {
   install_dir: string;
   /** 信任判定：signed（已验签）或 unsigned_allowed（调试放行） */
   trust: { kind: "signed"; key_index: number } | { kind: "unsigned_allowed" };
+  /**
+   * 装完顺便占下该 role 的 active 槽时的实例 ID，否则 null。
+   *
+   * 只有槽原本为空才会发生：非 active 实例跑 18101+ 备用端口，
+   * 组装层只认 8101-8103，所以每个角色的第一件模块必须上位。
+   */
+  activated: string | null;
 }
 
 export interface TrustInfo {
