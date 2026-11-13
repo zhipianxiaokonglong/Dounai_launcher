@@ -12,6 +12,7 @@ import {
   inspectLocalPackage,
   installLocalPackage,
   isDesktop,
+  onPackageDrop,
   pickPackageFile,
   removeLocalModule,
   scanLocalModules,
@@ -78,11 +79,17 @@ function renderBody(body: HTMLElement): void {
   body.innerHTML = `
     <div class="field">
       <label for="pkg-path">模块包（.zip）</label>
-      <div class="toolbar" style="margin-bottom:0">
-        <input id="pkg-path" class="input grow" type="text" spellcheck="false"
-               placeholder="选择或粘贴一个 .zip 的路径" value="${esc(pkgState.path)}" />
-        <button class="btn" type="button" data-act="pick">选择文件…</button>
-        <button class="btn btn--primary" type="button" data-act="inspect">检查</button>
+      <div class="dropzone" id="pkg-drop" data-drag="off">
+        <div class="dropzone__hint">
+          <b>把 .zip 拖到这里</b>
+          <span>也可以直接粘贴完整路径，例如 <code>D:\\下载\\omninexus-0.3.4.zip</code></span>
+        </div>
+        <div class="toolbar" style="margin:0">
+          <input id="pkg-path" class="input grow" type="text" spellcheck="false"
+                 placeholder="选择、拖入或粘贴一个 .zip 的路径" value="${esc(pkgState.path)}" />
+          <button class="btn" type="button" data-act="pick">选择文件…</button>
+          <button class="btn btn--primary" type="button" data-act="inspect">检查</button>
+        </div>
       </div>
       <div class="cap">选好包后先点「检查」：会读包内清单，告诉你装的是什么、谁签的名、要不要你确认。检查不会写入任何文件。</div>
     </div>
@@ -112,6 +119,11 @@ function renderBody(body: HTMLElement): void {
   pkgInput?.addEventListener("input", () => {
     pkgState.path = pkgInput.value;
   });
+  pkgInput?.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    void inspect();
+  });
 
   const input = body.querySelector<HTMLInputElement>("#import-root");
   input?.addEventListener("input", () => {
@@ -133,11 +145,64 @@ function renderBody(body: HTMLElement): void {
 
   renderPkgResult();
   renderResult();
+  void wireDrop();
 }
 
 /* ------------------------------------------------------------------ */
 /* 本地包                                                              */
 /* ------------------------------------------------------------------ */
+
+/**
+ * 拖拽监听只注册一次。
+ *
+ * 事件挂在窗口上而不是某个 DOM 节点上（Tauri 在 OS 层拦截拖拽），
+ * 所以视图来回切换时重复注册会叠加回调；用模块级标记挡住。
+ */
+let dropWired = false;
+
+async function wireDrop(): Promise<void> {
+  if (dropWired) return;
+  dropWired = true;
+  try {
+    await onPackageDrop({
+      onEnter: () => setDragState(true),
+      onLeave: () => setDragState(false),
+      onDrop: (paths) => acceptDrop(paths),
+    });
+  } catch {
+    // 注册失败不影响手动选择与粘贴路径，静默降级。
+    dropWired = false;
+  }
+}
+
+function setDragState(on: boolean): void {
+  const zone = document.getElementById("pkg-drop");
+  if (zone) zone.dataset.drag = on ? "on" : "off";
+}
+
+/** 拖进来的可能是好几个文件或一个目录：只认第一个 .zip，其余说清楚。 */
+function acceptDrop(paths: string[]): void {
+  const zips = paths.filter((path) => path.toLowerCase().endsWith(".zip"));
+  const zip = zips[0];
+  if (!zip) {
+    const first = paths[0] ?? "";
+    pkgState.note = first
+      ? `拖进来的不是 .zip：${first}。模块包是一个 .zip 文件，不是解压后的目录。`
+      : "没有拿到拖入的文件，改用「选择文件…」或直接粘贴路径。";
+    renderPkgResult();
+    toast("需要一个 .zip 模块包", "error");
+    return;
+  }
+  pkgState.path = zip;
+  // 在别的页面拖入文件也接住：先切到导入页，再按同一套流程检查。
+  if (!document.getElementById("pkg-drop")) navigate("import");
+  const input = document.getElementById("pkg-path") as HTMLInputElement | null;
+  if (input) input.value = zip;
+  if (zips.length > 1) {
+    toast(`一次只检查一个包，已选 ${zip.split(/[\\/]/).pop()}`, "ok");
+  }
+  void inspect();
+}
 
 function renderPkgResult(): void {
   const host = document.getElementById("pkg-result");
@@ -200,8 +265,9 @@ function renderPkgResult(): void {
     )
     .join("");
 
+  // 判级原因由 UI 自己说人话：core 的 reason 是给日志看的，含「确认前必须展示」
+  // 这类机制说明，直接摆到界面上不成句。只有 D 类的拒绝原因原样展示。
   const warnings = [
-    preview.needs_confirmation && preview.reason ? `为什么需要确认：${esc(preview.reason)}` : "",
     preview.replace_existing
       ? "这台机器上已经装过这个模块的同一个版本，继续会覆盖原有包目录；模块的数据目录不受影响。"
       : "",
@@ -260,6 +326,9 @@ async function pick(): Promise<void> {
 }
 
 async function inspect(): Promise<void> {
+  // 以输入框为准：粘贴的路径可能没触发 input（右键菜单、拖入文本等）。
+  const field = document.getElementById("pkg-path") as HTMLInputElement | null;
+  if (field) pkgState.path = field.value;
   const path = pkgState.path.trim();
   if (!path) {
     toast("先选择一个 .zip 再检查", "error");
@@ -507,3 +576,7 @@ function fmtBytes(bytes: number): string {
 function navigate(view: string): void {
   window.dispatchEvent(new CustomEvent("dounai:navigate", { detail: view }));
 }
+
+// 模块被 main.ts 静态引入，加载即注册：这样在别的页面拖入 .zip 也能接住，
+// 不必先打开导入页。视图重新渲染时 wireDrop 会直接返回。
+void wireDrop();

@@ -103,10 +103,14 @@ export interface PurgeResponse {
 }
 
 type Invoke = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+type Unlisten = () => void;
 
 interface TauriGlobal {
   core?: { invoke?: Invoke };
   invoke?: Invoke;
+  event?: {
+    listen?: (event: string, handler: (event: { payload: unknown }) => void) => Promise<Unlisten>;
+  };
 }
 
 function getInvoke(): Invoke | null {
@@ -240,6 +244,36 @@ export async function pickPackageFile(): Promise<string | null> {
     },
   });
   return typeof picked === "string" && picked.length > 0 ? picked : null;
+}
+
+/**
+ * 监听窗口的拖拽投放。
+ *
+ * Tauri 在操作系统层拦截拖拽，浏览器的 `dragover` / `drop` 不会触发，
+ * 只能听这四个事件。它们由 Tauri 发给当前 webview，`listen` 不带 target
+ * 就能收到；`paths` 是绝对路径，正是命令层要的东西。
+ *
+ * 浏览器模式下返回空操作，调用方不必分支。
+ */
+export async function onPackageDrop(handlers: {
+  onEnter: () => void;
+  onLeave: () => void;
+  onDrop: (paths: string[]) => void;
+}): Promise<Unlisten> {
+  const event = (globalThis as { __TAURI__?: TauriGlobal }).__TAURI__?.event;
+  if (!event?.listen) return () => {};
+
+  const off = await Promise.all([
+    event.listen("tauri://drag-enter", () => handlers.onEnter()),
+    event.listen("tauri://drag-over", () => handlers.onEnter()),
+    event.listen("tauri://drag-leave", () => handlers.onLeave()),
+    event.listen("tauri://drag-drop", (payload) => {
+      handlers.onLeave();
+      const typed = payload.payload as { paths?: string[] } | null;
+      handlers.onDrop(typed?.paths ?? []);
+    }),
+  ]);
+  return () => off.forEach((unlisten) => unlisten());
 }
 
 /** 装之前先把包内清单摊开：装的是什么、谁签的、要不要你确认。 */

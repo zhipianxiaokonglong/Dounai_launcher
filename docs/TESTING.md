@@ -318,3 +318,15 @@ SourceForge 上传通道已实测。2026-11-13 用本机 SSH 公钥通过 `tonyj
 单测：`local_package_needs_confirmation_then_installs`（C 类拒绝未确认、确认后装成功、重复安装返回 replaced）、`local_package_hash_mismatch_is_rejected`（检查后文件被换掉必须失败）。app lib 102 项。
 
 未实测：真机点「选择文件…」弹出的系统对话框、装完后的启动与依赖准备。命令层测试覆盖了判级与落盘，覆盖不了系统对话框。
+
+## 本地包的拖拽与路径输入（2026-11-13）
+
+只做「选择文件…」不够用：从浏览器下载完的包，用户手上就是一个路径，再走一次系统对话框是多余的一步。
+
+- **拖拽**：Tauri 在 OS 层拦截拖拽，HTML5 的 `dragover` / `drop` 不会触发，必须听 `tauri://drag-enter|drag-over|drag-leave|drag-drop`（事件由 `emit_to_webview` 发出，`listen` 不带 target 即可收到，`paths` 就是绝对路径）。监听在模块加载时注册一次——事件挂在窗口上，每次重渲染都注册会叠加回调。拖入时按 `data-drag` 高亮投放区；落在别的页面则先切到导入页再检查，否则用户看不到结果。
+- **路径输入**：检查前从输入框读值，而不是只信 `input` 事件——右键粘贴可能不触发，按 Enter 也能直接检查。Rust 侧剔掉首尾引号，兼容「复制为路径」带引号的形态。
+- 只认第一个 `.zip`；拖进目录或其它文件时说明「模块包是一个 .zip，不是解压后的目录」。
+
+门禁：`npm run typecheck`、`npm test` 65 项、`vite build` 通过。截图核对（无头 Chrome 1200×780，深浅两套）确认投放区、检查结果与两处路径输入框的排版正常。
+
+未实测：真机拖拽事件与高亮。无头浏览器不产生 OS 级拖拽，这段只能在装好的启动器里验证。

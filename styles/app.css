@@ -1477,3 +1477,35 @@ select.input:focus-visible {
     grid-template-rows: auto auto;
   }
 }
+
+/* 拖拽投放区：整块都是投放目标，不只输入框。 */
+.dropzone {
+  border: 1px dashed var(--line-2);
+  border-radius: var(--r-s);
+  padding: 10px 12px;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.dropzone[data-drag="on"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.dropzone__hint {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 11.5px;
+  color: var(--fg-2);
+  line-height: 1.5;
+}
+
+.dropzone__hint b {
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.dropzone[data-drag="on"] .dropzone__hint b {
+  color: var(--accent-fg);
+}
