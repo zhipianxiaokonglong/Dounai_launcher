@@ -283,3 +283,20 @@ SourceForge 上传通道已实测。2026-11-13 用本机 SSH 公钥通过 `tonyj
 门禁：`npm run typecheck` 通过，`npm test` 65 项全过，`vite build` 通过（产物 68 KB JS / 18 KB CSS），`cargo test --offline --workspace --all-targets` 全绿（app lib 97 项），契约 109 项断言未受影响。
 
 未实测：真机窗口内六个视图的实际渲染、子 WebView 相关七条断言、首次向导、第三方模块在真机上的「非沙箱」展示、主题跟随系统在 WebView2 下的行为。截图来自无头 Chrome，不等于 WebView2 渲染结果。按 [ROADMAP.md](ROADMAP.md) 开头的规则，这些不计验收通过。
+
+## 环境检测卡顿与闪窗修复（2026-11-13）
+
+现象：真机点「重新检测」时界面整段点不动，同时连弹几个命令行黑窗。
+
+两条独立成因：
+
+1. **同步命令跑在主线程**。Tauri 的同步 `#[tauri::command]` 在主线程（事件循环所在线程）执行，`probe_environment` 内部是六次子进程探测，串行累加最长可到几十秒——期间 WebView 既不能重绘也不能响应输入。修法：命令改 `async`，探测体放进 `tauri::async_runtime::spawn_blocking`；六项探测互不依赖，用 `std::thread::scope` 并行，总耗时等于最慢的一项而非累加。`EnvReport` 结构不变，前端只补了「检测中」的进行中反馈。
+2. **子进程没禁止控制台窗口**。Python、Node、nvidia-smi、PowerShell、curl、taskkill 都是控制台程序，从 GUI 进程 spawn 时 Windows 会给每个子进程分配新控制台，于是黑窗逐个闪一下。修法：`env_probe::hidden_command` 统一加 `CREATE_NO_WINDOW`；`core/src/env/console.rs` 提供同一套 helper，`runner.rs`（uv）与 `bootstrap.rs`（curl）接上；`process/win.rs` 的 `taskkill` 补同一标志。core 侧写常量而不引 `windows-sys`，避免为一个 flag 拉进整包绑定。
+
+顺带修首屏：`boot()` 原先在四个后台请求（含环境检测）之后才 `wireNav()`，数据没回来时左侧导航点不动。改为先接导航与事件、先渲染首屏，再等数据回来重绘。
+
+单测：`probe_environment_returns_report_without_panic` 覆盖并行改造后的报告完整性；`missing_runtime` 让探测线程 panic 时退化为「没有跑完」而不是冒充「未安装」，但当前没有稳定的注入点，未写断言。
+
+门禁：`cargo fmt --all -- --check`、`clippy --all-targets -- -D warnings` 通过，`cargo test --lib` 100 项全过，`cargo test -p launcher-core` 全绿，`npm run typecheck`、`npm test` 65 项、`vite build` 通过，`cargo tauri build` 产出 2.90 MiB NSIS 安装包。
+
+未实测：闪窗消失与卡顿解除需要在真机 GUI 会话里点一次「重新检测」确认；并发多次检测的行为未压测。

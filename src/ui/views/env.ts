@@ -91,7 +91,23 @@ function renderBody(body: HTMLElement): void {
     );
   }
 
-  for (const gpu of env.gpus) {
+  // 虚拟显示器（远控、投屏、串流创建）不是显卡，显存数字也不代表机器能力，
+  // 不计入「能跑多大模型」。隐去多少要说出来，否则列表会比系统看到的少。
+  const physical = env.gpus.filter((gpu) => !gpu.virtual_adapter);
+  const hiddenGpus = env.gpus.length - physical.length;
+
+  if (physical.length === 0) {
+    rows.push(
+      row(
+        "dot--idle",
+        "显卡",
+        "未检测到独立显卡，推理走 CPU",
+        '<span class="chip">仅 CPU</span>',
+      ),
+    );
+  }
+
+  for (const gpu of physical) {
     const vram = `${gpu.vram_gb} GB · ${gpu.name}${gpu.truncated ? "（显存读数可能被截断）" : ""}`;
     rows.push(
       row(
@@ -104,6 +120,20 @@ function renderBody(body: HTMLElement): void {
       ),
     );
   }
+
+  const mem = env.memory;
+  rows.push(
+    mem
+      ? row(
+          mem.total_gb >= 8 ? "dot--run" : "dot--warn",
+          "内存",
+          `${mem.total_gb} GB · 当前可用 ${mem.free_gb} GB`,
+          mem.total_gb >= 8
+            ? '<span class="chip chip--run">够用</span>'
+            : '<span class="chip chip--warn">偏少</span>',
+        )
+      : row("dot--idle", "内存", "读不到", '<span class="chip">未知</span>'),
+  );
 
   rows.push(
     row(
@@ -124,7 +154,7 @@ function renderBody(body: HTMLElement): void {
         "dot--run",
         "模块签名",
         trust.trusted_keys > 0 ? `${trust.trusted_keys} 个公钥参与判定` : "仅内置公钥",
-        `<span class="chip chip--run">${keys > 0 ? "已内置 K1/K5" : "fail-closed"}</span>`,
+        `<span class="chip chip--run">${keys > 0 ? "已内置 K1/K5" : "仅认内置"}</span>`,
       ),
     );
   }
@@ -144,7 +174,11 @@ function renderBody(body: HTMLElement): void {
 
   body.insertAdjacentHTML(
     "beforeend",
-    `<p class="cap">每行都可点击展开：显存偏紧会给「换更小量化」的建议，但不会自动改你的配置。</p>
+    `<p class="cap">${
+      hiddenGpus > 0
+        ? `另有 ${hiddenGpus} 个虚拟显示器未计入（远控或投屏软件创建），它们不参与模型能不能跑的判断。`
+        : "上面的数字都来自系统接口，检测不改任何配置。"
+    }</p>
 
     <div class="grp" style="margin-top:22px">
       <span class="grp-name">维护</span><span class="grp-line"></span>
@@ -153,7 +187,7 @@ function renderBody(body: HTMLElement): void {
       <div class="envrow">
         <span class="dot dot--idle"></span>
         <span class="k">清除本地数据</span>
-        <span class="v" style="font-family:var(--sans);white-space:normal">清缓存、状态水位与模块文件；上游对话与记忆不在范围内</span>
+        <span class="v" style="font-family:var(--sans);white-space:normal">清缓存、清单记录与模块文件；模块里的对话与记忆不受影响</span>
         <span class="sp"><button class="btn btn--sm" type="button" data-act="purge">清除…</button></span>
       </div>
       <div class="envrow">
@@ -174,6 +208,17 @@ function renderBody(body: HTMLElement): void {
 }
 
 async function recheck(): Promise<void> {
+  // 后端已经不在主线程上跑了，但探测本身要几百毫秒到几秒。
+  // 这段时间必须让用户看到「正在检测」，否则点完按钮毫无反应，和卡死没区别。
+  const button = document.querySelector<HTMLButtonElement>('#phead [data-act="recheck"]');
+  const sub = document.querySelector<HTMLElement>("#phead .sub");
+  const restore = { text: button?.textContent ?? "", disabled: button?.disabled ?? false };
+  if (button) {
+    button.disabled = true;
+    button.textContent = "检测中…";
+  }
+  if (sub) sub.textContent = "正在检测本机环境，几秒内完成";
+
   try {
     await refreshEnv();
     const body = document.getElementById("pbody");
@@ -186,6 +231,11 @@ async function recheck(): Promise<void> {
     }
   } catch (error) {
     toast(`检测失败：${describeError(error)}`, "error");
+    if (button) {
+      button.disabled = restore.disabled;
+      button.textContent = restore.text;
+    }
+    if (sub) sub.textContent = "上次检测没有完成";
   }
 }
 
@@ -197,7 +247,13 @@ async function copyReport(): Promise<void> {
     `Python: ${env.python.available ? env.python.version : "缺失"} (${env.python.detail})`,
     `Node.js: ${env.node.available ? env.node.version : "缺失"} (${env.node.detail})`,
     `uv: ${env.uv.available ? env.uv.version : "缺失"} (${env.uv.detail})`,
-    ...env.gpus.map((g) => `GPU: ${g.name} ${g.vram_gb}GB usable=${g.usable}`),
+    ...env.gpus.map(
+      (g) =>
+        `GPU: ${g.name} ${g.vram_gb}GB usable=${g.usable}${g.virtual_adapter ? " (虚拟显示器，未计入)" : ""}`,
+    ),
+    env.memory
+      ? `内存: ${env.memory.total_gb}GB 可用 ${env.memory.free_gb}GB`
+      : "内存: 读不到",
     `数据根盘: ${env.disk.path} 剩余 ${env.disk.free_gb}GB ok=${env.disk.ok}`,
     `整体: ${env.healthy ? "通过" : "待处理"}`,
     ...env.problems.map((p) => `问题: ${p}`),
@@ -220,7 +276,7 @@ function askPurge(): void {
         <b>会先停掉全部托管实例，再删除文件</b>
         外部启动的实例停不掉，会被跳过并记入结果。
       </div>
-      <p class="cap" style="margin:0">范围：下载与清单缓存、catalog 水位、zip 实例的包目录。用户源码目录永不删除，实例的数据目录按契约保留。</p>
+      <p class="cap" style="margin:0">范围：下载与清单缓存、清单更新记录、zip 实例的包目录。你的源码目录永不删除，实例的数据目录始终保留。</p>
     `,
     onConfirm: async () => {
       try {

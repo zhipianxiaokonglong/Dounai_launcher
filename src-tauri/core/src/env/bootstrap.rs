@@ -40,7 +40,8 @@ pub struct CurlUvFetcher;
 impl UvFetcher for CurlUvFetcher {
     fn fetch(&self, url: &str) -> Result<Vec<u8>, EnvError> {
         let tmp = std::env::temp_dir().join(format!("dounai-uv-{}.zip", std::process::id()));
-        let result = Command::new("curl")
+        let mut command = Command::new("curl");
+        command
             .args([
                 "--fail",
                 "--silent",
@@ -51,8 +52,10 @@ impl UvFetcher for CurlUvFetcher {
                 "--output",
             ])
             .arg(&tmp)
-            .arg(url)
-            .output();
+            .arg(url);
+        // 不弹控制台窗口（下载可能要跑一会儿，黑窗会让人以为卡住了）。
+        super::console::hide_console(&mut command);
+        let result = command.output();
         let output = result.map_err(|e| {
             EnvError::new(EnvErrorKind::UvMissing, "", format!("无法启动 curl：{e}"))
         })?;

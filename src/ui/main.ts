@@ -169,6 +169,10 @@ async function boot(): Promise<void> {
 
   await loadMeta();
   updateChrome();
+  // 先把外壳接好再拉数据：环境检测要跑子进程，几百毫秒到几秒不等，
+  // 期间界面必须已经能点、能切页，否则等数据回来之前就是一块死界面。
+  wireNav();
+  wireEvents();
   await renderView("modules");
 
   // 四组事实并行拉取：任何一组失败都不该挡住界面，只在状态栏与页面上体现。
@@ -183,8 +187,6 @@ async function boot(): Promise<void> {
     toast(`部分状态没有读到：${describeError(failure.reason)}`, "error");
   }
   await renderView(current);
-  wireNav();
-  wireEvents();
 }
 
 /** 生命周期推送：模块页整页刷新，其它页只更新计数与状态栏。 */

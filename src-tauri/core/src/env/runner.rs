@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
+use super::console;
 use super::error::{EnvError, EnvErrorKind};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,6 +131,8 @@ impl UvRunner for SystemUvRunner {
         if req.offline {
             command.env("UV_OFFLINE", "1");
         }
+        // 不弹控制台窗口：环境准备会跑很多次短进程，闪窗比慢更让人不安。
+        console::hide_console(&mut command);
         let result = command.output().map_err(|e| {
             EnvError::new(
                 EnvErrorKind::State,

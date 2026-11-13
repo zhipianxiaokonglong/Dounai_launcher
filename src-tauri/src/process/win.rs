@@ -158,6 +158,8 @@ impl WinProcess {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
+            // taskkill 同样是控制台程序，不加这个标志会在停止实例时闪一下黑窗。
+            .creation_flags(CREATE_NO_WINDOW)
             .status();
 
         let deadline = Instant::now() + timeout;

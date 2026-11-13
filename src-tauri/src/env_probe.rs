@@ -31,6 +31,20 @@ pub struct GpuInfo {
     /// 比悄悄给一个错值更诚实。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
+    /// 虚拟显示器（远控、投屏、串流软件创建）。
+    ///
+    /// 它不是显卡，显存数字也没有参考价值，界面上不计入「能跑多大模型」的判断。
+    /// 这里只做标记，不在后端过滤：前端需要知道自己隐去了几个，才好写那句
+    /// 「另有 N 个虚拟显示器未计入」，而不是让列表莫名比系统看到少。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub virtual_adapter: bool,
+}
+
+/// 物理内存。
+#[derive(Debug, Serialize)]
+pub struct MemoryInfo {
+    pub total_gb: f64,
+    pub free_gb: f64,
 }
 
 /// 磁盘信息。
@@ -55,15 +69,38 @@ pub struct EnvReport {
     pub node: ProbeResult,
     pub uv: ProbeResult,
     pub gpus: Vec<GpuInfo>,
+    /// 读不到内存时缺省，界面据此显示「读不到」而不是 0 GB。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory: Option<MemoryInfo>,
     pub disk: DiskInfo,
     pub problems: Vec<String>,
     pub healthy: bool,
 }
 
+/// 构造一个**不弹控制台窗口**的命令。
+///
+/// Python、Node、nvidia-smi、PowerShell 全是控制台程序。从 GUI 进程直接 spawn
+/// 时，Windows 会给每个子进程新开一个控制台窗口——体检一次就是四五个黑窗
+/// 接连闪一下，看起来像出故障。`CREATE_NO_WINDOW` 让子进程不分配控制台，
+/// 输出仍可通过管道读到。
+#[cfg(windows)]
+fn hidden_command(cmd: &str) -> Command {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+    let mut command = Command::new(cmd);
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
+}
+
+#[cfg(not(windows))]
+fn hidden_command(cmd: &str) -> Command {
+    Command::new(cmd)
+}
+
 /// 带超时地执行命令，返回 (是否成功, 合并后的输出)。
 fn run_with_timeout(cmd: &str, args: &[&str], timeout: Duration) -> (bool, String) {
     let started = Instant::now();
-    let mut child = match Command::new(cmd)
+    let mut child = match hidden_command(cmd)
         .args(args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -230,7 +267,7 @@ Get-CimInstance Win32_VideoController | ForEach-Object {
   # 宁可为 0，也不能张冠李戴。
   $q = 0
   if ($reg.ContainsKey($n)) { $q = $reg[$n] }
-  "$n|$a|$q"
+  "$n|$a|$q|$($_.PNPDeviceID)"
 }
 "#,
         ],
@@ -247,10 +284,11 @@ Get-CimInstance Win32_VideoController | ForEach-Object {
         .map(|l| l.trim())
         .filter(|l| l.split('|').count() >= 2)
         .map(|l| {
-            let mut it = l.splitn(3, '|');
+            let mut it = l.splitn(4, '|');
             let name = it.next().unwrap_or("").trim().to_string();
             let adapter: f64 = it.next().unwrap_or("0").trim().parse().unwrap_or(0.0);
             let qword: f64 = it.next().unwrap_or("0").trim().parse().unwrap_or(0.0);
+            let pnp_id = it.next().unwrap_or("").trim().to_string();
 
             // 优先 64 位注册表值；其次 nvidia-smi（**仅限 NVIDIA 卡**）；最后 AdapterRAM。
             //
@@ -272,16 +310,100 @@ Get-CimInstance Win32_VideoController | ForEach-Object {
 
             // AdapterRAM 接近 4 GiB 时几乎必然是被 uint32 截断的结果
             let truncated_hint = source == "adapterram" && (bytes - 4_294_967_295.0f64).abs() < 1.0;
+            let virtual_adapter = is_virtual_adapter(&name, &pnp_id);
 
             GpuInfo {
-                usable: vram_gb >= 2.0,
+                // 虚拟显示器不参与「够不够跑模型」的判断：它的显存是宿主分配的一小段，
+                // 既不能用来推理，也不代表机器能力。
+                usable: !virtual_adapter && vram_gb >= 2.0,
                 name,
                 vram_gb,
                 truncated: truncated_hint,
+                virtual_adapter,
             }
         })
         .filter(|g| !g.name.is_empty())
         .collect()
+}
+
+/// 判断一块显示适配器是不是虚拟显示器。
+///
+/// 远控（ToDesk、向日葵、RustDesk）、串流（Parsec）与投屏（spacedesk、
+/// DisplayLink）都会注册显示适配器，它们在 `Win32_VideoController` 里与真显卡
+/// 平级出现，名字也常带「显示适配器」四个字，很容易被当成一块低端显卡。
+///
+/// 两条判据都要看，缺一条就会漏：
+///
+/// 1. **设备枚举方式**：`ROOT\` 与 `SWD\` 开头的都是软件枚举设备，
+///    虚拟显示器几乎都落在这两类里。
+/// 2. **名称关键字**：部分串流驱动挂成 PCI 设备，设备路径看不出来，
+///    只能靠名字里的 Virtual / Indirect / 厂商名。
+///
+/// 只看名称会漏掉英文驱动名的国产远控，只看设备路径会漏掉 PCI 串流卡。
+fn is_virtual_adapter(name: &str, pnp_id: &str) -> bool {
+    let id = pnp_id.trim().to_ascii_uppercase();
+    if id.starts_with("ROOT\\") || id.starts_with("SWD\\") {
+        return true;
+    }
+
+    let lower = name.to_ascii_lowercase();
+    const HINTS: [&str; 12] = [
+        "virtual",
+        "indirect",
+        "idd",
+        "mirror",
+        "displaylink",
+        "spacedesk",
+        "parsec",
+        "todesk",
+        "sunlogin",
+        "rustdesk",
+        "anydesk",
+        "teamviewer",
+    ];
+    if HINTS.iter().any(|h| lower.contains(h)) {
+        return true;
+    }
+    // 中文驱动名不参与 to_ascii_lowercase，单独匹配。
+    ["虚拟", "远控", "投屏", "串流", "镜像"]
+        .iter()
+        .any(|h| name.contains(h))
+}
+
+/// 读物理内存（总容量与当前可用）。
+///
+/// `TotalVisibleMemorySize` / `FreePhysicalMemory` 的单位都是 KB，
+/// 是任务管理器「性能 → 内存」那两个数字的同源值。
+fn probe_memory() -> Option<MemoryInfo> {
+    let (ok, out) = run_with_timeout(
+        "powershell",
+        &[
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$os=Get-CimInstance Win32_OperatingSystem; if($os){\"$($os.TotalVisibleMemorySize)|$($os.FreePhysicalMemory)\"}",
+        ],
+        Duration::from_secs(8),
+    );
+    if !ok {
+        return None;
+    }
+    parse_memory_kb(out.trim())
+}
+
+/// 解析 `总KB|可用KB`。读不到或格式不对时返回 None，界面据此显示「读不到」。
+fn parse_memory_kb(line: &str) -> Option<MemoryInfo> {
+    let mut it = line.splitn(2, '|');
+    let total: f64 = it.next()?.trim().parse().ok()?;
+    let free: f64 = it.next().unwrap_or("0").trim().parse().unwrap_or(0.0);
+    if total <= 0.0 {
+        return None;
+    }
+    let to_gb = |kb: f64| (kb / 1024.0 / 1024.0 * 10.0).round() / 10.0;
+    Some(MemoryInfo {
+        total_gb: to_gb(total),
+        free_gb: to_gb(free),
+    })
 }
 
 /// 用 nvidia-smi 取第一块 NVIDIA 卡的总显存（字节）。
@@ -375,32 +497,61 @@ fn probe_disk(data_root: &std::path::Path) -> DiskInfo {
 
 /// 汇总环境报告。
 ///
-/// v2 把数据根直接注入命令：磁盘检测以 `Paths::data_root` 所在卷为准，
-/// 不用工作目录兜底，也不再硬编码盘符（上游 D-3）。命令名与零参数形状
-/// 不变，`src/bridge.ts` 无需改动。
+/// ## 为什么要 `async` + `spawn_blocking`
+///
+/// Tauri 的**同步命令跑在主线程**（事件循环所在线程）。这个函数要做六次子进程
+/// 探测、最长可等几十秒，同步执行会让窗口整段时间点不动、拖不动、画不出——
+/// 用户看到的就是「检测硬件时界面卡死」。放到阻塞线程池里，主线程继续处理
+/// 绘制与输入，前端可以自行显示「检测中」。
 #[tauri::command]
-pub fn probe_environment(state: tauri::State<'_, crate::state_v2::AppStateV2>) -> EnvReport {
-    probe_environment_with(&state.paths.data_root)
+pub async fn probe_environment(
+    state: tauri::State<'_, crate::state_v2::AppStateV2>,
+) -> Result<EnvReport, String> {
+    let data_root = state.paths.data_root.clone();
+    tauri::async_runtime::spawn_blocking(move || probe_environment_with(&data_root))
+        .await
+        .map_err(|error| format!("环境检测没有跑完：{error}"))
 }
 
 /// 探测环境，磁盘检测以 data_root 所在卷为准。
 ///
-/// 命令层传入 v2 数据根；单测可直接传任意路径，不依赖 Tauri 状态。
+/// 六项探测互不依赖，**并行跑**：串行时是「Python 三个候选 × 8s + Node + uv +
+/// 显卡 15s + 内存 8s + 磁盘 8s」的累加，最坏情况接近一分钟；并行后总耗时
+/// 约等于最慢的那一项。任一探测 panic 只让该项退化为「读不到」，不影响其它项。
 pub fn probe_environment_with(data_root: &std::path::Path) -> EnvReport {
-    // Python：优先 python，其次 py 启动器（Windows 常见），最后 python3
-    let python = probe_runtime(
-        "Python",
-        &[
-            ("python", &["--version"]),
-            ("py", &["--version"]),
-            ("python3", &["--version"]),
-        ],
-        (3, 11, 0),
-    );
-    let node = probe_runtime("Node.js", &[("node", &["--version"])], (20, 0, 0));
-    let uv = probe_runtime("uv", &[("uv", &["--version"])], (0, 1, 0));
-    let gpus = probe_gpus();
-    let disk = probe_disk(data_root);
+    let (python, node, uv, gpus, memory, disk) = std::thread::scope(|scope| {
+        let python = scope.spawn(|| {
+            probe_runtime(
+                "Python",
+                &[
+                    ("python", &["--version"]),
+                    ("py", &["--version"]),
+                    ("python3", &["--version"]),
+                ],
+                (3, 11, 0),
+            )
+        });
+        let node =
+            scope.spawn(|| probe_runtime("Node.js", &[("node", &["--version"])], (20, 0, 0)));
+        let uv = scope.spawn(|| probe_runtime("uv", &[("uv", &["--version"])], (0, 1, 0)));
+        let gpus = scope.spawn(probe_gpus);
+        let memory = scope.spawn(probe_memory);
+        let disk = scope.spawn(|| probe_disk(data_root));
+
+        (
+            python.join().unwrap_or_else(|_| missing_runtime("Python")),
+            node.join().unwrap_or_else(|_| missing_runtime("Node.js")),
+            uv.join().unwrap_or_else(|_| missing_runtime("uv")),
+            gpus.join().unwrap_or_default(),
+            memory.join().unwrap_or(None),
+            disk.join().unwrap_or_else(|_| DiskInfo {
+                path: "数据根所在卷".into(),
+                free_gb: 0.0,
+                is_data_root: true,
+                ok: false,
+            }),
+        )
+    });
 
     let mut problems = Vec::new();
     // Python 与 Node 缺失会直接阻塞模块安装；uv 仅影响加速
@@ -409,6 +560,21 @@ pub fn probe_environment_with(data_root: &std::path::Path) -> EnvReport {
     }
     if !node.available {
         problems.push("缺少 Node.js（建议 20+）".to_string());
+    }
+    if let Some(mem) = &memory {
+        if mem.total_gb < 8.0 {
+            problems.push(format!(
+                "内存偏少（共 {} GB，建议 8 GB 以上）",
+                mem.total_gb
+            ));
+        }
+    }
+    // 显存偏紧只对真显卡说：虚拟显示器的显存不代表机器能力，不该触发建议。
+    for gpu in gpus.iter().filter(|g| !g.virtual_adapter && !g.usable) {
+        problems.push(format!(
+            "显存偏紧（{} GB）：在模块里选更小的量化版本，或改用云端模型",
+            gpu.vram_gb
+        ));
     }
     if !disk.ok {
         problems.push(format!(
@@ -425,7 +591,17 @@ pub fn probe_environment_with(data_root: &std::path::Path) -> EnvReport {
         node,
         uv,
         gpus,
+        memory,
         disk,
+    }
+}
+
+/// 探测线程异常退出时的退化结果：如实写「没有跑完」，不冒充「未安装」。
+fn missing_runtime(name: &str) -> ProbeResult {
+    ProbeResult {
+        available: false,
+        version: String::new(),
+        detail: format!("{name} 检测没有跑完，请重新检测"),
     }
 }
 
@@ -521,6 +697,42 @@ mod tests {
             "应提示版本过低：{}",
             r.detail
         );
+    }
+
+    #[test]
+    fn virtual_adapter_is_detected_by_device_path() {
+        // 软件枚举设备就是虚拟显示器，与名字无关。
+        assert!(is_virtual_adapter(
+            "Dounai Remote Display",
+            r"ROOT\DISPLAY\0000"
+        ));
+        assert!(is_virtual_adapter("Any Display", r"SWD\DEV\0001"));
+        // 真卡走 PCI，不能误判。
+        assert!(!is_virtual_adapter(
+            "NVIDIA GeForce RTX 3080 Ti",
+            r"PCI\VEN_10DE&DEV_2208&SUBSYS_00000000"
+        ));
+    }
+
+    #[test]
+    fn virtual_adapter_is_detected_by_name() {
+        assert!(is_virtual_adapter("ToDesk Virtual Display", ""));
+        assert!(is_virtual_adapter("远控程序的虚拟显示适配器", ""));
+        assert!(is_virtual_adapter("Microsoft Indirect Display", ""));
+        assert!(is_virtual_adapter("Parsec Virtual Display Adapter", ""));
+        assert!(!is_virtual_adapter("Intel(R) UHD Graphics 630", ""));
+        assert!(!is_virtual_adapter("AMD Radeon RX 7900 XTX", ""));
+    }
+
+    #[test]
+    fn memory_kb_is_converted_to_gb() {
+        let m = parse_memory_kb("33554432|8388608").expect("应解析成功");
+        assert_eq!(m.total_gb, 32.0);
+        assert_eq!(m.free_gb, 8.0);
+        // 读不到时不能当成 0 GB 报给用户。
+        assert!(parse_memory_kb("0|0").is_none());
+        assert!(parse_memory_kb("not-a-number|0").is_none());
+        assert!(parse_memory_kb("").is_none());
     }
 
     #[cfg(windows)]

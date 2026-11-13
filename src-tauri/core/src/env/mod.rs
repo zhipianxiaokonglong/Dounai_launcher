@@ -4,6 +4,7 @@
 //! `verify_instance` 只读状态，不联网、不重建 venv。
 
 pub mod bootstrap;
+pub mod console;
 pub mod deps;
 pub mod error;
 pub mod python;

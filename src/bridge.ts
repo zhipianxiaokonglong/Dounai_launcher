@@ -309,7 +309,11 @@ export interface RustEnvReport {
     vram_gb: number;
     usable: boolean;
     truncated?: boolean;
+    /** 远控、投屏与串流软件创建的虚拟显示器，不计入机器能力。 */
+    virtual_adapter?: boolean;
   }>;
+  /** 读不到时不出现，界面显示「读不到」而不是 0 GB。 */
+  memory?: { total_gb: number; free_gb: number };
   /** is_data_root 恒为 true：检测的是数据根所在卷，不再是写死的 D 盘（D-3）。 */
   disk: { path: string; free_gb: number; ok: boolean; is_data_root?: boolean };
   problems: string[];

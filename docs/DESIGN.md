@@ -325,6 +325,8 @@ M3 已按 role 拓扑启动、Job Object 托管与异步探测重写生命周期
 
 数据只认一处来源：实例与端口取 `list_instance_views`，环境取 `probe_environment`，信任表与保留数取 `settings_snapshot`。界面层不推算端口、不拼指纹，避免与后端分叉。
 
+环境检测是 `async` 命令，真正的探测跑在阻塞线程池里。Tauri 的同步命令执行在主线程，而一次体检要起六个子进程，同步跑就是窗口整段拖不动、画不出——这是「检测硬件时界面卡死」的成因。六项探测之间没有依赖，改成并行后总耗时等于最慢的一项，而不是累加。所有被拉起的子进程（PowerShell、Python、Node、nvidia-smi、curl、taskkill）都带 `CREATE_NO_WINDOW`，否则从 GUI 进程 spawn 控制台程序会让 Windows 逐个弹黑窗。
+
 主题是深色、浅色、跟随系统三档，切换只改 `<html data-theme>`，不重建 DOM，所以滚动位置与展开状态不丢。两套配色共用同一组语义令牌：主色只表示「可点 / 当前」，绿色只表示「进程健康」。
 
 图标一律内联 SVG。先前用 `▦ ◫ ◈` 这类几何字符，缺字体的机器上会渲染成方块，换 SVG 后只依赖 `currentColor`。
