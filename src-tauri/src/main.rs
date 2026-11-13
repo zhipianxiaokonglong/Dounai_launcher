@@ -35,6 +35,12 @@ fn main() {
 
             let state = dounai_launcher::state_v2::AppStateV2::new(install_root, data_root)
                 .map_err(|e| format!("初始化 v2 状态失败：{e}"))?;
+            // 老版本装出来的实例表没有 active，角色会一直跑备用端口，
+            // 组装层连不上。启动时补一次，之后安装/卸载各自维护。
+            let healed = dounai_launcher::commands_v2::heal_active_slots(&state);
+            if !healed.is_empty() {
+                eprintln!("已把 {} 补为所在角色的 active 实例", healed.join("、"));
+            }
             app.manage(state);
 
             let supervisor =

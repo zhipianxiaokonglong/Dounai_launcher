@@ -164,6 +164,11 @@ pub struct InstallResponse {
     pub replaced: bool,
     pub install_dir: String,
     pub trust: TrustVerdictView,
+    /// 装完之后顺便占下了该 role 的 active 槽时，这里是那个实例 ID。
+    ///
+    /// 只有槽原本为空才会发生。非 active 实例一律跑 18101+ 的备用端口，
+    /// 而组装层只认 8101-8103，所以每一条链路的第一件模块必须上位。
+    pub activated: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -745,6 +750,10 @@ pub fn uninstall_module(
     let slot = state.instance_slot(&instance.instance_id);
     let _exclusive = slot.lock().unwrap_or_else(|e| e.into_inner());
     state.remove_instance(&instance.instance_id)?;
+    // 卸掉的若是原本的 active，槽位会空出来，剩下同 role 的实例只跑备用端口，
+    // 组装层就再也看不到这个角色了。补一个上位（C 类仍要用户显式切换）。
+    // 已经在跑的实例保持原端口，下次启动才落到规范端口。
+    let _ = fill_vacant_active(&state, instance.role, None, false);
     if request.remove_files && removable {
         let base = state.paths.instance_dir_keyed(&instance.instance_id);
         // data/ 是用户数据，按 never_auto_delete 契约保留；包、venv 与日志一起清。
@@ -1147,6 +1156,9 @@ fn commit_install(
         note: None,
     };
     state.upsert(instance)?;
+    // 该 role 的第一件模块直接占下 active 槽：槽空着的话它只会跑备用端口，
+    // 而组装层只认 8101-8103，装完也用不起来。补位失败不影响安装结果。
+    let activated = fill_vacant_active(state, verified.manifest.role, Some(&instance_id), false);
 
     Ok(InstallResponse {
         module_id,
@@ -1159,7 +1171,47 @@ fn commit_install(
         } else {
             TrustVerdictView::UnsignedAllowed
         },
+        activated,
     })
+}
+
+/// 启动时把每个 role 的空 active 槽补齐，返回补上位的实例 ID。
+///
+/// 老版本的安装流程不写 active，装出来三个模块全在 18101+ 的备用端口上跑，
+/// 组装层只认 8101-8103，于是界面看着一切正常、链路一条都连不上。
+/// 「有实例却没有 active」不是可用的状态，启动时一次性修好。
+/// C 类实例仍按契约等用户在菜单里显式切换。
+pub fn heal_active_slots(state: &AppStateV2) -> Vec<String> {
+    let mut healed = Vec::new();
+    for role in [Role::Input, Role::Llm, Role::Output] {
+        if let Some(id) = fill_vacant_active(state, role, None, false) {
+            healed.push(id);
+        }
+    }
+    healed
+}
+
+/// 补齐某个 role 的 active 槽，返回刚上位的实例 ID。
+///
+/// 槽位已占用时什么都不做（新装的退居备用实例，用户可在菜单里切）。
+/// `explicit` 见 `InstalledState::fill_vacant_active`：只有用户亲手挑的
+/// 本地目录才算显式指名，能让 C 类实例上位。
+/// 失败只当没补上，安装本身不因为这一步失败。
+fn fill_vacant_active(
+    state: &AppStateV2,
+    role: launcher_core::manifest::Role,
+    preferred: Option<&str>,
+    explicit: bool,
+) -> Option<String> {
+    let path = state.installed_path();
+    state
+        .mutate_installed(|st| {
+            st.fill_vacant_active(&path, role, preferred, explicit)
+                .map_err(|e| e.to_string())
+        })
+        .ok()
+        .flatten()
+        .map(|plan| plan.next)
 }
 
 /* ------------------------------------------------------------------ */
@@ -1877,6 +1929,10 @@ fn add_local_dir(state: &AppStateV2, raw_path: &str) -> Result<ModuleView, Strin
         note: None,
     };
     state.upsert(instance.clone())?;
+    // 用户亲手选的目录本身就是一次显式指名，所以 dir 实例（恒为 C 类）
+    // 也能在槽空时直接上位——否则开发中的模块只能跑备用端口，
+    // 组装层永远连不上。
+    let _ = fill_vacant_active(state, instance.role, Some(&instance.instance_id), true);
     // 不加 Supervisor 参数时返回无运行态的视图；调用方命令再补上进程快照。
     let view = ModuleView {
         module_id: instance.module_id.clone(),
@@ -1955,6 +2011,10 @@ pub fn remove_local_module(
         return Err("实例正在运行（含外部启动），请先停止再解除登记".into());
     }
     state.remove_instance(&instance.instance_id)?;
+    // 卸掉的若是原本的 active，槽位会空出来，剩下同 role 的实例只跑备用端口，
+    // 组装层就再也看不到这个角色了。补一个上位（C 类仍要用户显式切换）。
+    // 已经在跑的实例保持原端口，下次启动才落到规范端口。
+    let _ = fill_vacant_active(&state, instance.role, None, false);
     // 源码目录归用户所有，绝不删除。
     Ok(())
 }

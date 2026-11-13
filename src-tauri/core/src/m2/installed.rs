@@ -211,6 +211,70 @@ impl InstalledState {
         self.active.get(key).and_then(|id| self.instances.get(id))
     }
 
+    /// active 槽为空时补位。
+    ///
+    /// 组装层只认 8101-8103 的规范端口，非 active 实例一律跑在 18101+ 的备用
+    /// 端口段。因此「这个 role 有实例、却没有 active」不是一种可用的中间状态：
+    /// 链路连不上。安装该 role 的第一个实例、以及卸载掉原本 active 的实例之后
+    /// 都要补上。
+    ///
+    /// `preferred` 是刚装上的实例（槽空时优先选它，用户刚装了它就是要用它）；
+    /// 不在册或角色不符就退回按 `instance_id` 字典序取第一个，保证结果确定。
+    ///
+    /// `explicit` 表示用户刚刚显式指名了这个实例（例如亲手挑的本地目录）。
+    /// 只有它为 true 时 C 类才允许上位——装一个 B/C 类包的确认针对的是
+    /// 「安装」，不是「让它接管链路」，那一步仍要用户自己在菜单里点。
+    pub fn fill_vacant_active(
+        &mut self,
+        path: &Path,
+        role: Role,
+        preferred: Option<&str>,
+        explicit: bool,
+    ) -> Result<Option<ActivePlan>, M2Error> {
+        if !role.needs_runtime() {
+            return Ok(None);
+        }
+        // auxiliary 没有 active 槽：这种角色本来就不占规范端口，不是错误。
+        let Ok(key) = role_key(role) else {
+            return Ok(None);
+        };
+        let key = key.to_string();
+        if self.active.contains_key(&key) {
+            return Ok(None);
+        }
+        let candidate = preferred
+            .filter(|id| {
+                self.instances
+                    .get(*id)
+                    .map(|i| i.role == role)
+                    .unwrap_or(false)
+            })
+            .map(str::to_string)
+            .or_else(|| {
+                let mut ids: Vec<&str> = self
+                    .instances
+                    .values()
+                    .filter(|i| i.role == role)
+                    .map(|i| i.instance_id.as_str())
+                    .collect();
+                ids.sort_unstable();
+                ids.first().map(|id| (*id).to_string())
+            });
+        let Some(next) = candidate else {
+            return Ok(None);
+        };
+        let is_c = self
+            .instances
+            .get(&next)
+            .map(|i| i.verdict == Verdict::C)
+            .unwrap_or(false);
+        if is_c && !explicit {
+            return Ok(None);
+        }
+        self.switch_active(path, role, &next, explicit)
+            .map(Some)
+    }
+
     /// 非 active 实例用备用端口段，避免抢占规范端口。
     pub fn standby_port(&self, index: u16) -> u16 {
         STANDBY_PORT_BASE + index
@@ -308,5 +372,102 @@ mod tests {
         dir_instance.source_kind = InstanceSourceKind::Dir;
         dir_instance.category = Category::Core;
         assert!(state.upsert(dir_instance).is_err());
+    }
+
+    #[test]
+    fn first_instance_of_a_role_fills_the_vacant_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("installed.json");
+        let mut state = InstalledState::new();
+        state
+            .upsert(instance("dounai/demo@stable", Role::Llm, Verdict::A))
+            .unwrap();
+        let plan = state
+            .fill_vacant_active(&path, Role::Llm, Some("dounai/demo@stable"), false)
+            .unwrap()
+            .expect("槽空时应补上");
+        assert!(plan.previous.is_none());
+        assert_eq!(reloaded_active(&path), "dounai/demo@stable");
+    }
+
+    #[test]
+    fn occupied_slot_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("installed.json");
+        let mut state = InstalledState::new();
+        state
+            .upsert(instance("dounai/demo@stable", Role::Llm, Verdict::A))
+            .unwrap();
+        state
+            .switch_active(&path, Role::Llm, "dounai/demo@stable", false)
+            .unwrap();
+        state
+            .upsert(instance("dounai/demo@debug", Role::Llm, Verdict::A))
+            .unwrap();
+        // 第二个实例装上时槽已占用：绝不抢已经生效的那个。
+        assert!(state
+            .fill_vacant_active(&path, Role::Llm, Some("dounai/demo@debug"), false)
+            .unwrap()
+            .is_none());
+        assert_eq!(reloaded_active(&path), "dounai/demo@stable");
+    }
+
+    #[test]
+    fn vacancy_falls_back_to_a_deterministic_pick_and_skips_c_class() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("installed.json");
+        let mut state = InstalledState::new();
+        state
+            .upsert(instance("dounai/demo@zeta", Role::Llm, Verdict::A))
+            .unwrap();
+        state
+            .upsert(instance("dounai/demo@alpha", Role::Llm, Verdict::A))
+            .unwrap();
+        // preferred 不在册（例如清单里的模块名）时按 instance_id 字典序取第一个。
+        let plan = state
+            .fill_vacant_active(&path, Role::Llm, Some("dounai/demo@nope"), false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(plan.next, "dounai/demo@alpha");
+
+        // C 类不自动上位，即便它是唯一实例。
+        let mut c_only = InstalledState::new();
+        c_only
+            .upsert(instance("dounai/demo@local", Role::Llm, Verdict::C))
+            .unwrap();
+        assert!(c_only
+            .fill_vacant_active(&path, Role::Llm, None, false)
+            .unwrap()
+            .is_none());
+        assert_eq!(c_only.active.get("llm"), None);
+        // 用户亲手指名（本地目录导入）才允许 C 类上位。
+        assert!(c_only
+            .fill_vacant_active(&path, Role::Llm, Some("dounai/demo@local"), true)
+            .unwrap()
+            .is_some());
+        assert_eq!(c_only.active["llm"], "dounai/demo@local");
+    }
+
+    #[test]
+    fn shell_and_auxiliary_never_get_an_active_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("installed.json");
+        let mut state = InstalledState::new();
+        state
+            .upsert(instance("dounai/demo@shell", Role::Shell, Verdict::A))
+            .unwrap();
+        assert!(state
+            .fill_vacant_active(&path, Role::Shell, None, false)
+            .unwrap()
+            .is_none());
+        assert!(state
+            .fill_vacant_active(&path, Role::Auxiliary, None, false)
+            .unwrap()
+            .is_none());
+        assert!(state.active.is_empty());
+    }
+
+    fn reloaded_active(path: &Path) -> String {
+        InstalledState::load(path).unwrap().active["llm"].clone()
     }
 }
