@@ -30,6 +30,8 @@ M0 只启用 feature，并冻结 `AdminHost` 接口。`launcher-core` 不依赖 
 
 `src-tauri/capabilities/default.json` 保留 `core:default`，另显式开放 `allow-show`、`allow-hide`、`allow-set-focus`。这是过渡态：`core:default` 含启动器用不到的 menu、tray 与 image 权限，M4 界面重做时替换为逐项清单。
 
+M4 内嵌子 WebView 落地时把授权维度从 `windows: ["main"]` 改成了 `webviews: ["main"]`。Tauri 的 ACL 判定是「webview label 或 window label 任一匹配」，内嵌页挂在 `main` 窗口下，继续用 `windows` 会让它继承主窗口全部命令权限。多 WebView 窗口按 label 授权是官方推荐做法。逐项替换 `core:default` 仍未做，留到 M5 发布加固。
+
 M4 加入子 WebView 时按以下规则改：
 
 1. 显式列出 `core:webview:allow-create-webview`、`allow-reparent`、`allow-set-webview-position`、`allow-set-webview-size` 与 `allow-webview-close`。

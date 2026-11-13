@@ -405,7 +405,7 @@ M3 已按 role 拓扑启动、Job Object 托管与异步探测重写生命周期
 
 管理页看起来像启动器自带的页面，容易让人误解密钥归属。启动器主 UI 要渲染一条常驻横幅，写明边界。
 
-实现状态（2026-11-13 重写）：界面分为骨架、共享层与五个视图。`index.html` 只放左侧栏、页头、正文容器、状态栏与模态挂点；`styles/app.css` 存两套语义令牌；`src/ui/main.ts` 做内存路由与全局刷新。五个视图在 `src/ui/views/`：模块、环境、日志、设置、导入本地。原「套装」页已删除：它按 v1 的 `module_id` 列表规划安装，而 v2 的安装单位是 `module_id@variant`，页面上的「开始安装」从来没接通。在线安装改放在模块页的「模块目录」弹窗里，见 7.7。共享层三件：`store.ts` 管数据与派生查询，`dom.ts` 管转义、toast 与模态，`theme.ts` 管深浅切换。
+实现状态（2026-11-13 重写）：界面分为骨架、共享层与六个视图。`index.html` 只放左侧栏、页头、正文容器、状态栏与模态挂点；`styles/app.css` 存两套语义令牌；`src/ui/main.ts` 做内存路由与全局刷新。六个视图在 `src/ui/views/`：模块、环境、日志、管理、设置、导入本地。原「套装」页已删除：它按 v1 的 `module_id` 列表规划安装，而 v2 的安装单位是 `module_id@variant`，页面上的「开始安装」从来没接通。在线安装改放在模块页的「模块目录」弹窗里，见 7.7。共享层三件：`store.ts` 管数据与派生查询，`dom.ts` 管转义、toast 与模态，`theme.ts` 管深浅切换。
 
 数据只认一处来源：实例与端口取 `list_instance_views`，环境取 `probe_environment`，信任表与保留数取 `settings_snapshot`。界面层不推算端口、不拼指纹，避免与后端分叉。
 
@@ -450,18 +450,20 @@ M3 已按 role 拓扑启动、Job Object 托管与异步探测重写生命周期
 
 ### 7.7 子 WebView
 
-渲染路径：主窗口用 `Window::builder` 创建无 WebView 的壳，主 UI 作为一个子 WebView。点击某实例的“管理”时，在内容区 `add_child` 一个指向回环 URL 的 `WebviewBuilder`，尺寸由 UI 一处计算、core 一处下发。
+渲染路径：主窗口保留自己的 WebView，管理页作为 `Window::add_child` 挂上来的**原生子视图**，覆盖内容区 `#admin-slot` 的坐标。原设计写的是「主窗口用 `Window::builder` 建无 WebView 的壳、主 UI 也作为子 WebView」，实现时没有走这条：那要改 `tauri.conf.json` 的窗口定义、主 UI 的挂载方式与整个 capability 适配，而验收只要求管理页在启动器窗口内。保留主 WebView 不动，五个既有视图零回归。管理页仍是顶层 WebView，不是 iframe，三个上游的 `X-Frame-Options: DENY` 不受影响。
 
 四条行为约束：
 
-1. URL 只能来自 `admin_url_for`。子 WebView 只允许 `http://127.0.0.1:<声明端口>/...`，不接受前端传任意 URL。非 active 实例用备用端口时，URL 取该实例的实际分配端口。
-2. 在独立线程或 async 命令里创建。M4 要在真机验证连续切换多个模块管理页不卡死主线程。
-3. capability 按最小集显式开启 `create_webview` 等权限，不整包放开 `core:webview:*`。
-4. 生命周期绑定进程状态。实例未启动显示本地占位页，health 变 200 时 reload，进程退出时切回占位，卸载时销毁子 WebView。label 按 `instance_id` 派生，重复点击复用。
+1. URL 只能来自 `admin_url_v2`（读 manifest 的 `admin_ui.web_ui.path` 与端口表），前端不传地址；`admin_host::validate_mount_request` 再验一次回环、端口与路径。子 WebView 还挂了 `on_navigation`，只允许同 host 同端口的站内跳转——否则管理页能跳到本机另一个模块的服务当跳板。端口取该实例的实际分配端口，备用端口同样成立。
+2. 创建在独立线程里跑（`TauriAdminHost::mount` 起线程 + channel + 15s 超时）。Windows 上 Webview2 的 COM 初始化会死锁在 `about:blank`，命令线程里建窗是已知的死锁源；连续切换多个实例也不该在命令线程里排队。
+3. **capability 按 webview label 授权**。`default.json` 用 `"webviews": ["main"]` 而不是 `"windows": ["main"]`：Tauri 的 ACL 判定是「webviews 匹配 **或** windows 匹配」，而内嵌页挂在 `main` 窗口下，用 `windows` 会让它继承主窗口的全部命令权限。改成按 label 后，内嵌页（`admin-embed-*`）与独立窗口（`admin-*`）都不匹配，没有任何权限。两条路径仍共用一份 `initialization_script_for_all_frames` 清掉 `__TAURI__` / `__TAURI_INTERNALS__` 等注入——capability 是硬隔离，清注入是纵深防御，不能只做一半。`for_all_frames` 是必须的，上游页面可能用 iframe 加载子页面。
+4. 生命周期绑定进程状态。实例未启动显示本地占位页（不显示连接错误）；health 从非健康变健康时 reload 一次；进程退出时隐藏子视图并回到占位；卸载时 `admin_host_unmount` 销毁。切到别的视图用 `hide` 而不是 `close`——原生视图不会跟着 DOM 消失，不藏就会浮在下一页上，而隐藏能保住页面里填了一半的表单。label 按 `instance_id` 派生（非法字符替换后加哈希），重复点击复用同一个子视图。
 
-子 WebView 创建失败时退化为独立窗口，不丢状态。三个上游不需要改 CSP 或加反向代理，理由见 [ADMIN_UI.md](ADMIN_UI.md)。
+`admin_host.rs` 是 M0 冻结契约，M4 起由 `TauriAdminHost` 真正实现 `AdminHost` 的 mount / unmount / reload 三方法。resize 与 visible 没有生命周期语义，作为宿主自己的方法，不进 trait。`web_ui.embed = false` 的模块按声明开独立窗口，不算降级失败；子 WebView 创建失败时同样自动退化为独立窗口，URL 不变、模块服务仍在跑，不丢状态。
 
-当前 `open_admin_window` 走的是独立外部窗口，用逐帧初始化脚本清除 `__TAURI__` 等注入对象，ACL 仍限定 `windows:["main"]`。M4 换成内嵌子 WebView 后要重新验证注入范围，不能假定独立窗口的结论自动成立。
+坐标由 UI 一处算、core 一处下发：`clampAdminBounds` 把容器矩形夹进可见视口（负坐标与零尺寸会被 `validate_mount_request` 硬拒），窗口缩放时 120ms 一拍重下发，所以这一页不滚动。6 项前端单测钉住夹取、完全不可见与极小窗口。
+
+注入范围仍待真机复核：主窗口 `bridge.ts` 依赖 `window.__TAURI__`，不能全局关 `withGlobalTauri`；清理脚本只作用于管理页与独立窗口的所有 frame。7.6 的七条真机冒烟断言里，第 4 条要用内嵌页实测。
 
 ## 8. 与 SECURITY.md 的分工
 
