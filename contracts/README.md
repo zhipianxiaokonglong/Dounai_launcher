@@ -68,7 +68,7 @@ node contracts/validate.mjs
 node contracts/check-upstreams.mjs
 ```
 
-`validate.mjs` 零依赖，按 `module-v2.schema.json` 校验五份样例与两份状态样例，并核对角色枚举与样例的端口、health、依赖。当前 107 项断言全部通过。CI 另用 ajv 编译六份状态 schema，并对 manifest 与状态样例做数据级校验。
+`validate.mjs` 零依赖，按 `module-v2.schema.json` 校验五份样例与两份状态样例，并核对角色枚举与样例的端口、health、依赖。当前 109 项断言全部通过。CI 另用 ajv 编译六份状态 schema，并对 manifest 与状态样例做数据级校验。
 
 负例覆盖未知 role、路径穿越、缺 `pubkey` 与未验证实例自动更新。M1 新增的负例覆盖相对路径、哈希格式与未知 `kind`。
 
@@ -90,7 +90,7 @@ cargo run --bin sign_catalog -- sign --key k5.priv --catalog catalog.json --out 
 cargo run --bin sign_catalog -- verify --pubkey k5.pub --catalog signed.json
 ```
 
-`pack` 扫描源目录生成 `files`，把带 `pubkey` 的签名段写进 zip 内的 `manifest.json`，不改写源目录。打包后立即自检，输出 catalog 条目要用的 `sha256`、`size` 与 `publisher_fp`。`sign_catalog` 固定用 K5 签名，拒绝有效期超过 7 天的索引。
+`pack` 扫描源目录生成 `files`，把带 `pubkey` 的签名段写进 zip 内的 `manifest.json`，不改写源目录。打包后立即自检，输出 catalog 条目要用的 `sha256`、`size` 与 `publisher_fp`。`sign_catalog` 固定用 K5 签名，拒绝有效期超过 7 天的索引。两把钥匙均已生成，登记文件是 `keys/K1.json` 与 `keys/K5.json`；模块包上传到 SourceForge 的 `dounai-releases` 项目，流程见 [docs/SIGNING.md](../docs/SIGNING.md) 第 5 节。
 
 `keygen` 拒绝覆盖已存在的文件。`--meta` 只写公钥、指纹与用途，不含私钥。密钥体系、保管与轮换规程见 [docs/SIGNING.md](../docs/SIGNING.md)。
 
@@ -115,6 +115,7 @@ cargo run --bin sign_catalog -- verify --pubkey k5.pub --catalog signed.json
 
 - `roles-v1.json` 增加或删除 `role` 时，同步改 `module-v2.schema.json` 的 `role` 枚举、`source-v1.schema.json` 的 `active` 键集合、`catalog-v2.schema.json` 的条目枚举与五份样例。
 - 字段语义不兼容时升文件名版本号，不在原文件里叠加兼容分支。
+- 签名算法标识由 `SHA-256 + Ed25519` 改为 `Ed25519`。改动发生在任何包或 catalog 对外发布之前，没有已分发制品，不升文件名版本号；`validate.mjs` 用负例断言拒收旧值。发布后如需再改，必须升版本。
 - `validate.mjs` 的失败项不得通过放宽 schema 消除。允许例外时，在断言里写明理由。
 - M1 新增 `install-v1.schema.json` 与 `deps-v1.schema.json`。`module-v2.schema.json` 只改 `runtime.deps` 与 `runtime.snapshot_sha256` 的 `description`，字段类型、必填与取值未变，不升文件名版本号。
 - M2 把 `deps-v1` 的落盘路径改成内容寻址 generation，只改 `description`，字段与取值不变，不升文件名版本号。
@@ -132,7 +133,7 @@ M0 实施清单的四项工作已交付到本分支。
 - `launcher-core` 位于 `src-tauri/core`，是不依赖 Tauri 的独立 crate。签名与路径安全模块已迁入，`paths` 与 `AdminHost` 接口已冻结。CI 的 `core` job 单独跑无窗口单测。
 - Tauri 固定为 `=2.12.5` 并启用 `unstable`。capability 维持最小集，升级检查清单见 [TAURI_UPGRADE.md](../docs/TAURI_UPGRADE.md)。
 
-剩余一项属于 M5：K1、K5 两把密钥的生成与编译期内置。生成真实私钥并内置到发布构建前，按 M5 的发布流水线执行，不放在 M0。
+M5 的一项前置工作已完成：K1 与 K5 于 2026-11-13 生成并内置到 `state_v2.rs`，公钥登记在 `keys/K1.json` 与 `keys/K5.json`。私钥离线保管，不进仓库与 CI。模块包托管在 SourceForge 的 `dounai-releases` 项目，官方 catalog 尚未签发，发布流水线仍属 M5。
 
 以上工作全部限定在 Windows。Windows 专属进程代码放进 `process/win`，不写跨平台 trait 的空壳。
 
@@ -176,6 +177,6 @@ M1 新增两份状态 schema，不改 M0 已冻结的约束。
 | `deps-v1` 的 `instance_id` | 长度不超过 128，字符限白名单，斜杠分段不得为空、为 `.` 或为 `..` |
 | `install-v1` 的绝对路径 | 接受 UNC 双反斜杠前缀，拒绝控制字符、相对路径与尾部的点或空格 |
 
-`validate.mjs` 为四处收紧各配了正例与负例，合计从 84 项增至 107 项；脚本固定断言总数，增删断言必须同步更新常量。`examples/state/` 放两份合法状态数据，CI 用 ajv 对这两份样例做数据级校验，不再只编译 schema。引擎的键名格式与契约一致，只接受大写；保留键另按大小写不敏感判断，比契约多一层，两层都要保留。
+`validate.mjs` 为四处收紧各配了正例与负例，合计从 84 项增至 107 项；签名算法标识纠错后又补一条正例与一条负例，现为 109 项。脚本固定断言总数，增删断言必须同步更新常量。`examples/state/` 放两份合法状态数据，CI 用 ajv 对这两份样例做数据级校验，不再只编译 schema。引擎的键名格式与契约一致，只接受大写；保留键另按大小写不敏感判断，比契约多一层，两层都要保留。
 
 `module-v2.schema.json` 只改了两处说明文字。`runtime.deps.kind` 由发布者声明，启动器不嗅探、不按优先级猜测；`runtime.snapshot_sha256` 是发布者预置的哈希，包签名后不可变，运行时生成的哈希另记在 `state/runtime.json`。

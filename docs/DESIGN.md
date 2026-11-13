@@ -25,7 +25,7 @@
 | 角色是五值封闭枚举，编译期内嵌 | 远端动态新增角色等于绕过契约自检。未知 `role` 硬拒，不降级成 `auxiliary`。新增数据面角色需要同时改组装层的端口、事件转发与解析代码，本版不做。 |
 | 官方不保留短名 | 所有 `module_id` 用 `namespace/name`。namespace 只是命名，“官方”标签只由内置 K1 指纹验通授予。 |
 | 旧版保留数量用户可配，默认 3 | pinned 实例不计配额。`data_dir` 永不自动删除。清理只在新版成功激活后执行。 |
-| K1、K5 与打包分发由启动器开发者承担 | 两把密钥生成、catalog 签名与发布流水线都在启动器仓内。“官方”指启动器发布通道，不表示五个上游作者背书。 |
+| K1、K5 与打包分发由发布方承担 | 两把密钥生成、catalog 签名与上传都在启动器仓内完成。模块包托管在 SourceForge 的 `dounai-releases` 项目。“官方”指发布通道，不表示五个上游作者背书。 |
 | 仅 Windows 10 / 11 | Job Object、`CREATE_NO_WINDOW`、NSIS 钩子、WebView2 引导器与注册表元数据都是 Windows 专属。只抽进程 trait 覆盖不了这些差异，还会让文档看起来已支持跨平台。 |
 | 不读取 v1 包格式 | v1 包从未打包分发。`schema_version: 2` 直接定死，不设读取层与过渡期。 |
 | 离线只做单包导入，并支持本地目录 | 目录实例的源码随时可变，完整性语义与 zip 不同，按源码工作区处理。 |
@@ -187,9 +187,11 @@ venv 也按 generation 分目录，路径是 `instances/<instance_key>/venvs/<sh
 
 ### 7.2 catalog 与密钥
 
-GitHub Releases 与 SourceForge Files 放同一份 K5 签名的 `catalog.json`。启动器选一源拉索引、验签、按 URL 下包、验包哈希，不需要理解两套发布 API。
+模块包由发布方生成，托管在 SourceForge 的 `dounai-releases` 项目，地址 `https://sourceforge.net/projects/dounai-releases/files/`。是否在 GitHub Releases 同步一份索引尚未确定；catalog 的 `sources` 数组已能声明多个源，加源不需要改代码。
 
-两个源的已知约束：GitHub REST API 未认证时每小时每 IP 限 60 次，不能每次启动查 `/releases/latest`；asset 会重定向，白名单要覆盖目标域名。SourceForge 的 `/download` 跳动态镜像域名，没有稳定 host，改用域名后缀集加逐跳重定向校验，最终以 sha256 为准。
+启动器选一源拉索引、验签、按 URL 下包、验包哈希，不需要理解发布平台的 API。
+
+已知约束：GitHub REST API 未认证时每小时每 IP 限 60 次，不能每次启动查 `/releases/latest`；asset 会重定向，白名单要覆盖目标域名。SourceForge 的 `/download` 跳动态镜像域名，没有稳定 host，改用域名后缀集加逐跳重定向校验，最终以 sha256 为准。当前确定使用 SourceForge，GitHub 适配器保留但未启用。
 
 `SourceAdapter` 按 catalog URL 注册，官方两源内置，第三方源由用户在设置里显式添加 URL 后生效。添加源不需要配置源公钥，信任来自包内签名。接口与不变式见 [contracts/source-adapter-v1.md](../contracts/source-adapter-v1.md)。
 
@@ -206,7 +208,7 @@ catalog 用 K5 签名，签的是索引、版本单调性与新鲜度。K1 只�
 
 私钥离线保管，不进 CI 变量、不入库。GitHub token 只允许用户在设置里自填，绝不内置。
 
-K1 已于 2026-11-13 生成并内置指纹，规程见 [SIGNING.md](SIGNING.md)。K5 仍是占位值，远程 catalog 分发未启用。
+K1 与 K5 均已于 2026-11-13 生成并内置，规程见 [SIGNING.md](SIGNING.md)。模块包托管在 SourceForge 的 `dounai-releases` 项目，官方 catalog 尚未签发，远程分发未启用。
 
 ### 7.3 包信任
 

@@ -204,7 +204,7 @@ M2 主体逻辑落在 `src-tauri/core/src/m2/`，含 10 个模块。网络只经
 
 结论：M3 的静态门禁全绿，六条真机验收均未实测。按 [ROADMAP.md](ROADMAP.md) 的规则，离线断言不计通过。
 
-静态门禁在 `src-tauri/` 下跑：`cargo fmt --all -- --check`、`cargo clippy --offline --workspace --all-targets -- -D warnings`、`cargo test --offline --workspace --all-targets`。M3.4 删掉 v1 后共 11 组测试目标零失败，其中 app lib 86 项、core lib 152 项、M2 端到端 9 项、生命周期 11 项。`cargo test --test fuzz_invariants` 8 项与 `--test sign_real_manifests` 2 项单独跑过，`ci.yml` 的 fuzz 前置依赖没有因删 v1 模块失效。前端 `npm run typecheck` 与 `vite build` 通过。契约 107 项断言、ajv 的六份状态 schema 编译与两份状态样例数据级校验通过。
+静态门禁在 `src-tauri/` 下跑：`cargo fmt --all -- --check`、`cargo clippy --offline --workspace --all-targets -- -D warnings`、`cargo test --offline --workspace --all-targets`。M3.4 删掉 v1 后共 11 组测试目标零失败，其中 app lib 86 项、core lib 152 项、M2 端到端 9 项、生命周期 11 项。`cargo test --test fuzz_invariants` 8 项与 `--test sign_real_manifests` 2 项单独跑过，`ci.yml` 的 fuzz 前置依赖没有因删 v1 模块失效。前端 `npm run typecheck` 与 `vite build` 通过。契约 109 项断言、ajv 的六份状态 schema 编译与两份状态样例数据级校验通过。
 
 M3 代码落在四处：core 的 `lifecycle/` 纯逻辑、app 的 `process/win.rs` 与 `lifecycle_runtime.rs`、`commands_v2.rs` 与 `state_v2.rs`。命令面保留 v1 的 21 个命令名与返回形状，另加 11 个 v2 命令，`src/bridge.ts` 零改动。
 
@@ -220,7 +220,7 @@ M3 代码落在四处：core 的 `lifecycle/` 纯逻辑、app 的 `process/win.r
 ### 已知限制
 
 1. M3 不写日志文件，重启后没有历史崩溃记录。`read_instance_logs` 恒返回空行与说明文字。
-2. 内置 K5 公钥是占位值，远程 catalog 验签一律失败并按 `unavailable` 返回，不降级放行。`set_k5_pubkey` 可登记真实公钥，界面入口在 M4。
+2. 内置 K5 公钥是真实值，但还没有已签发的 catalog，`refresh_catalog` 按 `unavailable` 返回，不降级放行。`set_k5_pubkey` 可在本次会话内替换公钥，界面入口在 M4。
 3. `switch_active` 只做 `installed.json` 原子写，没有停旧起新与进程回滚。ROADMAP M2 第 9 条仍未关闭。
 4. `prepare_instance_env` 未按实例串行化，同一实例并发 prepare 的 `.staging` 互删风险仍在。
 5. 卸载只删 zip 实例的包目录，不删 venv；purge 跳过运行中实例，没有先停全部进程。
@@ -238,18 +238,18 @@ M3 代码落在四处：core 的 `lifecycle/` 纯逻辑、app 的 `process/win.r
 | 管理窗口暴露 Tauri 注入 | `open_admin_window` 的逐帧初始化脚本 | 与上游同一段脚本 |
 | CI 缺前端依赖审计 | `ci.yml` 的 frontend job | 与上游同为生产依赖阻断、开发依赖报告两步 |
 
-门禁：`cargo fmt --all -- --check`、`clippy --offline --workspace --all-targets -- -D warnings`、`cargo test --offline --workspace --all-targets` 全绿，11 组测试目标零失败，app lib 87 项，比 M3.5 记录的 86 项多 1 项盘符提取单测。`npm run typecheck` 通过，`npm test` 65 项全过，`vite build` 通过。契约 107 项断言与 ajv 六份状态 schema 编译通过。CI 工作流用临时安装的 YAML 解析器解析成功：5 个 job，frontend 8 步，含两步审计。上游 `b8ab274` 修的就是注释写坏导致工作流在解析阶段终止，这一步不省。
+门禁：`cargo fmt --all -- --check`、`clippy --offline --workspace --all-targets -- -D warnings`、`cargo test --offline --workspace --all-targets` 全绿，11 组测试目标零失败，app lib 87 项，比 M3.5 记录的 86 项多 1 项盘符提取单测。`npm run typecheck` 通过，`npm test` 65 项全过，`vite build` 通过。契约 109 项断言与 ajv 六份状态 schema 编译通过。CI 工作流用临时安装的 YAML 解析器解析成功：5 个 job，frontend 8 步，含两步审计。上游 `b8ab274` 修的就是注释写坏导致工作流在解析阶段终止，这一步不省。
 
 四项都未实测。显存取值依赖真实显卡与注册表，磁盘取值依赖真实卷。外部服务识别依赖真实 HTTP 服务，注入清理依赖真实 WebView。按 [ROADMAP.md](ROADMAP.md) 开头的规则，离线断言不计通过。
 
-## K1 密钥生成与打包验签离线验收（2026-11-13）
+## K1 与 K5 密钥生成、打包与验签离线验收（2026-11-13）
 
-结论：K1 已生成并内置，工具签出的包在 M2 运行时判为 A 类。真机安装未实测。
+结论：K1 与 K5 均已生成并内置。K1 签出的包在 M2 运行时判为 A 类，K5 签出的 catalog 能通过 `CatalogDocument::parse`。真机安装与 SourceForge 拉取未实测。
 
-生成侧：`pack keygen` 加了防覆盖、用途标注与公钥登记文件。私钥写到仓库外目录，ACL 移除继承权限后只授予当前用户。登记文件 `keys/K1.json` 只含公钥、指纹与用途，单测断言不含私钥材料。`state_v2.rs` 换上真实 K1 指纹，另有单测核对指纹由内置公钥算出。
+生成侧：`pack keygen` 加了防覆盖、用途标注与公钥登记文件。两把钥匙写到仓库外不同目录，ACL 移除继承权限后只授予当前用户。登记文件 `keys/K1.json` 与 `keys/K5.json` 只含公钥、指纹与用途，不含私钥材料。`state_v2.rs` 换上真实的 K1、K5 公钥与指纹，单测核对两枚指纹各自由内置公钥算出，并断言两把钥匙不相等。
 
-运行时侧：`src-tauri/tests/signing_roundtrip.rs` 用工具打包，再送进 `verify_zip`、`PackageManifest::parse` 与 `classify`。固定种子与真实 K1 各跑一遍，2 项断言全过。真实 K1 那一遍同时核对内置指纹与私钥匹配。篡改 `entry.command` 后判 D 类硬拒。另用真实私钥把 `contracts/examples/omninexus.v2.json` 打成 zip，`pack verify` 的验签与逐文件哈希通过。
+运行时侧：`src-tauri/tests/signing_roundtrip.rs` 用发布工具打包与签索引，再送进 `verify_zip`、`CatalogDocument::parse` 与 `classify`。固定种子与真实密钥各跑一遍，3 项断言全过。真实密钥那一遍同时核对内置指纹与私钥匹配。篡改 `entry.command` 后判 D 类硬拒，篡改 catalog 条目后 `parse` 报验签失败。另用真实 K1 把 `contracts/examples/omninexus.v2.json` 打成 zip，`pack verify` 的验签与逐文件哈希通过；用真实 K5 签一份指向 SourceForge 的 catalog，`sign_catalog verify` 通过。
 
-未实测：真机安装、两源 catalog 拉取、K5 签名分发、私钥保管过程。私钥保管属人工操作，离线断言不覆盖。按 [ROADMAP.md](ROADMAP.md) 开头的规则，这些结果不计真机验收通过。
+未实测：真机安装、从 SourceForge 拉取 catalog 与包、上传后的回读校验、私钥与上传凭据的保管过程。后两项属人工操作，离线断言不覆盖。按 [ROADMAP.md](ROADMAP.md) 开头的规则，这些结果不计真机验收通过。
 
-说明：`algo` 契约为 `SHA-256 + Ed25519`，实际签名输入是 `canonical_payload` 的字节，Ed25519 内部用 SHA-512。SHA-256 用于逐文件哈希与公钥指纹。契约字符串不动，口径见 [SIGNING.md](SIGNING.md)。
+说明：`algo` 的契约值已改为 `Ed25519`。签名输入是 `canonical_payload` 的字节，Ed25519 内部用 SHA-512。SHA-256 只用于逐文件哈希与公钥指纹。旧字面量 `SHA-256 + Ed25519` 由 `validate.mjs` 的负例断言拒收，断言总数从 107 增至 109。口径见 [SIGNING.md](SIGNING.md)。
