@@ -18,6 +18,8 @@ fn main() {
                 let _ = w.unminimize();
             }
         }))
+        // 只提供服务端文件选择器：拿到路径后由 install_local_package 自己读文件。
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // 双根：安装根是只读的程序目录，数据根是用户本地应用数据目录。
             // 两者必须不同，Paths::new 会校验，避免把用户数据写进 Program Files。
@@ -51,6 +53,8 @@ fn main() {
             dounai_launcher::commands_v2::set_module_enabled,
             dounai_launcher::commands_v2::uninstall_module,
             dounai_launcher::commands_v2::install_module,
+            dounai_launcher::commands_v2::inspect_local_package,
+            dounai_launcher::commands_v2::install_local_package,
             dounai_launcher::commands_v2::download_package,
             dounai_launcher::commands_v2::refresh_catalog,
             dounai_launcher::commands_v2::trust_info,

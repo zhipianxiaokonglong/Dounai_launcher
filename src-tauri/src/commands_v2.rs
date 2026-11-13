@@ -902,29 +902,40 @@ fn runtime_manifest(raw: &serde_json::Value) -> Result<ModuleManifestV2, String>
     serde_json::from_value(raw.clone()).map_err(|e| format!("manifest 缺少运行时字段：{e}"))
 }
 
-#[tauri::command]
-pub fn install_module(
-    state: State<'_, AppStateV2>,
-    request: InstallRequest,
+/// 安装一个已经过整包哈希校验的包：判级 → 落盘 → 登记实例。
+///
+/// 离线包（`install_module`）与本地 zip（`install_local_package`）共用这一段，
+/// 验签判定只写一份，不会因为入口不同而各自漂移。
+///
+/// `module_id_in_request` 与 `version_in_request` 是「调用方以为的包内容」，
+/// 用于挡住请求与包内清单不一致的情况；本地导入没有这两个声明，传 None。
+fn commit_install(
+    state: &AppStateV2,
+    bytes: &[u8],
+    expected_sha256: &str,
+    module_id_in_request: Option<&str>,
+    version_in_request: Option<&str>,
+    confirmed: bool,
 ) -> Result<InstallResponse, String> {
-    if request.expected_sha256.trim().is_empty() {
+    if expected_sha256.trim().is_empty() {
         return Err("拒绝安装：缺少 expected_sha256".into());
     }
-    let bytes = base64_decode(&request.zip_base64)?;
-    let expected = prefixed_sha256(request.expected_sha256.trim());
+    let expected = prefixed_sha256(expected_sha256.trim());
     let expectation = ZipExpectation {
         sha256: Some(expected.as_str()),
         size: None,
         max_unpacked: MAX_UNPACKED_BYTES,
     };
-    let verified = verify_zip(&bytes, &expectation).map_err(|e| e.to_string())?;
-    if verified.manifest.module_id != request.module_id {
-        return Err(format!(
-            "包内 module_id（{}）与请求（{}）不一致",
-            verified.manifest.module_id, request.module_id
-        ));
+    let verified = verify_zip(bytes, &expectation).map_err(|e| e.to_string())?;
+    if let Some(want) = module_id_in_request {
+        if verified.manifest.module_id != want {
+            return Err(format!(
+                "包内 module_id（{}）与请求（{want}）不一致",
+                verified.manifest.module_id
+            ));
+        }
     }
-    if let Some(version) = request.version.as_deref() {
+    if let Some(version) = version_in_request {
         if !version.is_empty() && version != verified.manifest.version {
             return Err(format!(
                 "包内版本（{}）与请求（{version}）不一致",
@@ -935,12 +946,12 @@ pub fn install_module(
 
     // 验签分类只看包内 manifest，绝不采信请求里传的 manifest 对象。
     // catalog entry 与历史指纹先取成 owned，再进只读闭包，避免悬垂引用。
-    let cached_entry = state.cached_catalog().and_then(|doc| {
-        doc.entry(&request.module_id, &verified.manifest.variant)
-            .cloned()
-    });
+    let module_id = verified.manifest.module_id.clone();
+    let cached_entry = state
+        .cached_catalog()
+        .and_then(|doc| doc.entry(&module_id, &verified.manifest.variant).cloned());
     let previous_fp = state
-        .instances_for_module(&request.module_id)
+        .instances_for_module(&module_id)
         .first()
         .and_then(|i| i.publisher_fp.clone());
     let classification = state.with_trust(|store| {
@@ -961,12 +972,6 @@ pub fn install_module(
             classification.reason
         ));
     }
-    let confirmed = request.confirm.unwrap_or(false)
-        || request
-            .manifest
-            .get("confirm")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
     if classification.verdict.needs_confirmation() && !confirmed {
         return Err(format!(
             "该包为 {} 类，需要用户显式确认后才能安装：{}",
@@ -1023,7 +1028,7 @@ pub fn install_module(
     state.upsert(instance)?;
 
     Ok(InstallResponse {
-        module_id: request.module_id,
+        module_id,
         files: verified.files.len(),
         bytes: verified.size,
         replaced,
@@ -1034,6 +1039,201 @@ pub fn install_module(
             TrustVerdictView::UnsignedAllowed
         },
     })
+}
+
+#[tauri::command]
+pub fn install_module(
+    state: State<'_, AppStateV2>,
+    request: InstallRequest,
+) -> Result<InstallResponse, String> {
+    let bytes = base64_decode(&request.zip_base64)?;
+    // v1 遗留字段只用来传用户确认，签名判定一律以包内 manifest 为准。
+    let confirmed = request.confirm.unwrap_or(false)
+        || request
+            .manifest
+            .get("confirm")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+    commit_install(
+        &state,
+        &bytes,
+        &request.expected_sha256,
+        Some(&request.module_id),
+        request.version.as_deref(),
+        confirmed,
+    )
+}
+
+/* ------------------------------------------------------------------ */
+/* 本地包导入：选一个 .zip，先看清楚再装                                */
+/* ------------------------------------------------------------------ */
+
+/// `inspect_local_package` 的结果：装之前先把包内清单摊开给用户看。
+#[derive(Debug, Serialize)]
+pub struct LocalPackagePreview {
+    pub path: String,
+    pub module_id: String,
+    pub name: String,
+    pub version: String,
+    pub variant: String,
+    pub role: Role,
+    pub category: Category,
+    pub files: usize,
+    pub bytes: u64,
+    pub sha256: String,
+    pub publisher_fp: Option<String>,
+    pub verdict: String,
+    pub reason: String,
+    pub signed: bool,
+    pub needs_confirmation: bool,
+    pub replace_existing: bool,
+}
+
+/// 本地包上限：解压上限由 `MAX_UNPACKED_BYTES` 兜，这里只挡明显选错的文件。
+const MAX_LOCAL_ZIP_BYTES: u64 = 256 * 1024 * 1024;
+
+fn read_local_zip(raw_path: &str) -> Result<(PathBuf, Vec<u8>), String> {
+    let trimmed = raw_path.trim().trim_matches('"');
+    if trimmed.is_empty() {
+        return Err("请先选择一个 .zip 模块包".into());
+    }
+    let path = PathBuf::from(trimmed);
+    if !path.is_file() {
+        return Err(format!("文件不存在：{}", path.display()));
+    }
+    let is_zip = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("zip"))
+        .unwrap_or(false);
+    if !is_zip {
+        return Err("只支持 .zip 模块包".into());
+    }
+    let size = std::fs::metadata(&path)
+        .map_err(|e| format!("读取文件信息失败：{e}"))?
+        .len();
+    if size > MAX_LOCAL_ZIP_BYTES {
+        return Err(format!(
+            "包太大（{} MB，上限 {} MB）",
+            size / 1024 / 1024,
+            MAX_LOCAL_ZIP_BYTES / 1024 / 1024
+        ));
+    }
+    let bytes = std::fs::read(&path).map_err(|e| format!("读取文件失败：{e}"))?;
+    Ok((path, bytes))
+}
+
+/// 解包 + 分类，供「检查」和「安装」共用；不落盘、不改状态。
+fn inspect_bytes(
+    state: &AppStateV2,
+    bytes: &[u8],
+) -> Result<(launcher_core::m2::package::VerifiedPackage, TrustView), String> {
+    let expectation = ZipExpectation {
+        sha256: None,
+        size: None,
+        max_unpacked: MAX_UNPACKED_BYTES,
+    };
+    let verified = verify_zip(bytes, &expectation).map_err(|e| e.to_string())?;
+    let cached_entry = state.cached_catalog().and_then(|doc| {
+        doc.entry(&verified.manifest.module_id, &verified.manifest.variant)
+            .cloned()
+    });
+    let previous_fp = state
+        .instances_for_module(&verified.manifest.module_id)
+        .first()
+        .and_then(|i| i.publisher_fp.clone());
+    let classification = state.with_trust(|store| {
+        classify(
+            store,
+            &verified.manifest,
+            &ClassifyContext {
+                catalog_entry: cached_entry.as_ref(),
+                expected_signer_fp: None,
+                previous_publisher_fp: previous_fp.as_deref(),
+            },
+        )
+        .map_err(|e| e.to_string())
+    })?;
+    Ok((
+        verified,
+        TrustView {
+            verdict: classification.verdict.as_str().to_string(),
+            reason: classification.reason.clone(),
+            publisher_fp: classification.publisher_fp.clone(),
+            signed: classification.signature_present,
+            needs_confirmation: classification.verdict.needs_confirmation(),
+        },
+    ))
+}
+
+/// 判级结果：命令面只暴露这一份，预览与安装走的判定完全一致。
+#[derive(Debug, Clone)]
+struct TrustView {
+    verdict: String,
+    reason: String,
+    publisher_fp: Option<String>,
+    signed: bool,
+    needs_confirmation: bool,
+}
+
+#[tauri::command]
+pub async fn inspect_local_package(
+    state: State<'_, AppStateV2>,
+    path: String,
+) -> Result<LocalPackagePreview, String> {
+    // 读文件与解包都是磁盘活，放到阻塞池，别占住事件循环。
+    let (resolved, bytes) = tauri::async_runtime::spawn_blocking(move || read_local_zip(&path))
+        .await
+        .map_err(|e| format!("读取包失败：{e}"))??;
+    let (verified, trust) = inspect_bytes(&state, &bytes)?;
+    let instance_id = format!(
+        "{}@{}",
+        verified.manifest.module_id, verified.manifest.variant
+    );
+    Ok(LocalPackagePreview {
+        path: resolved.to_string_lossy().into_owned(),
+        module_id: verified.manifest.module_id.clone(),
+        name: verified
+            .manifest
+            .raw
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&verified.manifest.module_id)
+            .to_string(),
+        version: verified.manifest.version.clone(),
+        variant: verified.manifest.variant.clone(),
+        role: verified.manifest.role,
+        category: verified.manifest.category,
+        files: verified.files.len(),
+        bytes: verified.size,
+        sha256: verified.sha256.clone(),
+        publisher_fp: trust.publisher_fp.clone(),
+        verdict: trust.verdict.clone(),
+        reason: trust.reason.clone(),
+        signed: trust.signed,
+        needs_confirmation: trust.needs_confirmation,
+        replace_existing: state.instance(&instance_id).is_some(),
+    })
+}
+
+#[tauri::command]
+pub async fn install_local_package(
+    state: State<'_, AppStateV2>,
+    path: String,
+    expected_sha256: String,
+    confirm: Option<bool>,
+) -> Result<InstallResponse, String> {
+    let (_, bytes) = tauri::async_runtime::spawn_blocking(move || read_local_zip(&path))
+        .await
+        .map_err(|e| format!("读取包失败：{e}"))??;
+    commit_install(
+        &state,
+        &bytes,
+        &expected_sha256,
+        None,
+        None,
+        confirm.unwrap_or(false),
+    )
 }
 
 #[tauri::command]
@@ -2128,5 +2328,91 @@ mod tests {
         assert_eq!(views[1].port, Some(18101));
         assert!(!views[1].active);
         assert!(views[1].snapshot.is_none());
+    }
+
+    /// 造一个未签名的合法包：`files` 必须与 zip 内条目逐一对应。
+    fn unsigned_package() -> Vec<u8> {
+        use sha2::{Digest, Sha256};
+        use std::io::Write as _;
+        use zip::write::SimpleFileOptions;
+
+        let body = b"[project]\nname = \"demo\"\n";
+        let sha = format!("sha256:{}", hex::encode(Sha256::digest(body)));
+        let manifest = serde_json::json!({
+            "schema_version": 2,
+            "module_id": "dounai/demo-local",
+            "name": "演示模块",
+            "version": "0.1.0",
+            "variant": "stable",
+            "role": "llm",
+            "category": "optional",
+            "publisher": { "id": "demo", "name": "Demo" },
+            "requires": { "launcher": ">=1.0.0" },
+            "runtime": {
+                "python": ">=3.11,<3.14",
+                "venv": "{instance_venv}",
+                "deps": { "kind": "pyproject", "path": "pyproject.toml" }
+            },
+            "entry": { "command": "{venv_python} -m demo", "env": {}, "health": null },
+            "ports": [8101],
+            "permissions": { "network": [], "filesystem": [], "devices": [] },
+            "files": { "pyproject.toml": sha },
+            "signature": null
+        });
+        let mut out = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut out));
+            let options = SimpleFileOptions::default();
+            writer.start_file("manifest.json", options).unwrap();
+            writer.write_all(manifest.to_string().as_bytes()).unwrap();
+            writer.start_file("pyproject.toml", options).unwrap();
+            writer.write_all(body).unwrap();
+            writer.finish().unwrap();
+        }
+        out
+    }
+
+    #[test]
+    fn local_package_needs_confirmation_then_installs() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppStateV2::new(dir.path().join("app"), dir.path().join("data")).unwrap();
+        let zip_path = dir.path().join("demo.zip");
+        std::fs::write(&zip_path, unsigned_package()).unwrap();
+
+        let (resolved, bytes) = read_local_zip(zip_path.to_str().unwrap()).unwrap();
+        assert_eq!(resolved, zip_path);
+        let (verified, trust) = inspect_bytes(&state, &bytes).unwrap();
+        // 未签名一律 C 类，必须让用户显式确认。
+        assert_eq!(trust.verdict, "C");
+        assert!(trust.needs_confirmation);
+        assert!(!trust.signed);
+        assert_eq!(verified.files.len(), 1);
+
+        let sha = verified.sha256.clone();
+        let err = commit_install(&state, &bytes, &sha, None, None, false).unwrap_err();
+        assert!(err.contains("需要用户显式确认"), "{err}");
+        assert!(state.instance("dounai/demo-local@stable").is_none());
+
+        let response = commit_install(&state, &bytes, &sha, None, None, true).unwrap();
+        assert_eq!(response.module_id, "dounai/demo-local");
+        assert_eq!(response.files, 1);
+        assert!(!response.replaced);
+        assert!(state.instance("dounai/demo-local@stable").is_some());
+
+        // 装第二次会覆盖：包目录已存在，返回 replaced。
+        let again = commit_install(&state, &bytes, &sha, None, None, true).unwrap();
+        assert!(again.replaced);
+    }
+
+    #[test]
+    fn local_package_hash_mismatch_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppStateV2::new(dir.path().join("app"), dir.path().join("data")).unwrap();
+        let bytes = unsigned_package();
+        // 检查后文件被换掉：调用方带着旧哈希来装，必须失败而不是装进去。
+        let bogus = format!("sha256:{}", "0".repeat(64));
+        let err = commit_install(&state, &bytes, &bogus, None, None, true).unwrap_err();
+        assert!(err.contains("整包哈希不符"), "{err}");
+        assert!(state.instance("dounai/demo-local@stable").is_none());
     }
 }

@@ -30,6 +30,8 @@ ed25519-dalek = { version = "3.0.0", features = ["rand_core"] }
 base64 = "0.23.1"
 tauri = { version = "=2.12.5", features = ["unstable"] }
 tauri-plugin-single-instance = "2.5.4"
+# 只为「导入本地包」用系统文件选择器：不放开 fs 插件，路径拿到后由 Rust 读文件。
+tauri-plugin-dialog = "2.8.4"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 
 [target.'cfg(windows)'.dependencies]

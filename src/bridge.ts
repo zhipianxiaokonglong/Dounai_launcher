@@ -224,6 +224,68 @@ export async function removeLocalModule(moduleId: string): Promise<void> {
 }
 
 /* ------------------------------------------------------------------ */
+/* 本地包（.zip）                                                      */
+/* ------------------------------------------------------------------ */
+
+/** 打开系统文件选择器，返回选中的 .zip 绝对路径；取消返回 null。 */
+export async function pickPackageFile(): Promise<string | null> {
+  const invoke = getInvoke();
+  if (!invoke) throw new BridgeUnavailableError();
+  const picked = await invoke("plugin:dialog|open", {
+    options: {
+      title: "选择模块包",
+      multiple: false,
+      directory: false,
+      filters: [{ name: "模块包", extensions: ["zip"] }],
+    },
+  });
+  return typeof picked === "string" && picked.length > 0 ? picked : null;
+}
+
+/** 装之前先把包内清单摊开：装的是什么、谁签的、要不要你确认。 */
+export interface LocalPackagePreview {
+  path: string;
+  module_id: string;
+  name: string;
+  version: string;
+  variant: string;
+  role: string;
+  category: string;
+  files: number;
+  bytes: number;
+  sha256: string;
+  publisher_fp: string | null;
+  /** A/B/C/D。D 不给确认入口，直接拒绝。 */
+  verdict: string;
+  reason: string;
+  signed: boolean;
+  needs_confirmation: boolean;
+  replace_existing: boolean;
+}
+
+export async function inspectLocalPackage(path: string): Promise<LocalPackagePreview> {
+  return call<LocalPackagePreview>("inspect_local_package", { path });
+}
+
+/**
+ * 安装本地包。
+ *
+ * `expectedSha256` 是检查时看到的哈希：安装会再算一次并比对，
+ * 文件在中途被换掉会直接失败，而不是装进去一个没看过的包。
+ */
+export async function installLocalPackage(
+  path: string,
+  expectedSha256: string,
+  confirm: boolean,
+): Promise<InstallResponse> {
+  return call<InstallResponse>("install_local_package", {
+    path,
+    expectedSha256,
+    confirm,
+  });
+}
+
+/* ------------------------------------------------------------------ */
 /* 安装                                                                */
 /* ------------------------------------------------------------------ */
 

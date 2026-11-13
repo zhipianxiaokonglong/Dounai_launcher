@@ -155,10 +155,10 @@ function renderBody(body: HTMLElement): void {
         <b>${store.views.length === 0 ? "还没有登记任何模块" : "没有匹配的实例"}</b>
         <p>${
           store.views.length === 0
-            ? "到「导入本地」登记一个已下载的目录，或用离线包安装。登记不会复制也不会删除你的文件。"
+            ? "到「导入本地」装一个 .zip 离线包，或登记一个已有的源码目录。登记目录不会复制也不会删除你的文件。"
             : "清空搜索词或取消「只看有问题的」再试。"
         }</p>
-        ${store.views.length === 0 ? '<button class="btn btn--primary btn--sm" type="button" data-act="goto-import">登记本地目录</button>' : ""}
+        ${store.views.length === 0 ? '<button class="btn btn--primary btn--sm" type="button" data-act="goto-import">去导入模块包</button>' : ""}
       </div>`,
     );
   }

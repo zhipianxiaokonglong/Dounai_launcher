@@ -1,11 +1,12 @@
 {
   "identifier": "default",
-  "description": "最小权限集：core:default 供现有命令面调用，另开放窗口显示与焦点；不放开文件系统、Shell、任意网络与 core:webview:*。子 WebView 所需权限按 docs/TAURI_UPGRADE.md 在 M4 逐项加入",
+  "description": "最小权限集：core:default 供现有命令面调用，另开放窗口显示与焦点、文件选择器（只选不读，读文件由 Rust 命令自己做）；不放开文件系统、Shell、任意网络与 core:webview:*。子 WebView 所需权限按 docs/TAURI_UPGRADE.md 在 M4 逐项加入",
   "windows": ["main"],
   "permissions": [
     "core:default",
     "core:window:allow-show",
     "core:window:allow-hide",
-    "core:window:allow-set-focus"
+    "core:window:allow-set-focus",
+    "dialog:allow-open"
   ]
 }
