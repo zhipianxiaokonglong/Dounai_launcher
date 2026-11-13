@@ -233,7 +233,7 @@ dir 允许重解析，哈希变化写进 `runtime.json` 的 `snapshot_change`，
 
 `SourceAdapter` 按 catalog URL 注册，官方两源内置，第三方源由用户在设置里显式添加 URL 后生效。添加源不需要配置源公钥，信任来自包内签名。接口与不变式见 [contracts/source-adapter-v1.md](../contracts/source-adapter-v1.md)。
 
-> **计划变更（M8，2026-11-13 追加）**：上面「添加源不需要配置源公钥」是单源假设下的结论，描述的是当前实现，不是多源下的目标。当前 `refresh_catalog` 对任何 URL 都用内置 K5 验签，社区源用自己的钥匙签 catalog 会验不过，共用官方 K5 私钥又等于交出官方新鲜度锚，不签 catalog 则丢掉 `sequence` / `expires` / `revoked`。M8 把它改成「每源绑定一把 catalog 签名公钥，用户带外导入并显式信任后才启用」，验签公钥只认本地注册表、不采信 catalog 自述；这把钥匙还必须与包签名公钥在存储和判定上隔离——`is_trusted(fp)` 现只按指纹查表，直接写进 `trust.json` 会让「信任一个下载位置」顺带变成「信任该发布者签的任意包」。同时把模块目录从弹窗独立成「下载」视图，展示同一 `module_id` 的多 variant 与多 version。契约层 `catalog-v2` 已有这些字段，不改 M0 冻结文件。排期、阶段顺序与 12 条验收见 [ROADMAP.md](ROADMAP.md) 的 M8。M8 落地时本段正文与 [SECURITY.md](SECURITY.md) 同步改写；在此之前按现行口径理解代码。
+> **计划变更（M8，2026-11-13 追加）**：上面「添加源不需要配置源公钥」是单源假设下的结论，描述的是当前实现，不是多源下的目标。当前 `refresh_catalog` 对任何 URL 都用内置 K5 验签，社区源用自己的钥匙签 catalog 会验不过，共用官方 K5 私钥又等于交出官方新鲜度锚，不签 catalog 则丢掉 `sequence` / `expires` / `revoked`。M8 把它改成「每源绑定一把 catalog 签名公钥，用户带外导入并显式信任后才启用」，验签公钥只认本地注册表、不采信 catalog 自述；这把钥匙还必须与包签名公钥在存储和判定上隔离——`is_trusted(fp)` 现同时查 `builtin` 与 `trusted` 且不看 `purpose`（`KeyPurpose` 只用于 `BuiltinKey`），直接写进 `trust.json` 会让「信任一个下载位置」顺带变成「信任该发布者签的任意包」。同时把模块目录从弹窗独立成「下载」视图，展示同一 `module_id` 的多 variant 与多 version。契约层 `catalog-v2` 已有这些字段，不改 M0 冻结文件。开工前四条拍板项已于 2026-11-13 定稿，见 [ROADMAP.md](ROADMAP.md) M8「已拍板」：新增 `sources.json` 不动 `installed.json`、跨源同名并存但不自动激活、社区源默认不自动更新、catalog 公钥另立源表且不碰 `trust.json`。排期、阶段顺序与 12 条验收同见 M8。M8 落地时本段正文与 [SECURITY.md](SECURITY.md) 同步改写；在此之前按现行口径理解代码。
 
 catalog 用 K5 签名，签的是索引、版本单调性与新鲜度。K1 只用于签官方 zip 包。
 
