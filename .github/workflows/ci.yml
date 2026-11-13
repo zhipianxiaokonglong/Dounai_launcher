@@ -26,6 +26,17 @@ jobs:
       - name: Build
         run: npm run build
 
+      # 前端依赖审计（上游 O-2）。此前 CI 只审计 Rust，前端依赖从未自动检查。
+      # 生产依赖高危即失败；开发依赖只报告：测试工具链的漏洞不进 dist 产物，
+      # 升级 vitest / vite 属破坏性变更，红色 CI 反而会变成噪音。
+      # 显式指定官方源，避免依赖本地 .npmrc 的镜像（常不实现审计端点）。
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high --registry=https://registry.npmjs.org
+
+      - name: Audit dev dependencies (report only)
+        continue-on-error: true
+        run: npm audit --registry=https://registry.npmjs.org
+
   # ---------------------------------------------------------------
   # launcher-core：纯 Rust，不构建前端、不启动窗口
   # ---------------------------------------------------------------
