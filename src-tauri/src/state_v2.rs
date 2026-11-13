@@ -17,13 +17,20 @@ use launcher_core::m2::{InstanceSourceKind, M2Error};
 use launcher_core::paths::{InstallMode, Paths};
 use launcher_core::time::utc_now;
 
-/// M5 生成并轮换真实 K1/K5 前的编译期占位值。
+/// K1 是模块包签名钥，2026-11-13 生成，私钥离线保管在仓库外。
+/// 登记文件见仓库 `keys/K1.json`，生成与轮换规程见 `docs/SIGNING.md`。
 ///
-/// 指纹与公钥都是合法格式但不属于任何真实密钥，因此 K5 签名的 catalog
-/// 在配置真实公钥前一律验签失败（fail-closed），不会伪造「官方已验证」。
-/// `register_trusted_key` 可在本次会话内替换 K5 公钥，重启回落到占位值。
+/// 包内 `signature.pubkey` 自带公钥，所以验签不需要内置公钥；信任判定只比对
+/// 下面这枚指纹。`BUILTIN_K1_PUBKEY_B64` 只供审计与离线复核，不参与判定。
+pub const BUILTIN_K1_PUBKEY_B64: &str = "8w9nSTqc4mWn1n9z1JITBHDU1RBFjU9iPjD2rSgw28U=";
 pub const BUILTIN_K1_FINGERPRINT: &str =
-    "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+    "sha256:7da721cb4346c215b857e50be8bbeeb89374180884eebc8802296b5a898bd909";
+
+/// K5 是 catalog 签名钥，必须与 K1 分离。这里仍是编译期占位值。
+/// catalog 的签名段不含 `pubkey`，启动器只能拿内置公钥验签；占位公钥不是
+/// 曲线上的 Ed25519 公钥，因此远程 catalog 一律验签失败（fail-closed），
+/// 不会伪造「官方已验证」。`register_trusted_key` 可在本次会话内替换，
+/// 重启回落到占位值。真正启用远程分发前必须生成 K5 并替换这两项。
 pub const BUILTIN_K5_FINGERPRINT: &str =
     "sha256:1111111111111111111111111111111111111111111111111111111111111111";
 /// 32 个零字节的 base64；不是曲线上的 Ed25519 公钥，验签必然失败。
@@ -324,7 +331,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builtin_keys_have_valid_shape_but_are_placeholders() {
+    fn builtin_k1_matches_its_pubkey_and_k5_stays_a_placeholder() {
+        assert_eq!(
+            launcher_core::m2::fingerprint(BUILTIN_K1_PUBKEY_B64).unwrap(),
+            BUILTIN_K1_FINGERPRINT
+        );
         assert!(launcher_core::m2::fingerprint(BUILTIN_K5_PUBKEY_B64).is_ok());
         assert_ne!(
             launcher_core::m2::fingerprint(BUILTIN_K5_PUBKEY_B64).unwrap(),

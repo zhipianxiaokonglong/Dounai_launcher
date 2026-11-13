@@ -1,0 +1,8 @@
+{
+  "algo": "SHA-256 + Ed25519",
+  "fingerprint": "sha256:7da721cb4346c215b857e50be8bbeeb89374180884eebc8802296b5a898bd909",
+  "generated_at": "2026-11-13T06:32:52Z",
+  "key_id": "K1",
+  "pubkey": "8w9nSTqc4mWn1n9z1JITBHDU1RBFjU9iPjD2rSgw28U=",
+  "purpose": "module_signing"
+}
