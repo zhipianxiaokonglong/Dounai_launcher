@@ -2,10 +2,9 @@
 //!
 //! 纯 Rust 逻辑在 `launcher-core`，含验签、路径安全、双根路径与管理页宿主契约。
 //! 本 crate 的命令面只校验参数与转换结果，不放业务逻辑。
-//! 其余模块按里程碑逐步迁入 `launcher-core`。
+//! v1 的进程管理、状态库与命令面已在 M3 移除；命令面在 `commands_v2`，状态层在 `state_v2`。
 
 pub mod catalog;
-pub mod commands;
 pub mod commands_v2;
 pub mod download;
 pub mod env_probe;
@@ -17,8 +16,6 @@ pub mod m2_http;
 pub mod module_probe;
 pub mod process;
 pub mod release;
-pub mod runtime;
-pub mod state;
 pub mod state_v2;
 pub mod trust;
 
@@ -39,9 +36,4 @@ pub use launcher_core::security::{
 pub use launcher_core::signature::{
     canonical_payload, verify_manifest, SignatureError, SUPPORTED_ALGO,
 };
-pub use runtime::{
-    check_working_dir, resolve_placeholders, split_command, EntrySpec, ProcessManager, RunView,
-    StartError,
-};
-pub use state::{Category, InstallState, ModuleState, RunState, StateError, StateStore};
 pub use trust::{TrustError, TrustPolicy, TrustVerdict};

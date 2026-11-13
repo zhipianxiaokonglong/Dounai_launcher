@@ -1,7 +1,7 @@
 //! M3 命令面：命令名、参数与返回形状与 v1 完全一致，内部改走 v2。
 //!
-//! 这样 `src/bridge.ts` 不需要改一行；M3.4 删掉 v1 `commands.rs` 后，
-//! 这些 DTO 就是唯一真源，不会出现「Rust 改了形状、TS typecheck 查不出来」。
+//! 这样 `src/bridge.ts` 不需要改一行；v1 命令面已移除，这些 DTO 是唯一真源，
+//! 不会出现「Rust 改了形状、TS typecheck 查不出来」。
 //!
 //! 边界：状态文件只由 `AppStateV2` 写；进程只由 `Supervisor` 管；
 //! 验签、目录确认、端口分配与启动编排分别由 core / `lifecycle_ops` 负责。
