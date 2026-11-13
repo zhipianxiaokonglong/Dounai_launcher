@@ -28,7 +28,16 @@ M1 被当作已落地，但有两处其实没接上，表现为「模块能装�
 
 另有一条使用面修正：首次「安装依赖」默认离线，而首次装依赖必然拉包，等于按钮天生不可用。默认放行联网，离线作为重试选项。
 
-体积影响待实测：内置 `uv.exe` 会挤压 M5 第 2 条的 25 MB 预算，实测 NSIS 增量后在本文件重定预算或调整策略，不在 M1 里预先放宽。
+**进度（2026-11-13 19:55）**：三条都已落地，第 7、8 条验收由单测与集成测试覆盖（`tests/bundled_uv.rs` 走生产代码：`AppStateV2::new` 补写 → `locate_uv` 命中随包文件 → `uv --version` 真跑通，全程禁止联网）。
+
+- `InstallState::ensure` 四种情况：缺失则新建；一致则不写盘；只差 uv 三元组则只改三元组；读不出来或两个根不一致则先备份 `install.json.bak` 再重写。设置页「install.json」一行显示补写原因。
+- uv 0.13.7 从阿里云 PyPI 的 wheel 取，钉 `sha256:1791d7a9…` 与 31 803 184 字节。三段落地：`scripts/fetch-uv.py` → `build.rs` 复制到 `target/<profile>/bin/` → `bundle.resources` 落到 `$INSTDIR/bin/`，因此开发、直接跑 release exe、装机三种方式走同一条候选路径。二进制不入库。
+- 补齐顺序改成 GitHub 优先、PyPI 镜像兜底（`UV_DOWNLOAD_URLS`）。
+- 首次装依赖默认联网，模块菜单保留「安装依赖（离线）」。
+
+体积实测（2026-11-13 19:55，`cargo tauri build`）：NSIS 安装包 **13.33 MiB**，上一版 2.98 MiB，即内置 uv 带来 +10.35 MiB，仍在 25 MB 预算内。NSIS 脚本确认落点为 `$INSTDIR\bin\uv.exe`（安装时写入、卸载时删除），与 `Paths::bundled_uv_path()` 一致。
+
+顺带发现一条不属于本里程碑的问题：这次构建的 NSIS 把 `pack.exe`（774 KB）与 `sign_catalog.exe`（357 KB）也装进了用户机器——它们是发布工具，不该随客户端分发。原因待查（两者都是本 crate 的 `[[bin]]`，bundler 把它们当 sidecar 收走了）。记在 M5 打包项处理，M1 不动。
 
 ## M2 双源与包信任
 

@@ -31,7 +31,7 @@
 | 离线只做单包导入，并支持本地目录 | 目录实例的源码随时可变，完整性语义与 zip 不同，按源码工作区处理。 |
 | 第三方 `shell` 可以填槽 | 核查依据见 [contracts/README.md](../contracts/README.md) 的“第三方界面”一节。披露要求见 [SECURITY.md](SECURITY.md)。 |
 | 环境引擎只用随包自带的 uv，固定 0.13.7 | 系统 uv 版本不可控。0.11.7 实测忽略 `UV_PYTHON_NO_REGISTRY`，0.13.7 实测生效。 |
-| uv 缺失时按固定 URL 下载并校验 sha256 | 单一固定 URL 不引入 catalog，M2 的双源不受影响。M5 把同一个 uv.exe 放进安装包。 |
+| uv 缺失时按固定 URL 下载并校验 sha256 | 单一固定 URL 不引入 catalog，M2 的双源不受影响。2026-11-13 加了一条镜像兜底（GitHub 在目标机器不可达），顺序见 7.1。 |
 | Python 只钉 3.12，补丁版本交给 uv | 钉具体补丁版会让预置的 uv 与下载清单一起过期。实际版本记在 `python_build_id`。 |
 
 ## 3. 选型依据
@@ -75,7 +75,7 @@ Windows 专属代码圈进 `process/win` 单一模块边界。`launcher-core` �
 | 便携 exe `dounai-launcher.exe` | 离线搬运、不想装机的环境 | 单文件，每次 release 一同产出并跑同一套冒烟断言 |
 | `SHA256SUMS` | 双源分发 | 两个 exe 共用一份签名清单，避免便携版漂移 |
 
-安装包预置 `bin/uv.exe`。首次运行不依赖外网即可起步。卸载钩子在 `both` 模式下要识别 HKCU 与 HKLM 两套注册表位置。
+安装包预置 `bin/uv.exe`（由 `scripts/fetch-uv.py` 取、`bundle.resources` 落盘，见 7.1）。首次运行不依赖外网即可起步。卸载钩子在 `both` 模式下要识别 HKCU 与 HKLM 两套注册表位置。
 
 `perMachine` 把二进制装到 `%ProgramFiles%`，普通用户对该目录没有写权限。托管 Python、venv、模块包、catalog 缓存与子进程日志都要写，所以程序根与数据根必须分开。
 
@@ -98,6 +98,17 @@ Windows 专属代码圈进 `process/win` 单一模块边界。`launcher-core` �
 
 1. 所有路径由 `launcher-core::paths` 一处计算。UI 与 Rust 都不自己拼字符串。
 2. `paths` 由安装模式与便携标志共同初始化，结果写进 `state/install.json`。后续启动一律读取，不重新推断。v2.3 只有 `both` 一种安装模式分支，安装时选择落在 `install_mode`。
+
+   `install.json` 的写入语义在 2026-11-13 扩成「**安装器优先写，启动器兜底补**」。M5 的安装器还没做，此前没有第二个写入者，`prepare_instance_env` 一读就是 `os error 2`，整条环境链路不可用。兜底逻辑在 `InstallState::ensure`，只碰 uv 三元组与两个根，四种情况：
+
+   | 现状 | 行为 |
+   |---|---|
+   | 文件不存在 | 按本次运行的两个根与内置 uv 新建，并在设置页说明「已由启动器补写」 |
+   | 四项全部一致 | 不写盘（保持「写一次」的常态） |
+   | 只差 uv 三元组（升级了随包 uv） | 只改 `uv_path` / `uv_sha256` / `uv_version`，两个根原样保留 |
+   | 读不出来、版本不对或两个根不一致 | 先把旧文件备份成 `install.json.bak`，再重写 |
+
+   最后一条是刻意的选择：`install.json` 是从可执行文件位置派生出来的事实，不是用户手写的数据。让它 brick 启动过程（窗口都出不来）换取「不覆盖」的纯度不值得，留 `.bak` 已足够事后追。设置页「install.json」一行会把补写原因原样显示出来，用户能看出「安装器没跑，是启动器兜的」。
 3. `perMachine` 只放只读二进制。Python、venv、模块与状态每个 Windows 用户各一份，避免 ACL 问题与“一个用户装模块影响所有人”。
 4. `UV_PYTHON_INSTALL_DIR` 与 `UV_CACHE_DIR` 都指向数据根。便携版优先 exe 同级，写探针失败再回退到 `%LOCALAPPDATA%`。
 
@@ -145,7 +156,23 @@ M3 结束时 v1 的进程管理、状态库与命令面已全部删除。下表�
 
 ### 7.1 环境引擎
 
-环境引擎只用随包自带的 uv，固定 0.13.7。程序根 `bin/uv.exe` 优先；缺文件时按固定 URL 下载到数据根，校验 `install.json` 的 `uv_sha256` 后再用。M5 把同一个 uv.exe 放进安装包。系统 PATH 里的 uv 不接管，版本失控会让注册表与离线验收失去意义。`env_probe.rs` 只保留只读体检。
+环境引擎只用随包自带的 uv，固定 0.13.7。系统 PATH 里的 uv 不接管，版本失控会让注册表与离线验收失去意义。`env_probe.rs` 只保留只读体检。
+
+**uv 三元组的唯一真源是 `core/src/env/bootstrap.rs` 的三个常量**：`UV_VERSION`、`UV_SHA256`、`UV_BYTES`。`install.json` 的 `uv_sha256` 由它初始化，`locate_uv` 拿它比对每个候选文件，三者任何一处漂移都会让启动器把随包文件判成「被篡改」。升 uv 必须同时改常量、`src-tauri/bin/README.md` 与取数脚本里的哈希，`state_v2::tests::pinned_uv_hash_matches_the_staged_binary` 会在仓库里存在该文件时逐字节核对。
+
+文件怎么走到 `bin/uv.exe` 分三段，缺一段就只剩联网兜底：
+
+| 段 | 谁负责 | 落点 |
+|---|---|---|
+| 取数 | `scripts/fetch-uv.py`（校验 wheel 与 uv.exe 两层 sha256） | `src-tauri/bin/uv.exe`，不入库 |
+| 开发/本地构建 | `build.rs` 的 `stage_bundled_uv`，大小没变就跳过 | `target/<profile>/bin/uv.exe`，与 exe 同级 |
+| 安装包 | `tauri.conf.json` 的 `bundle.resources` 映射 `bin/uv.exe → bin/uv.exe` | `$INSTDIR/bin/uv.exe` |
+
+`Paths::bundled_uv_path()` 只认「exe 同级的 `bin/uv.exe`」，所以前面两段只是把文件摆到安装后的同一位置，运行时的候选顺序不需要按环境分叉：程序根 → `install.json` 记录的位置 → 数据根下载副本。
+
+缺文件时的补齐顺序是 `UV_DOWNLOAD_URLS`：GitHub release 资产优先，阿里云 PyPI 的 `uv-0.13.7-py3-none-win_amd64.whl` 兜底。加这个兜底不是锦上添花——目标机器上 `github.com` 实测超时 21 秒，只靠官方资产等于补不上。wheel 里 `uv.exe` 在 `uv-0.13.7.data/scripts/` 下，`extract_uv_exe` 按「任意层级下的 `uv.exe`」匹配，两种包布局共用一套解包。
+
+「安装依赖」的联网默认值在 2026-11-13 由离线改成联网：首次装依赖必然要拉解释器与 wheel，离线默认等于按钮天生不可用。想强制离线仍可显式选择（模块菜单「安装依赖（离线）」），此时 `EnvOptions.offline` 为真，全程带 `--offline`。
 
 托管 Python 装到数据根，固定 3.12，补丁版本由 uv 选当前最新版：
 

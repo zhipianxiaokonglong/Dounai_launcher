@@ -9,7 +9,7 @@ Dounai 启动器管理模块的安装、环境与进程生命周期。产品主�
 - 仅支持 Windows 10 与 Windows 11。
 - 不读取 v1 包格式，不设兼容层。v1 包格式从未打包分发。
 - `src-tauri/src/` 是 v2 命令面与进程托管，`src-tauri/core/` 是不依赖 Tauri 的独立 crate；`src/` 是 M4 重写的界面：`index.html` 只有骨架，视图与共享层在 `src/ui/`。
-- 本版本还不能在线安装模块。K1 与 K5 已于 2026-11-13 生成并内置，模块包托管在 [SourceForge 的 dounai-releases 项目](https://sourceforge.net/projects/dounai-releases/)；官方 catalog 尚未签发，远程分发未启用。
+- 在线安装已接通：K1 与 K5 于 2026-11-13 生成并内置，模块包与 K5 签名的 catalog 都托管在 [SourceForge 的 dounai-releases 项目](https://sourceforge.net/projects/dounai-releases/)，入口在模块页的「模块目录」。catalog 有效期上限 7 天，过期后会明确报「已过期」，不降级放行。
 - catalog 签名公钥 K5 已内置真实值，验签路径可用。没有已签发的 catalog 时仍按不可用处理，不降级放行。命令面已提供 `set_k5_pubkey`，界面入口在设置页的「下载与网络」分组。
 - 日志按实例写入数据根的 `instances/<key>/logs/`：启动器事件默认记录，单文件超过 2 MiB 轮转、保留 3 份。子进程 stdout 与 stderr 默认丢弃，显式设置 `DOUNAI_LOG_CHILD_OUTPUT=1` 才接管管道。
 
@@ -28,6 +28,16 @@ Dounai 启动器管理模块的安装、环境与进程生命周期。产品主�
 - 目录与 Git 仓库可导入为源码工作区，固定按未验证处理。
 
 修改任一契约文件后，先运行校验，再同步依赖该文件的代码与样例。
+
+## 构建前置
+
+仓库不存随包的 `uv.exe`（31.8 MB，第三方二进制）。首次构建或重新克隆后先跑一次：
+
+```bash
+python scripts/fetch-uv.py
+```
+
+脚本从 PyPI 镜像取指定版本的 wheel，校验 wheel 整体与解出的 `uv.exe` 两层 sha256，写到 `src-tauri/bin/uv.exe`。缺这个文件时开发构建仍能编译（运行时退到联网补齐），但 `cargo tauri build` 会因为缺 bundle 资源直接失败。哈希与来源见 `src-tauri/bin/README.md`。
 
 ## 校验
 

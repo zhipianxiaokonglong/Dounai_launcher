@@ -442,3 +442,43 @@ app lib 67 项、core 6 项、其余集成 20 项（`live_source` 2 项按设计
 即：线上 catalog 用内置 K5 验签通过、三个条目的 sha256/size 与本地打包产物一致、整包下载后哈希与目录声明一致且能过 `verify_zip`。这两条不进 CI——CI 不该依赖第三方站点可用性。
 
 **未实测**：真机点「模块目录」→「安装」→ 自动装依赖 → 启动的完整一条；catalog 7 天过期后的表现只能靠改系统时间或等过期验证。
+
+## M1 收口：install.json 自举与内置 uv（2026-11-13）
+
+用户报的原始症状是 `安装依赖失败：读取 install.json 失败：… launcher\state\install.json 读写失败：系统找不到指定的文件。 (os error 2)`。查下来不是文件被写坏，是**从来没人写过**：`install.json` 按设计由安装器（M5）写一次，M5 还没开始，启动器也不兜底。
+
+**一、为什么不能只补一条 `initialize`**
+
+`initialize` 遇到已存在的文件会返回 `AlreadyExists`，而现有用户的数据根里 `installed.json`、`trust.json`、`retention.json` 都在、只缺 `install.json`，看起来「接近正常」。真正需要区分的是四种情况，于是加了 `InstallState::ensure`：缺失则新建；四项一致则不写盘；只差 uv 三元组（升级了随包 uv）则只改三元组；读不出来或两个根不一致则先备份 `install.json.bak` 再重写。第三条的实现踩过一次坑——`fresh` 先被 `Ok((fresh, ...))` 移走、后面又借它拼说明字符串，编译器直接拒了，改成先拼字符串后移动。
+
+**二、uv.exe 从哪来**
+
+目标机器连不上 `github.com`（实测 21 秒超时），而 `locate_uv` 的兜底正是从 GitHub 下载，所以「允许联网补齐」也是死的。实际取数：阿里云 PyPI 的 `uv-0.13.7-py3-none-win_amd64.whl`（wheel sha256 `2835e2ab…`），里面 `uv-0.13.7.data/scripts/uv.exe` 就是 31 803 184 字节的可执行文件，`sha256:1791d7a9…`，实跑输出 `uv 0.13.7 (316c827e0 2026-11-03 x86_64-pc-windows-msvc)`。
+
+`extract_uv_exe` 原本就按「任意层级下的 `uv.exe`」匹配，wheel 的脚本目录因此不需要改解包逻辑，直接可用。补齐顺序改成 `UV_DOWNLOAD_URLS`：GitHub 优先，镜像兜底，任一成功即停。
+
+**三、三段落地，缺一段就白搭**
+
+`Paths::bundled_uv_path()` 只认「exe 同级的 `bin/uv.exe`」。NSIS 安装后由 `bundle.resources` 落到 `$INSTDIR/bin/`，但 `tauri dev` 与直接跑 `target/release/*.exe` 时没有任何东西负责这个位置——不做 `build.rs` 这一段，开发与本地验收下的「随包 uv」等于不存在，测试会一直走联网分支而不自知。`build.rs` 于是把 `bin/uv.exe` 复制到 `target/<profile>/bin/`（大小没变就跳过）。实测 `target/debug/bin/uv.exe` 已生成，与源文件逐字节一致。
+
+二进制按决定不入库：`.gitignore` 掉 `*.exe`，取数脚本 `scripts/fetch-uv.py` 校验两层哈希后原子写入。清空 `bin/uv.exe` 后重跑脚本，产物与原文件 `cmp` 逐字节相同。
+
+**四、默认联网**
+
+`prepare_instance_env` 的 `allow_online` 缺省从 `false` 改成 `true`。首次装依赖必然要拉解释器与 wheel，离线默认等于按钮天生不可用。界面侧：主按钮「安装依赖」默认联网，模块菜单保留「安装依赖（离线）」显式选择；`startOne` 在缺依赖时先装（联网）再启。
+
+**五、验证方式**
+
+`tests/bundled_uv.rs` 三条，都走生产代码，程序根取仓库 `src-tauri`、数据根取临时目录，不碰用户真实数据：
+
+1. `AppStateV2::new` 补写 `install.json` → `InstallState::load` 读回三元组 → `locate_uv` 命中随包文件 → `uv --version` 真跑通。注入的 `UvFetcher` 一旦被调用就 panic，所以「没联网」是断言出来的，不是假设。
+2. 删掉 `install.json` 再启动能自愈（M1 验收第 7 条）。
+3. 把文件改成非法 JSON 再启动：`install.json.bak` 存在且内容就是被改坏的原文，随后正常重写。
+
+另加一条常量对账：`state_v2::tests::pinned_uv_hash_matches_the_staged_binary` 在仓库里存在 `bin/uv.exe` 时核对长度与 sha256，防的是「升级了文件忘了改常量」。
+
+**门禁**
+
+core 159 项 lib + 23 项集成、app lib 69 项、`bundled_uv` 3 项、契约 109 项、`tsc`、`npm test` 20 项、`vite build`、`clippy --workspace --all-targets -D warnings` 全绿。
+
+**未实测**：真机上从「安装依赖」到三个模块 health 200 的完整一条（需要用户机器上跑，且要真的联网拉包）；NSIS 安装包体积增量待构建结果填入 ROADMAP。
