@@ -596,3 +596,45 @@ watcher 只把状态改成 `exited`，`processes` 表里的 `WinProcess` 一直�
 - 门禁：core 169 lib + 23 集成、app **71 lib**（+2）、`bundled_uv` 3、契约 109、`tsc`、`npm test` 26、`clippy --workspace --all-targets -D warnings` 全绿。
 
 **未实测**：装上新包后点一次启动，三个模块应各自拿到 18101/18102/18103 并在预算内转 `running`；以及失败实例再点启动能直接重来、不再要求先停止。
+
+## M1 返修：active 槽自动补位（2026-11-13 21:35）
+
+启动问题修完后，检查真机状态发现 `installed.json` 的 `active` 是 `{}`：三个实例的 role 分别是 `input`/`llm`/`output`，verdict 全是 `A`，却一个 active 都没有。`assign_ports` 因此把它们全部分到 `18101-18103`，而组装层（Dounai 主程序）只认 8101、8102、8103——界面显示「运行中」，链路实际一条都连不上。
+
+**一、为什么要在四个地方补，而不是只在安装处补**
+
+「有实例、没有 active」不是可用的中间状态，但从四个入口都能造出来：
+
+1. 在线目录安装 / 本地 zip 安装（`commit_install`）——装完本该上位；
+2. 本地目录导入（`add_local_dir`）——dir 实例恒为 C 类，按契约不自动上位，但用户亲手挑的目录本身就是显式指名；
+3. 卸载或解除登记——卸掉的若是 active，槽位空出来，同 role 剩下的实例还在备用端口；
+4. 升级上来的老实例表——以上三条都不覆盖。
+
+于是逻辑收成一个 core 方法 `InstalledState::fill_vacant_active(path, role, preferred, explicit)`，四个调用点都只负责「传什么」：安装传刚装的实例 ID + `explicit = false`，目录导入传 `explicit = true`，卸载传 `None`，启动时对三个 role 各扫一次。
+
+**二、怎么选上位实例**
+
+`preferred` 在册且角色相符就用它（用户刚装的就是要用的），否则按 `instance_id` 字典序取第一个——结果确定，不依赖 `BTreeMap` 之外的东西。槽已占用时直接返回 `None`，绝不抢已经在生效的那个。
+
+**三、C 类的例外只开一道缝**
+
+`switch_active(..., explicit=false)` 拒绝把 C 类设为 active。`fill_vacant_active` 沿用这个判断，只在 `explicit = true` 时放行。安装 B/C 类 zip 时用户的确认针对的是「安装」，不是「让它接管链路」，所以那条路径传 `false`；本地目录导入是用户亲手指定的一整个源码目录，与菜单里的「设为 active」等价，传 `true`。
+
+**四、启动时自愈**
+
+`heal_active_slots(state)` 在 `main.rs` 的 setup 里、`app.manage(state)` 之前跑一次，返回补上位的实例 ID，非空时往 stderr 打一行。这一步只写 `installed.json`，不碰任何进程。
+
+**五、验证**
+
+- core 新增 4 项：槽空时第一个实例上位；槽已占用时新实例不动槽位（且 `active` 仍指旧值）；`preferred` 不在册时按字典序回退、C 类在 `explicit=false` 下拒绝而 `true` 下放行；`shell`/`auxiliary` 永不设槽（`auxiliary` 以前会因 `role_key` 报错，现在按「不设槽」静默返回）。
+- lib 169 → **173**。门禁其余项不变：core 23 集成、app lib 71、`bundled_uv` 3、契约 109、`tsc`、`npm test` 26、`clippy --workspace --all-targets -D warnings` 全绿。
+
+**六、本机现状已就地修正**
+
+`installed.json` 已补上三个槽（备份在 `state/installed.json.bak-preactive`）：
+
+```json
+{"input": "dounai/dounai-input@stable", "llm": "dounai/omninexus@stable", "output": "dounai/moodvoice@stable"}
+```
+
+**未实测**：装上新包后三个模块应落在 8101/8102/8103；以及卸载某个 active 实例后，同 role 的另一个实例自动接位。
