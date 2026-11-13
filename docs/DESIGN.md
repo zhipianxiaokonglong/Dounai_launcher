@@ -197,7 +197,7 @@ uv python install 3.12 --install-dir <data_root>/runtime/python --no-registry --
 | `requirements` | `uv pip compile <path> --generate-hashes --python <managed> -o <state lock>` | `uv pip sync <state lock> --python <venv_python> --require-hashes` |
 | `pyproject` | 同上，输入换成 `pyproject.toml`，`--extra` 只取 `runtime.deps.extras` | 同上 |
 
-注意：`uv sync` 不加 `--frozen` 时会在项目根生成 `uv.lock`。dir 实例的源码目录会被污染，M1 第 5 与第 6 条验收都会失败。`uv_lock` 分支不装项目自身，靠 `entry.working_dir` 让 Python 从当前目录解析包。uv 没有参数可以指向别处的锁文件。引擎因此只收 `deps.path` 为 `uv.lock`。每次同步前还会复核项目根那份的内容哈希。在线首次同步允许联网取 wheel，`--offline` 只约束离线重跑。
+注意：`uv sync` 不加 `--frozen` 时会在项目根生成 `uv.lock`。dir 实例的源码目录会被污染，M1 第 5 与第 6 条验收都会失败。`uv_lock` 分支不装项目自身，因此启动时启动器把包根下的 `src/` 前置进 `PYTHONPATH`（见 7.5）；flat 布局不加，`-m <pkg>` 本来就能从工作目录找到包。uv 没有参数可以指向别处的锁文件。引擎因此只收 `deps.path` 为 `uv.lock`。每次同步前还会复核项目根那份的内容哈希。在线首次同步允许联网取 wheel，`--offline` 只约束离线重跑。
 
 三个上游都是 src layout，依赖同步不装项目自身。`PreparedEnv.env_vars` 在 `module_dir/src` 存在时注入 `PYTHONPATH`，让 `-m` 能找到包。
 
@@ -336,6 +336,15 @@ M3 已按 role 拓扑启动、Job Object 托管与异步探测重写生命周期
 启动后的健康探测按 `roles` 的 `startup_timeout_ms` 定预算（`input` 60 秒、`llm` 与 `output` 90 秒），不再用固定的 4 秒。冷启动要加载解释器与全部 import，Python 服务十几秒才有第一个监听是常态，用单次请求超时当启动预算会在服务真正起来之前就判失败——真机上表现为「点启动报失败，六秒后 health 已是 200」。探测间隔前 5 秒用 50 ms、之后降到 400 ms：冷启动窗口里抓得紧，长预算下又不至于每分钟发上千个请求。
 
 预算用尽只判「没起来」，不杀进程。快照保留 `pid`、阶段记 `failed`、`last_error` 写明超时秒数，界面把这类实例显示成「启动超时」而不是「启动失败」，并按「进程还在」给「停止」按钮。`Supervisor::owns` 与 `LifecycleState::mark_recovered` 补上另一条路径：再点启动时若发现自己托管的进程其实已经健康，就把状态从 `failed` 收回到 `running`（`contract` 保持 `not_checked`，只确认了 health），不再拉起第二个；仍不健康则明确要求先停止。`mark_external` 也加了守卫：自己持有进程时绝不标成「外部启动」，否则会连停止权一起丢掉。
+
+启动后进程常常几秒内自行退出，最常见的两个原因都已在本轮修掉：
+
+- **包自身没装进 venv。** `uv sync` 带 `--no-install-project`（见 7.1），`python -m <pkg>` 只能从工作目录找包，`src/<pkg>` 布局的包必然报 `No module named <pkg>` 后退出（退出码 1，界面只看到「启动失败」）。启动器现在把 `<包根>/src` 前置进 `PYTHONPATH`；flat 布局不加，避免包根遮蔽标准库同名模块。manifest 自己设了 `PYTHONPATH` 就拼在原值前面。
+- **备用端口撞车。** 备用端口按整张实例表顺序分配，只拿当前实例算的话每个非 active 实例都会分到 `18101`，第二个启动的直接绑不上端口退出（真机日志里是 `exited code=3`）。单实例启动、一键启动与实例视图现在都用同一份全集，每个实例拿到不同端口。
+
+`Supervisor::owns` 也改成看进程存活而不是看进程表里有没有键。`--no-install-project` 之类的早退不会留下句柄，但任何一次「启动即退出」都会：watcher 只更新状态、不清进程表，`owns` 于是永远为真，用户再点启动被回「进程还在运行，先点停止」，而快照里 `pid` 已被清成 null，界面只给「启动」——真机上就是这个死循环。现在 `owns` 用 `try_wait` 复核，dead 句柄就地摘掉；`stop` 也先看存活，不再对一个早已结束的进程报「停止失败」；一键停止额外收掉「判超时但进程还活着」的实例。
+
+探测线程同样会提前收工：watcher 清空子进程槽之后，探测不再跑满预算（真机上崩溃的实例白白污染了 90 秒日志与一次 `health=Unhealthy`）。
 
 前端的事件委托改为幂等：容器（页头、正文）是常驻的，`bindActions` 重复调用只替换 action 表、不再叠加监听器。此前每次状态刷新都 `addEventListener`，一次点击会触发 N 个处理函数——真机日志里一条启动命令打了四行 `start`，三个回「实例已在启动中」，就是这个原因。启动、停止、重启另有按实例的在途标记，一键启停共用一个闸门，避免双击重复发请求。
 

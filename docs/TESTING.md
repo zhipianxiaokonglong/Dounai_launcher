@@ -547,3 +547,52 @@ core 新增 5 项：缺 pinned 放行且记 `snapshot_pinned = false`（用 `ins
 - 门禁：core 169 lib + 23 集成、app lib 69、契约 109、`tsc`、`npm test` 26、`clippy --workspace --all-targets -D warnings` 全绿。
 
 **未实测**：真机上点一次「启动」只发一个请求、60 秒内转 `running`、以及超时后「先停止再启动」能走通。需要用户在安装包上复跑。
+
+## M1 返修：启动即退出、端口撞车与「没有停止按钮」（2026-11-13 21:15）
+
+真机复现两段日志：
+
+```
+[lifecycle] start role=Llm program=...\venvs\711b65f32b8a8f4e\Scripts\python.exe health=http://127.0.0.1:18101/v1/healthz
+[lifecycle] spawned pid=37532
+[lifecycle] exited code=3
+[probe] health=Unhealthy contract=Unhealthy after=90316ms
+```
+
+再点启动返回「进程还在运行，但健康检查没通过。先点「停止」，再启动」，而卡片上只有「启动」。
+
+**一、三个包都是 src 布局，而 venv 里没有包自身**
+
+引擎 `uv sync` 带 `--no-install-project`（避免联网时还要构建本地项目），三个已发布包的项目根分别是 `src/omninexus`、`src/emotional_tts`、`src/dounai_input`。`python -m <pkg>` 的 `sys.path[0]` 是工作目录，不是 `src`，于是子进程立刻 `No module named <pkg>` 退出。
+
+逐包手动复现（`venv\Scripts\python.exe -m ...`，工作目录为包根）：不带 `PYTHONPATH` 是 `No module named`；带上 `<包根>/src` 后三个包的 health 依次 200（`/v1/healthz`、`/api/health`、`/healthz`）。因此修在启动器侧，不动 `--no-install-project`：这样离线也能起，不需要 setuptools/wheel 的构建缓存（实测离线补装会报 `setuptools was not found in the cache`）。
+
+`prepend_python_path` 只在 `<包根>/src` 存在时动手，flat 布局一律不加——包根进 `PYTHONPATH` 可能遮蔽标准库同名模块。manifest 自己声明了 `PYTHONPATH` 就拼在原值前面，不覆盖。
+
+**二、所有非 active 实例都被分到 18101**
+
+`single_instance_port` 调 `assign_ports(..., std::slice::from_ref(instance))`，而备用端口是「基数 + 序号」分配的：只传一个实例时序号恒为 0，每个非 active 实例都拿到 `18101`。第一个起来的占住端口，后面的绑不上就退出——`netstat` 当时还能看到 `127.0.0.1:18101` 的残留连接。
+
+端口分配改为统一按 `all_instances(state)`（整张已登记实例表，含停用的）计算，单实例启动、`start_all` 与实例视图共用同一份结果。`start_all` 原来先过滤停用实例再分配，同样会让「列表显示的端口」与「真正使用的端口」不一致，一并改掉。
+
+**三、死进程句柄让 `owns()` 永远为真**
+
+watcher 只把状态改成 `exited`，`processes` 表里的 `WinProcess` 一直留着；`owns()` 是 `contains_key`，于是：
+
+1. 快照 `pid` 已被 `mark_exited` 清成 null → 前端 `hasLiveProcess` 为假 → 只渲染「启动」；
+2. 后端 `start_instance` 看到 `owns()` 为真 → 去探 health → 不通 → 回「进程还在运行，先点停止」。
+
+两边结论相反，用户被卡死。改法：
+
+- `WinProcess::is_alive()`：槽为空即已退出，槽还在时用 `try_wait` 兜住「刚退出、watcher 还没轮到」这段窗口。不清槽，退出原因仍由 watcher 统一记录。
+- `owns()` 复核存活，死的就地摘掉；`stop()` 先看存活，不再对结束的进程报「停止失败」。
+- `stop_all()` 额外收掉「判超时但进程还活着」的实例（它们不在 `running()` 里，但仍是启动器托管的进程）。
+- 探测线程拿 watcher 槽做哨兵：进程退出后立刻返回，不再空跑满 90 秒预算，日志里也不再出现误导性的 `health=Unhealthy`。
+
+**四、验证**
+
+- 手动端到端：三个包分别用 `PYTHONPATH=<包根>/src` + 独立端口（18199/18200/18201）启动，health 全部 200；顺带确认退出码 1 的原文就是 `No module named <pkg>`。
+- 新增 2 项单测：`standby_ports_are_unique_across_instances`（三个非 active 实例必须拿到三个不同端口，且 `all_instances` 覆盖全部登记实例）、`src_layout_is_added_to_pythonpath`（src 布局补路径、已有 `PYTHONPATH` 前置拼接、flat 布局不动）。
+- 门禁：core 169 lib + 23 集成、app **71 lib**（+2）、`bundled_uv` 3、契约 109、`tsc`、`npm test` 26、`clippy --workspace --all-targets -D warnings` 全绿。
+
+**未实测**：装上新包后点一次启动，三个模块应各自拿到 18101/18102/18103 并在预算内转 `running`；以及失败实例再点启动能直接重来、不再要求先停止。

@@ -33,7 +33,7 @@
 三条规则：
 
 1. manifest 出现未列出的 `role` 时硬拒，并提示需要更高版本启动器。不得降级成 `auxiliary`。
-2. 只有 active 实例占规范端口，其余并存实例使用 `18101` 起的备用端口段。组装层只认 8101、8102、8103，因此三上游零改动。
+2. 只有 active 实例占规范端口，其余并存实例使用 `18101` 起的备用端口段。备用端口按**整张已登记实例表**顺序分配，单实例启动、一键启动与实例视图共用同一份结果；只按当前实例算会让每个非 active 实例都拿到 `18101`。组装层只认 8101、8102、8103，因此三上游零改动。
 3. 新增与 `input`、`llm`、`output` 同级的数据面角色，需要同时改组装层的端口、事件转发与解析代码，本版不做。
 
 `health` 有两个超时，含义不同：`timeout_ms` 是单次 GET 的请求超时；`startup_timeout_ms` 是从 spawn 到「health 必须通过」的总预算（`input` 60 秒，`llm` 与 `output` 90 秒，缺省 60 秒）。冷启动要加载解释器与全部 import，用单次请求超时当启动预算会在服务真正起来之前就判失败。预算用尽只表示「没在预期时间内就绪」，不杀进程：进程仍在时快照保留 `pid`、阶段记 `failed` 并写明超时原因，用户可先停止再启动；若事后探测发现进程一直健康，`mark_recovered` 把状态收回到 `running`（`contract` 仍为 `not_checked`）。
@@ -112,6 +112,7 @@ cargo run --bin sign_catalog -- verify --pubkey k5.pub --catalog signed.json
 8. 官方 `module_id` 采用 `dounai/` 加 v1 标识。namespace 只是命名，不表示信任；“官方”标签只由内置 K1 指纹验通授予。
 9. `roles.json` 定名为 `roles-v1.json`，文件名带版本，便于后续不兼容升级。
 10. 五份样例的 `signature` 为 `null`、`files` 为 `{}`。样例只用于 schema 校验，不可安装；`category` 表示目标发布形态，正式包须由 K1 签名后才生效。
+11. `entry.command` 允许写 `{venv_python} -m <pkg>`：引擎同步依赖时不安装项目自身（`--no-install-project`），由启动器在包根存在 `src/` 时把该目录前置进 `PYTHONPATH`。发布方因此可以按「包根 + src 布局 + uv.lock」组织代码，无需在包内再写一份安装步骤。flat 布局不加路径，`-m` 本来就能从工作目录解析包；`entry.env` 自己声明 `PYTHONPATH` 时启动器把 `src/` 拼在原值前面，不覆盖。
 
 ## 变更规则
 
