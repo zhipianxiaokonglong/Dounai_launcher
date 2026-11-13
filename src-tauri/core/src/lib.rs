@@ -17,9 +17,10 @@ pub mod time;
 
 pub use admin_host::{AdminHost, AdminHostError, HostEvent, MountRequest, RecordingAdminHost};
 pub use env::{
-    cache_usage, prepare_instance, prepare_instance_with, verify_instance, verify_instance_with,
-    CacheUsage, EnvContext, EnvError, EnvErrorKind, EnvOptions, ManagedPython, PreparedEnv,
-    RuntimeState, SnapshotChange, SourceKind, UvBinary, UV_VERSION,
+    cache_usage, dir_usage, prepare_instance, prepare_instance_with, runtime_usage,
+    verify_instance, verify_instance_with, CacheUsage, EnvContext, EnvError, EnvErrorKind,
+    EnvOptions, ManagedPython, PreparedEnv, RuntimeState, RuntimeUsage, SnapshotChange, SourceKind,
+    UvBinary, UV_VERSION,
 };
 pub use install::{InstallState, InstallStateError};
 pub use manifest::{

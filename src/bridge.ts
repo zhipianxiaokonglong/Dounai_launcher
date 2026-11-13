@@ -693,6 +693,52 @@ export async function setChildOutput(enabled: boolean): Promise<boolean> {
 }
 
 /* ------------------------------------------------------------------ */
+/* 存储与引导状态                                                      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 入门引导是否走过。字段与 `state/onboarding.json` 一致。
+ *
+ * 名字沿用 onboarding：语义就是「新人第一次那件事做完了没有」，
+ * 实现从四屏向导换成了聚光灯引导，状态文件不必跟着改名。
+ */
+export interface OnboardingState {
+  schema_version: number;
+  completed: boolean;
+  /** true 表示上次是中途跳过，不是一步步走完。 */
+  skipped: boolean;
+  completed_at: string | null;
+}
+
+/** 存储事实；字节数都是解压后的大小。 */
+export interface StorageFacts {
+  data_root: string;
+  /** 已登记实例数；0 表示这台机器还没装过模块。 */
+  instances: number;
+  python_bytes: number;
+  cache_bytes: number;
+  /** 数据根整体占用（含实例目录、日志、venv）。 */
+  data_bytes: number;
+}
+
+export async function onboardingState(): Promise<OnboardingState> {
+  return call<OnboardingState>("onboarding_state");
+}
+
+export async function storageFacts(): Promise<StorageFacts> {
+  return call<StorageFacts>("storage_facts");
+}
+
+export async function completeOnboarding(skipped: boolean): Promise<OnboardingState> {
+  return call<OnboardingState>("complete_onboarding", { skipped });
+}
+
+/** 让引导下次启动再走一遍。 */
+export async function resetOnboarding(): Promise<OnboardingState> {
+  return call<OnboardingState>("reset_onboarding");
+}
+
+/* ------------------------------------------------------------------ */
 /* 生命周期事件                                                        */
 /* ------------------------------------------------------------------ */
 

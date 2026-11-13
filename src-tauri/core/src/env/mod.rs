@@ -34,7 +34,7 @@ pub use python::{ensure_python, ManagedPython};
 pub use runner::{
     MockConfig, MockFailure, MockUvRunner, SystemUvRunner, UvOutput, UvRequest, UvRunner,
 };
-pub use usage::{cache_usage, CacheUsage};
+pub use usage::{cache_usage, dir_usage, runtime_usage, CacheUsage, RuntimeUsage};
 pub use venv::{prepare_venv, VenvOutcome};
 
 /// 实例来源。取值与 `source-v1.json` 的 `source_kind` 一致，由组装层判定后传入，

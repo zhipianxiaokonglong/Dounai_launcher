@@ -2334,6 +2334,64 @@ pub fn set_child_output(enabled: bool, state: State<'_, AppStateV2>) -> Result<b
     state.set_child_output(enabled)
 }
 
+/* ------------------------------------------------------------------ */
+/* 存储与引导状态                                                      */
+/* ------------------------------------------------------------------ */
+
+/// 存储事实：数据根在哪、已经下过什么、占了多少。
+///
+/// 这些数只能后端给：前端没有数据根路径，也不该自己算「解释器装好没有」。
+/// 报解压后的字节数而不是下载量——用户关心的是磁盘要占多少，下载量还得
+/// 估压缩比，估不准还不如不给。
+#[derive(Debug, Serialize)]
+pub struct StorageFacts {
+    pub data_root: String,
+    /// 数据根里已登记的实例数；0 表示这台机器还没装过模块。
+    pub instances: usize,
+    /// 解释器已占字节；0 表示还没下过 Python。
+    pub python_bytes: u64,
+    /// uv 缓存已占字节；复用后第二个模块通常只下增量。
+    pub cache_bytes: u64,
+    /// 数据根整体占用（含实例目录、日志、venv）。遍历一次要几十毫秒，
+    /// 只在存储分组里要，所以不放进每次刷新都会读的快照。
+    pub data_bytes: u64,
+}
+
+#[tauri::command]
+pub fn storage_facts(state: State<'_, AppStateV2>) -> StorageFacts {
+    let usage = launcher_core::runtime_usage(&state.paths).unwrap_or(launcher_core::RuntimeUsage {
+        python_bytes: 0,
+        cache_bytes: 0,
+    });
+    StorageFacts {
+        data_root: state.paths.data_root.display().to_string(),
+        instances: state.with_installed(|installed| installed.instances.len()),
+        python_bytes: usage.python_bytes,
+        cache_bytes: usage.cache_bytes,
+        data_bytes: launcher_core::dir_usage(&state.paths.data_root).unwrap_or(0),
+    }
+}
+
+#[tauri::command]
+pub fn onboarding_state(state: State<'_, AppStateV2>) -> crate::state_v2::Onboarding {
+    state.onboarding()
+}
+
+#[tauri::command]
+pub fn complete_onboarding(
+    skipped: bool,
+    state: State<'_, AppStateV2>,
+) -> Result<crate::state_v2::Onboarding, String> {
+    state.complete_onboarding(skipped)
+}
+
+#[tauri::command]
+pub fn reset_onboarding(
+    state: State<'_, AppStateV2>,
+) -> Result<crate::state_v2::Onboarding, String> {
+    state.reset_onboarding()
+}
+
 #[tauri::command]
 pub fn trust_info(state: State<'_, AppStateV2>) -> TrustInfo {
     let trusted_keys = state.with_trust(|store| {

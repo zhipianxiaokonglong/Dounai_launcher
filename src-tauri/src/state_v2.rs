@@ -63,6 +63,40 @@ pub struct Diagnostics {
     pub child_output: bool,
 }
 
+/// 首次向导的完成状态。
+///
+/// 只记「走完过或明确跳过」，不记进度：向导没有断点续传的语义，中途关掉下次
+/// 从头开始更省事，也不会出现「停在第三步、模块其实装了一半」这种要还原的状态。
+/// 存盘而不是只放内存，是因为向导的目的就是「新用户只被引导一次」——
+/// 每次启动都重新弹一遍比不弹更烦人。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Onboarding {
+    #[serde(default = "onboarding_schema")]
+    pub schema_version: u32,
+    #[serde(default)]
+    pub completed: bool,
+    /// true 表示用户点了「以后再说」，不是走完流程。
+    #[serde(default)]
+    pub skipped: bool,
+    #[serde(default)]
+    pub completed_at: Option<String>,
+}
+
+fn onboarding_schema() -> u32 {
+    1
+}
+
+impl Default for Onboarding {
+    fn default() -> Self {
+        Self {
+            schema_version: onboarding_schema(),
+            completed: false,
+            skipped: false,
+            completed_at: None,
+        }
+    }
+}
+
 pub struct AppStateV2 {
     pub paths: Paths,
     installed: Mutex<InstalledState>,
@@ -75,6 +109,8 @@ pub struct AppStateV2 {
     pub dev_mode: AtomicBool,
     /// 诊断设置（是否捕获子进程输出）。新建实例读取它，改动即时落盘。
     diagnostics: Mutex<Diagnostics>,
+    /// 首次向导是否走完。界面据此决定开机是否弹向导。
+    onboarding: Mutex<Onboarding>,
     k5_pubkey_b64: Mutex<String>,
     /// 启动时补写/校正 `install.json` 的说明；`None` 表示本来就是一致的。
     /// 设置页直接展示，用户能看出「安装器没跑，是启动器兜的」。
@@ -124,6 +160,9 @@ impl AppStateV2 {
         if crate::diag_log::env_child_output() == Some(true) {
             diagnostics.child_output = true;
         }
+        let onboarding = load_or(&paths.state_dir().join("onboarding.json"), || {
+            Ok(Onboarding::default())
+        })?;
         Ok(Self {
             paths,
             installed: Mutex::new(installed),
@@ -133,6 +172,7 @@ impl AppStateV2 {
             disabled: Mutex::new(BTreeSet::new()),
             dev_mode: AtomicBool::new(false),
             diagnostics: Mutex::new(diagnostics),
+            onboarding: Mutex::new(onboarding),
             k5_pubkey_b64: Mutex::new(BUILTIN_K5_PUBKEY_B64.to_string()),
             install_note,
             instance_locks: Mutex::new(BTreeMap::new()),
@@ -238,6 +278,40 @@ impl AppStateV2 {
             .map_err(|e| format!("保存诊断设置失败：{e}"))?;
         *guard = next;
         Ok(enabled)
+    }
+
+    pub fn onboarding_path(&self) -> PathBuf {
+        self.paths.state_dir().join("onboarding.json")
+    }
+
+    pub fn onboarding(&self) -> Onboarding {
+        lock(&self.onboarding).clone()
+    }
+
+    /// 记下「向导已处理」。`skipped=true` 是用户点了「以后再说」——
+    /// 与走完流程分开记，设置页才能如实写「已跳过」而不是「已完成」。
+    pub fn complete_onboarding(&self, skipped: bool) -> Result<Onboarding, String> {
+        let mut guard = lock(&self.onboarding);
+        let next = Onboarding {
+            schema_version: onboarding_schema(),
+            completed: true,
+            skipped,
+            completed_at: Some(launcher_core::time::utc_now()),
+        };
+        launcher_core::state::write_json(&self.onboarding_path(), &next)
+            .map_err(|e| format!("保存向导状态失败：{e}"))?;
+        *guard = next.clone();
+        Ok(next)
+    }
+
+    /// 让向导下次启动再弹一次（设置页的「重新运行首次向导」）。
+    pub fn reset_onboarding(&self) -> Result<Onboarding, String> {
+        let mut guard = lock(&self.onboarding);
+        let next = Onboarding::default();
+        launcher_core::state::write_json(&self.onboarding_path(), &next)
+            .map_err(|e| format!("保存向导状态失败：{e}"))?;
+        *guard = next.clone();
+        Ok(next)
     }
 
     pub fn with_retention<R>(&self, f: impl FnOnce(&RetentionPolicy) -> R) -> R {
@@ -499,5 +573,28 @@ mod tests {
         let hex = "a".repeat(64);
         assert_eq!(bare_sha256(&prefixed_sha256(&hex)), hex);
         assert_eq!(prefixed_sha256("sha256:abc"), "sha256:abc");
+    }
+
+    /// 向导状态必须落盘：只在内存里的话，用户跳过之后再启动还会被弹一次。
+    #[test]
+    fn onboarding_completion_survives_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let install_root = dir.path().join("app");
+        let data_root = dir.path().join("data");
+
+        let state = AppStateV2::new(install_root.clone(), data_root.clone()).unwrap();
+        assert!(!state.onboarding().completed, "新机器不该是已走过");
+
+        state.complete_onboarding(true).unwrap();
+        let reopened = AppStateV2::new(install_root.clone(), data_root.clone()).unwrap();
+        let saved = reopened.onboarding();
+        assert!(saved.completed);
+        assert!(saved.skipped);
+        assert!(saved.completed_at.is_some());
+
+        // 重开向导：回到未完成，下次启动会再弹。
+        reopened.reset_onboarding().unwrap();
+        let again = AppStateV2::new(install_root, data_root).unwrap();
+        assert!(!again.onboarding().completed);
     }
 }
