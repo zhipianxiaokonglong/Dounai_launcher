@@ -443,6 +443,52 @@ export async function openAdminWindow(moduleId: string): Promise<string> {
 }
 
 /* ------------------------------------------------------------------ */
+/* 同窗口内嵌管理页                                                    */
+/* ------------------------------------------------------------------ */
+
+/** 相对主窗口客户区的逻辑像素；由管理页容器一处算好再下发。 */
+export interface AdminBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface AdminMountResult {
+  /** embedded = 内嵌成功；window = 内嵌失败但已退化为独立窗口。 */
+  mode: "embedded" | "window";
+  label: string;
+  url: string;
+  reason: string | null;
+}
+
+export async function openAdminEmbedded(
+  moduleId: string,
+  bounds: AdminBounds,
+): Promise<AdminMountResult> {
+  return call<AdminMountResult>("open_admin_embedded", {
+    request: { module_id: moduleId },
+    bounds,
+  });
+}
+
+export async function adminHostResize(label: string, bounds: AdminBounds): Promise<void> {
+  await call<void>("admin_host_resize", { request: { label }, bounds });
+}
+
+export async function adminHostReload(label: string): Promise<void> {
+  await call<void>("admin_host_reload", { request: { label } });
+}
+
+export async function adminHostUnmount(label: string): Promise<void> {
+  await call<void>("admin_host_unmount", { request: { label } });
+}
+
+export async function adminHostVisible(label: string, visible: boolean): Promise<void> {
+  await call<void>("admin_host_visible", { request: { label }, visible });
+}
+
+/* ------------------------------------------------------------------ */
 /* 数据清除                                                            */
 /* ------------------------------------------------------------------ */
 

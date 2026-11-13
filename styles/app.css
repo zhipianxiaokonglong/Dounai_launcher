@@ -1890,3 +1890,79 @@ select.input:focus-visible {
 .dropzone[data-drag="on"] .dropzone__hint b {
   color: var(--accent-fg);
 }
+
+/* ---------------- 内嵌管理页 ---------------- */
+
+/*
+  子 WebView 是原生视图，按窗口坐标覆盖在 .admin-slot 上，不参与 DOM 布局。
+  因此这一页不能滚动：容器一旦滚出视口，下发的坐标就会带负值被后端拒收。
+*/
+.pbody--admin {
+  padding: 0;
+  overflow: hidden;
+  display: flex;
+}
+
+.admin {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.admin-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.admin-bar__id {
+  font: 400 11.5px var(--mono);
+  color: var(--fg-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 60%;
+}
+
+.admin-notice {
+  margin: 0;
+  padding: 7px 16px;
+  background: var(--accent-soft);
+  color: var(--accent-fg);
+  font: 400 11.5px/1.5 var(--sans);
+  border-bottom: 1px solid var(--line);
+}
+
+.admin-slot {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  background: var(--panel);
+}
+
+.admin-ph {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px;
+  text-align: center;
+  color: var(--fg-2);
+}
+
+.admin-ph b {
+  font: 500 14px var(--sans);
+  color: var(--fg);
+}
+
+.admin-ph p {
+  margin: 0;
+  max-width: 420px;
+  font: 400 12px/1.7 var(--sans);
+}

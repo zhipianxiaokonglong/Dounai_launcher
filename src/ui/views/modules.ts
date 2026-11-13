@@ -8,7 +8,6 @@
 import {
   isDesktop,
   installFromCatalog,
-  openAdminWindow,
   refreshCatalog,
   removeLocalModule,
   restartInstance,
@@ -763,13 +762,11 @@ async function prepareEnv(instanceId: string, allowOnline = true): Promise<boole
   }
 }
 
-async function openAdmin(moduleId: string): Promise<void> {
-  try {
-    const url = await openAdminWindow(moduleId);
-    toast(`已打开管理界面：${url}`, "ok");
-  } catch (error) {
-    toast(`打开管理界面失败：${describeError(error)}`, "error");
-  }
+/** 管理页是主界面里的独立视图，不再弹独立窗口。 */
+function openAdmin(moduleId: string): void {
+  window.dispatchEvent(
+    new CustomEvent("dounai:navigate", { detail: `admin:${moduleId}` }),
+  );
 }
 
 function openLogsFor(instanceId: string): void {
@@ -810,6 +807,10 @@ function askUninstall(instanceId: string): void {
     onConfirm: async () => {
       try {
         await uninstallModule(view.instance.module_id, view.instance.category, true);
+        // 内嵌管理页还连着这个实例的服务，卸载后必须销毁，不能留一个孤儿视图。
+        window.dispatchEvent(
+          new CustomEvent("dounai:admin-unmount", { detail: view.instance.module_id }),
+        );
         toast(`已卸载 ${name}`, "ok");
       } catch (error) {
         toast(`卸载失败：${describeError(error)}`, "error");

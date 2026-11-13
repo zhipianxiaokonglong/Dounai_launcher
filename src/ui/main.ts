@@ -24,6 +24,7 @@ import {
   runCounts,
   store,
 } from "./store.js";
+import { adminLifecycleChanged, disposeAdmin, renderAdmin } from "./views/admin.js";
 import { renderEnv } from "./views/env.js";
 import { renderImport } from "./views/import.js";
 import { disposeLogs, focusInstance, renderLogs } from "./views/logs.js";
@@ -31,9 +32,9 @@ import { patchEnvJob, refreshModules, renderModules } from "./views/modules.js";
 import { renderSettings } from "./views/settings.js";
 import { startTour } from "./tour.js";
 
-type ViewId = "modules" | "env" | "logs" | "settings" | "import";
+type ViewId = "modules" | "env" | "logs" | "settings" | "import" | "admin";
 
-const VIEWS: ViewId[] = ["modules", "env", "logs", "settings", "import"];
+const VIEWS: ViewId[] = ["modules", "env", "logs", "settings", "import", "admin"];
 
 let current: ViewId = "modules";
 
@@ -47,6 +48,8 @@ const slots = {
 /* ------------------------------------------------------------------ */
 
 async function renderView(view: ViewId, arg?: string): Promise<void> {
+  // 内嵌管理页是原生视图，切走时必须收起来，否则会浮在下一页上面。
+  if (current === "admin" && view !== "admin") disposeAdmin();
   current = view;
   // 日志页的自动刷新要随切页停掉，否则后台一直在读磁盘。
   if (view !== "logs") disposeLogs();
@@ -72,6 +75,9 @@ async function renderView(view: ViewId, arg?: string): Promise<void> {
         break;
       case "import":
         renderImport(slots);
+        break;
+      case "admin":
+        renderAdmin(slots, arg);
         break;
     }
   } catch (error) {
@@ -224,6 +230,8 @@ function scheduleRefresh(): void {
         }
       }
       updateChrome();
+      // 刷新完 store 再通知管理页，保证它读到的是新快照而不是上一帧。
+      adminLifecycleChanged();
     })();
   }, 250);
 }
@@ -233,6 +241,10 @@ function wireEvents(): void {
     const detail = String((event as CustomEvent<unknown>).detail ?? "");
     if (detail.startsWith("logs:")) {
       void renderView("logs", detail.slice("logs:".length));
+      return;
+    }
+    if (detail.startsWith("admin:")) {
+      void renderView("admin", detail.slice("admin:".length));
       return;
     }
     if (VIEWS.includes(detail as ViewId)) void renderView(detail as ViewId);
