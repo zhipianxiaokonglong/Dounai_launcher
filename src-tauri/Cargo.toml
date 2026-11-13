@@ -7,6 +7,9 @@ version = "0.3.1"
 description = "Dounai launcher: install, environment and module management"
 edition = "2021"
 license = "GPL-3.0-or-later"
+# 同一个 crate 里还有 pack / sign_catalog 两个发布工具，`cargo run` 会因多目标
+# 而拒绝执行；`tauri dev` 依赖无歧义的默认目标。
+default-run = "dounai-launcher"
 
 [lib]
 name = "dounai_launcher"
