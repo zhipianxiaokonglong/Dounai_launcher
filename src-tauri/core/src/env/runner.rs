@@ -4,12 +4,14 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use super::console;
 use super::error::{EnvError, EnvErrorKind};
+use super::progress::LineReporter;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UvRequest {
@@ -133,14 +135,10 @@ impl UvRunner for SystemUvRunner {
         }
         // 不弹控制台窗口：环境准备会跑很多次短进程，闪窗比慢更让人不安。
         console::hide_console(&mut command);
-        let result = command.output().map_err(|e| {
-            EnvError::new(
-                EnvErrorKind::State,
-                &req.instance_id,
-                format!("无法启动 {}: {e}", req.program.display()),
-            )
-            .with_command_line(&line)
-        })?;
+        // 有进度接收器就边走边读 stderr，把「正在装哪个包」实时报上去；
+        // 没有接收器时保持一次性 collect，测试与 env_smoke 的输出行为不变。
+        let reporter = LineReporter::new();
+        let result = run_child(command, reporter, &req.instance_id, &line)?;
         let output = UvOutput {
             stdout: String::from_utf8_lossy(&result.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&result.stderr).into_owned(),
@@ -166,9 +164,89 @@ impl UvRunner for SystemUvRunner {
     }
 }
 
+/// 跑子进程。有上报器时把 stderr 逐行报出去，同时仍然攒完整输出给上层做错误上下文。
+fn run_child(
+    mut command: Command,
+    reporter: Option<LineReporter>,
+    instance_id: &str,
+    line: &str,
+) -> Result<std::process::Output, EnvError> {
+    let Some(reporter) = reporter else {
+        return command.output().map_err(|e| {
+            EnvError::new(
+                EnvErrorKind::State,
+                instance_id,
+                format!("无法启动子进程：{e}"),
+            )
+            .with_command_line(line)
+        });
+    };
+    let mut child = command.spawn().map_err(|e| {
+        EnvError::new(
+            EnvErrorKind::State,
+            instance_id,
+            format!("无法启动子进程：{e}"),
+        )
+        .with_command_line(line)
+    })?;
+
+    // stderr 抽到读线程里：uv 的进度与包名都在 stderr，主线程只等退出。
+    let stderr_handle = child.stderr.take().map(|pipe| {
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(pipe);
+            let mut buf = Vec::new();
+            let mut collected = String::new();
+            loop {
+                buf.clear();
+                match reader.read_until(b'\n', &mut buf) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        let text = String::from_utf8_lossy(&buf).into_owned();
+                        // 进度条用 \r 回到行首，按 \r 再切一次才拿得到完整行。
+                        for piece in text.split('\r') {
+                            if !piece.trim().is_empty() {
+                                reporter.line(piece);
+                            }
+                        }
+                        collected.push_str(&text);
+                    }
+                    Err(_) => break,
+                }
+            }
+            collected
+        })
+    });
+    let stdout_handle = child.stdout.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut collected = Vec::new();
+            let _ = pipe.read_to_end(&mut collected);
+            String::from_utf8_lossy(&collected).into_owned()
+        })
+    });
+
+    let status = child.wait().map_err(|e| {
+        EnvError::new(
+            EnvErrorKind::State,
+            instance_id,
+            format!("等待子进程失败：{e}"),
+        )
+        .with_command_line(line)
+    })?;
+    let stderr = stderr_handle
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or_default();
+    let stdout = stdout_handle
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or_default();
+    Ok(std::process::Output {
+        status,
+        stdout: stdout.into_bytes(),
+        stderr: stderr.into_bytes(),
+    })
+}
+
 /// 从 uv 的 stderr 认出「离线缓存缺 wheel」。文案会随版本变化，这里只作分类提示。
-fn looks_like_offline_cache_miss(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
+fn looks_like_offline_cache_miss(text: &str) -> bool {    let lower = text.to_ascii_lowercase();
     lower.contains("not found in the cache")
         || lower.contains("no cached")
         || lower.contains("failed to download")

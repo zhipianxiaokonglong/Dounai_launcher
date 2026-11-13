@@ -7,6 +7,7 @@ pub mod bootstrap;
 pub mod console;
 pub mod deps;
 pub mod error;
+pub mod progress;
 pub mod python;
 pub mod runner;
 pub mod usage;
@@ -28,6 +29,7 @@ pub use bootstrap::{
 };
 pub use deps::{commit, verify_metadata, verify_snapshot, DepsMetadata, ResolvedDeps};
 pub use error::{EnvError, EnvErrorKind, FailureContext};
+pub use progress::{EnvPhase, EnvProgress, LineReporter, Sink};
 pub use python::{ensure_python, ManagedPython};
 pub use runner::{
     MockConfig, MockFailure, MockUvRunner, SystemUvRunner, UvOutput, UvRequest, UvRunner,
@@ -118,6 +120,18 @@ pub struct InstanceRuntime {
     pub source_kind: SourceKind,
     #[serde(default)]
     pub snapshot_change: Option<SnapshotChange>,
+    /// 本次快照是否由签名包里的 pinned 哈希锚定。
+    ///
+    /// 只有 zip 包可能为 true，且只在 `runtime.snapshot_sha256` 声明并与解析结果
+    /// 一致时成立。为 false 表示「这次算出来的哈希是运行时的事实，不是发布者的承诺」，
+    /// 界面可以据此提示重装，但不该把它当成错误。
+    #[serde(default = "pinned_by_default")]
+    pub snapshot_pinned: bool,
+}
+
+/// 旧记录默认按已锚定读：能写进 runtime.json 的 zip 实例，当时都通过了 pinned 比对。
+fn pinned_by_default() -> bool {
+    true
 }
 
 impl RuntimeState {
@@ -249,6 +263,7 @@ pub fn prepare_instance_with(
 
     let result: Result<(PreparedEnv, RuntimeState), EnvError> = (|| {
         let mut runtime = RuntimeState::load_or_empty(paths, ctx.install, instance_id)?;
+        progress::emit(EnvProgress::new(EnvPhase::Uv, "定位 uv"));
         let uv = bootstrap::locate_uv(
             paths,
             ctx.install,
@@ -257,7 +272,21 @@ pub fn prepare_instance_with(
             ctx.fetcher,
             instance_id,
         )?;
+        progress::emit(
+            EnvProgress::new(EnvPhase::Uv, "已定位 uv").with_detail(format!("uv {}", uv.version)),
+        );
+        progress::emit(EnvProgress::new(EnvPhase::Python, "准备 Python 运行时"));
         let python = python::ensure_python(paths, &uv, &ctx.options, ctx.runner, instance_id)?;
+        progress::emit(
+            EnvProgress::new(EnvPhase::Python, "Python 已就绪")
+                .with_detail(python.build_id.clone()),
+        );
+        let deps_label = manifest
+            .runtime
+            .as_ref()
+            .map(|r| format!("{} · {}", r.deps.kind.as_str(), r.deps.path))
+            .unwrap_or_else(|| "未声明".to_string());
+        progress::emit(EnvProgress::new(EnvPhase::Resolve, "解析依赖").with_detail(deps_label));
         let mut resolved = deps::resolve(
             paths,
             instance_id,
@@ -269,34 +298,39 @@ pub fn prepare_instance_with(
             ctx.runner,
         )?;
         resolved_seen = Some(resolved.clone());
+        let packages = deps::lock_packages_from(&resolved.staging_path);
+        progress::emit(
+            EnvProgress::new(EnvPhase::Resolve, "依赖已解析")
+                .with_detail(snapshot_summary(&resolved.sha256, packages.len())),
+        );
         // zip 包的 manifest 已签名，pinned 哈希是不可变锚点；dir 是源码工作区，
         // 允许重解析，但把变化记进 runtime.json 供 M4 提示重新确认。
-        if ctx.options.source_kind == SourceKind::Zip {
-            let pinned = manifest
-                .runtime
-                .as_ref()
-                .and_then(|r| r.snapshot_sha256.as_deref());
-            match pinned {
-                None => {
-                    return Err(EnvError::new(
-                        EnvErrorKind::SnapshotMismatch,
-                        instance_id,
-                        "zip 实例缺少 manifest.runtime.snapshot_sha256，无法锚定依赖快照",
-                    ));
-                }
-                Some(pinned) if pinned != resolved.sha256 => {
-                    return Err(EnvError::new(
-                        EnvErrorKind::SnapshotMismatch,
-                        instance_id,
-                        format!(
-                            "依赖快照与签名 manifest 不符：pinned {pinned}，解析得到 {}",
-                            resolved.sha256
-                        ),
-                    ));
-                }
-                Some(_) => {}
+        //
+        // 没声明 pinned 不等于被篡改：`kind = uv_lock` 的包，锚点就是签名包内那份
+        // uv.lock（venv 阶段会再比对一次它与解析结果），发布者不必重复写一个哈希。
+        // 因此缺字段只降级为「未锚定」并记进 runtime.json，不硬拒；声明了却不符
+        // 才是真信号，照旧硬拒。
+        let mut snapshot_pinned = false;
+        if let Some(pinned) = manifest
+            .runtime
+            .as_ref()
+            .and_then(|r| r.snapshot_sha256.as_deref())
+        {
+            if pinned != resolved.sha256 {
+                return Err(EnvError::new(
+                    EnvErrorKind::SnapshotMismatch,
+                    instance_id,
+                    format!(
+                        "依赖快照与签名 manifest 不符：pinned {pinned}，解析得到 {}",
+                        resolved.sha256
+                    ),
+                ));
             }
+            snapshot_pinned = true;
         }
+        progress::emit(
+            EnvProgress::new(EnvPhase::Sync, "同步依赖到 venv").with_total(packages.len() as u32),
+        );
         let outcome = venv::prepare_venv(
             paths,
             instance_id,
@@ -310,6 +344,10 @@ pub fn prepare_instance_with(
         )?;
 
         deps::commit(paths, &mut resolved)?;
+        progress::emit(
+            EnvProgress::new(EnvPhase::Verify, "复核依赖快照与安装根")
+                .with_detail(format!("generation {}", short_hash(&resolved.sha256))),
+        );
         let env_vars = build_env_vars(
             paths,
             instance_id,
@@ -348,7 +386,16 @@ pub fn prepare_instance_with(
                 prepared_at: crate::time::utc_now(),
                 source_kind: ctx.options.source_kind,
                 snapshot_change,
+                snapshot_pinned,
             },
+        );
+        progress::emit(
+            EnvProgress::new(EnvPhase::Done, "依赖已就绪").with_detail(
+                prepared
+                    .venv_python
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
         );
         Ok((prepared, runtime))
     })();
@@ -369,9 +416,37 @@ pub fn prepare_instance_with(
     }
 }
 
+/// 快照哈希的前 12 位，界面用。
+fn short_hash(sha: &str) -> String {
+    sha.strip_prefix("sha256:")
+        .unwrap_or(sha)
+        .chars()
+        .take(12)
+        .collect()
+}
+
+/// 「N 个依赖 · 短哈希」，两段都缺时不硬编空话。
+fn snapshot_summary(sha: &str, packages: usize) -> String {
+    if packages > 0 {
+        format!("{packages} 个依赖 · {}", short_hash(sha))
+    } else {
+        short_hash(sha)
+    }
+}
+
+/// 只读某实例的快照锚定状态：`Some(false)` 表示这次快照不是发布者签名锚定的。
+///
+/// 界面据此提示「重装可恢复锚定」，判定本身仍由 `verify_instance` 负责。
+pub fn instance_snapshot_pinned(paths: &Paths, instance_id: &str) -> Option<bool> {
+    let runtime: RuntimeState = state::read_json(&paths.runtime_state_path()).ok()?;
+    runtime
+        .instances
+        .get(instance_id)
+        .map(|entry| entry.snapshot_pinned)
+}
+
 /// 生产入口：只读状态，比对哈希与安装根，不启动任何子进程。
-pub fn verify_instance(paths: &Paths, instance_id: &str) -> Result<PreparedEnv, EnvError> {
-    let install = InstallState::load(paths).map_err(|e| {
+pub fn verify_instance(paths: &Paths, instance_id: &str) -> Result<PreparedEnv, EnvError> {    let install = InstallState::load(paths).map_err(|e| {
         EnvError::new(
             EnvErrorKind::RootMismatch,
             instance_id,
@@ -882,18 +957,41 @@ mod tests {
     }
 
     #[test]
-    fn zip_instance_requires_pinned_snapshot_and_rejects_mismatch() {
-        let options = EnvOptions {
-            source_kind: SourceKind::Zip,
-            ..EnvOptions::default()
-        };
-        let missing = Fixture::new(options.clone(), PYPROJECT, MockUvRunner::default());
-        let e = missing.prepare().unwrap_err();
-        assert_eq!(e.kind, EnvErrorKind::SnapshotMismatch);
-        assert!(e.message.contains("缺少"));
+    fn zip_instance_without_pinned_snapshot_is_allowed_and_marked_unpinned() {
+        // 已发布的包里 `runtime.snapshot_sha256` 普遍不写：`kind = uv_lock` 的锚点
+        // 就是签名包内那份 uv.lock。缺字段不该拦住安装，但必须记成未锚定。
+        let f = Fixture::new(
+            EnvOptions {
+                source_kind: SourceKind::Zip,
+                ..EnvOptions::default()
+            },
+            PYPROJECT,
+            MockUvRunner::default(),
+        );
+        f.prepare().expect("未声明 pinned 不应硬拒");
+        let runtime: RuntimeState = crate::state::read_json(&f.paths.runtime_state_path()).unwrap();
+        let entry = runtime
+            .instances
+            .get("dounai/omninexus@stable@main")
+            .expect("应写入 runtime.json");
+        assert!(!entry.snapshot_pinned, "缺字段必须记成未锚定");
+        assert_eq!(
+            instance_snapshot_pinned(&f.paths, "dounai/omninexus@stable@main"),
+            Some(false)
+        );
+    }
 
+    #[test]
+    fn zip_instance_rejects_pinned_snapshot_mismatch() {
         let wrong = format!("sha256:{}", "0".repeat(64));
-        let mismatched = Fixture::new(options, &with_pinned(&wrong), MockUvRunner::default());
+        let mismatched = Fixture::new(
+            EnvOptions {
+                source_kind: SourceKind::Zip,
+                ..EnvOptions::default()
+            },
+            &with_pinned(&wrong),
+            MockUvRunner::default(),
+        );
         let e = mismatched.prepare().unwrap_err();
         assert_eq!(e.kind, EnvErrorKind::SnapshotMismatch);
         assert!(e.message.contains("pinned"));
@@ -916,6 +1014,37 @@ mod tests {
         let env = f.prepare().unwrap();
         assert_eq!(env.snapshot_sha256, probe.snapshot_sha256);
         assert!(verify_instance_with(&f.paths, "dounai/omninexus@stable@main", &f.install).is_ok());
+        let runtime: RuntimeState = crate::state::read_json(&f.paths.runtime_state_path()).unwrap();
+        assert!(runtime.instances.values().next().unwrap().snapshot_pinned);
+    }
+
+    #[test]
+    fn prepare_reports_phases_through_the_sink() {
+        use crate::env::progress::{with_sink, EnvPhase, EnvProgress};
+        use std::sync::{Arc, Mutex};
+
+        let seen: Arc<Mutex<Vec<EnvProgress>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink_seen = Arc::clone(&seen);
+        let sink: Sink = Arc::new(move |p| sink_seen.lock().unwrap().push(p));
+
+        let f = Fixture::new(EnvOptions::default(), PYPROJECT, MockUvRunner::default());
+        with_sink(Some(sink), || f.prepare().unwrap());
+
+        let seen = seen.lock().unwrap();
+        let phases: Vec<EnvPhase> = seen.iter().map(|p| p.phase).collect();
+        for expected in [
+            EnvPhase::Uv,
+            EnvPhase::Python,
+            EnvPhase::Resolve,
+            EnvPhase::Sync,
+            EnvPhase::Verify,
+            EnvPhase::Done,
+        ] {
+            assert!(phases.contains(&expected), "缺少阶段 {expected:?}");
+        }
+        assert_eq!(phases.last().copied(), Some(EnvPhase::Done));
+        // 每个阶段都要有给人看的标题，界面直接显示这个字段。
+        assert!(seen.iter().all(|p| !p.title.trim().is_empty()));
     }
 
     #[test]

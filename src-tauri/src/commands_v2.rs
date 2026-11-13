@@ -12,7 +12,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 
 use launcher_core::lifecycle::{
     activation_steps, rollback_steps, ActivationStep, Phase, ProbeState, RecoveryStep, RolesDoc,
@@ -534,6 +534,11 @@ pub struct InstanceRuntimeView {
     /// 依赖环境是否已就绪。shell 角色不要运行时，恒为 true。
     /// 未就绪时界面不给「启动」，先引导装依赖——否则点下去只会失败。
     pub prepared: bool,
+    /// 当前依赖快照是否由签名包里的 pinned 哈希锚定。
+    ///
+    /// `None` 表示没有记录（未准备或 shell）。`Some(false)` 只说明「这个包的 manifest
+    /// 没声明快照哈希，这份快照是运行时算出来的」，不是错误，界面据此提示一句。
+    pub env_pinned: Option<bool>,
 }
 
 #[tauri::command]
@@ -564,22 +569,43 @@ pub fn list_instance_views(
         .iter()
         .map(|i| (i.instance_id.clone(), manifest_brief(&state, i)))
         .collect();
+    let env_facts = EnvFacts {
+        prepared,
+        pinned: instances
+            .iter()
+            .filter_map(|i| {
+                launcher_core::env::instance_snapshot_pinned(&state.paths, &i.instance_id)
+                    .map(|value| (i.instance_id.clone(), value))
+            })
+            .collect(),
+    };
     compose_instance_views(
         instances,
         &ports,
         &active,
         &disabled,
         &supervisor.snapshot(),
-        &prepared,
+        &env_facts,
         &briefs,
     )
+}
+
+/// 卡片需要的环境事实，由命令层算好，组合函数只负责落位。
+///
+/// 合成一个结构体而不是继续加参数：这两个字段都来自 runtime.json 与 verify，
+/// 语义上是同一件事，分开传只会让签名越挂越长。
+#[derive(Debug, Default)]
+struct EnvFacts {
+    /// 依赖环境已就绪的实例。
+    prepared: BTreeSet<String>,
+    /// 快照是否由签名包锚定；没有记录的实例不在表里。
+    pinned: std::collections::BTreeMap<String, bool>,
 }
 
 /// 卡片展示用的清单摘要。
 #[derive(Debug, Clone)]
 struct ManifestBrief {
-    name: String,
-    admin_ui: Option<AdminUiView>,
+    name: String,    admin_ui: Option<AdminUiView>,
 }
 
 /// 读模块根 manifest 取展示字段。
@@ -635,7 +661,7 @@ fn compose_instance_views(
     active: &std::collections::BTreeMap<String, String>,
     disabled: &BTreeSet<String>,
     snapshots: &std::collections::BTreeMap<String, Snapshot>,
-    prepared: &BTreeSet<String>,
+    env_facts: &EnvFacts,
     briefs: &std::collections::BTreeMap<String, ManifestBrief>,
 ) -> Vec<InstanceRuntimeView> {
     instances
@@ -650,7 +676,8 @@ fn compose_instance_views(
                 port: ports.get(&instance.instance_id).copied().flatten(),
                 active: active.values().any(|id| id == &instance.instance_id),
                 disabled: disabled.contains(&instance.module_id),
-                prepared: prepared.contains(&instance.instance_id),
+                prepared: env_facts.prepared.contains(&instance.instance_id),
+                env_pinned: env_facts.pinned.get(&instance.instance_id).copied(),
                 snapshot: snapshots.get(&instance.instance_id).cloned(),
                 instance,
             }
@@ -1282,6 +1309,68 @@ pub async fn install_local_package(
     )
 }
 
+/* ------------------------------------------------------------------ */
+/* 依赖准备的进度事件                                                  */
+/* ------------------------------------------------------------------ */
+
+/// 依赖准备的过程事件。前端按 `instanceId` 落到对应卡片上。
+pub const EVENT_ENV_PROGRESS: &str = "instance-env-progress";
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvProgressEvent {
+    pub instance_id: String,
+    /// `uv` / `python` / `resolve` / `sync` / `verify` / `done`。
+    pub phase: &'static str,
+    pub title: String,
+    pub detail: Option<String>,
+    pub current: Option<u32>,
+    pub total: Option<u32>,
+}
+
+/// 把引擎的阶段上报转成前端事件，并做一次降频。
+///
+/// 为什么降频：`uv -v` 在装大包时会连续刷行，每行都发一次事件会把 webview 的
+/// 消息队列排满。阶段或标题变化立即发，只有细节变化的按 150ms 合并。
+fn env_progress_sink(
+    app: &tauri::AppHandle,
+    instance_id: &str,
+) -> launcher_core::env::Sink {
+    use std::sync::{Arc, Mutex};
+    let app = app.clone();
+    let id = instance_id.to_string();
+    let gate: Arc<Mutex<Option<(String, String, Instant)>>> = Arc::new(Mutex::new(None));
+    Arc::new(move |progress: launcher_core::env::EnvProgress| {
+        let phase = progress.phase.as_str().to_string();
+        let detail = progress.detail.clone().unwrap_or_default();
+        {
+            let mut guard = gate.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((last_phase, last_detail, at)) = guard.as_ref() {
+                if *last_phase == phase {
+                    if *last_detail == detail {
+                        return;
+                    }
+                    if at.elapsed() < Duration::from_millis(150) {
+                        return;
+                    }
+                }
+            }
+            *guard = Some((phase.clone(), detail, Instant::now()));
+        }
+        let _ = app.emit(
+            EVENT_ENV_PROGRESS,
+            EnvProgressEvent {
+                instance_id: id.clone(),
+                phase: progress.phase.as_str(),
+                title: progress.title,
+                detail: progress.detail,
+                current: progress.current,
+                total: progress.total,
+            },
+        );
+    })
+}
+
 #[tauri::command]
 pub async fn prepare_instance_env(
     instance_id: String,
@@ -1289,10 +1378,17 @@ pub async fn prepare_instance_env(
     app: tauri::AppHandle,
 ) -> Result<String, String> {
     // 依赖准备要建 venv、跑 uv sync，离线也可能几十秒，联网更久。
+    let progress_app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<AppStateV2>();
-        let supervisor = app.state::<Supervisor>();
-        prepare_instance_env_impl(&instance_id, allow_online, &state, &supervisor)
+        let state = progress_app.state::<AppStateV2>();
+        let supervisor = progress_app.state::<Supervisor>();
+        prepare_instance_env_impl(
+            &instance_id,
+            allow_online,
+            &state,
+            &supervisor,
+            Some(env_progress_sink(&progress_app, &instance_id)),
+        )
     })
     .await
     .map_err(|e| format!("依赖准备没有跑完：{e}"))?
@@ -1303,6 +1399,7 @@ fn prepare_instance_env_impl(
     allow_online: Option<bool>,
     state: &AppStateV2,
     supervisor: &Supervisor,
+    sink: Option<launcher_core::env::Sink>,
 ) -> Result<String, String> {
     let instance = state
         .instance(instance_id)
@@ -1341,15 +1438,16 @@ fn prepare_instance_env_impl(
         runner: &runner,
         fetcher: &fetcher,
     };
-    let prepared =
+    let prepared = launcher_core::env::progress::with_sink(sink, || {
         launcher_core::env::prepare_instance_with(&state.paths, instance_id, &manifest, &dir, &ctx)
-            .map_err(|e| {
-                if online {
-                    format!("依赖准备失败：{e}")
-                } else {
-                    format!("离线依赖准备失败（{e}）。如确需联网补齐依赖，请显式放行后重试。")
-                }
-            })?;
+    })
+    .map_err(|e| {
+        if online {
+            format!("依赖准备失败：{e}")
+        } else {
+            format!("离线依赖准备失败（{e}）。如确需联网补齐依赖，请显式放行后重试。")
+        }
+    })?;
     Ok(prepared.venv_python.to_string_lossy().into_owned())
 }
 
@@ -2446,13 +2544,17 @@ mod tests {
             .iter()
             .map(|id| id.to_string())
             .collect();
+        let env_facts = EnvFacts {
+            prepared,
+            pinned: std::collections::BTreeMap::new(),
+        };
         let views = compose_instance_views(
             vec![active_instance, standby],
             &ports,
             &active,
             &disabled,
             &snapshots,
-            &prepared,
+            &env_facts,
             &std::collections::BTreeMap::new(),
         );
         assert_eq!(views.len(), 2);

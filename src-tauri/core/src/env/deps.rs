@@ -129,6 +129,63 @@ pub fn staging_path(paths: &Paths, instance_id: &str) -> PathBuf {
     paths.deps_staging_path(instance_id)
 }
 
+/// 读快照里的包名与版本，只用于界面展示（计数、抽查）。
+///
+/// 认两种格式：`uv.lock` 的 `[[package]]` 块，和 `pip compile` 产出的
+/// `name==version` 行。看不懂的行直接跳过——展示用的解析不该成为失败点。
+pub fn lock_packages(text: &str) -> Vec<String> {
+    if text.contains("[[package]]") {
+        let mut out = Vec::new();
+        let mut name: Option<String> = None;
+        for line in text.lines() {
+            let line = line.trim();
+            if line.starts_with("[[package]]") {
+                if let Some(previous) = name.take() {
+                    out.push(previous);
+                }
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("name = ") {
+                let value = rest.trim().trim_matches('"').to_string();
+                if !value.is_empty() {
+                    name = Some(value);
+                }
+            } else if let Some(rest) = line.strip_prefix("version = ") {
+                let version = rest.trim().trim_matches('"');
+                if let Some(collected) = name.as_mut() {
+                    collected.push(' ');
+                    collected.push_str(version);
+                }
+            }
+        }
+        if let Some(previous) = name {
+            out.push(previous);
+        }
+        return out;
+    }
+    text.lines()
+        .filter_map(|line| {
+            let line = line.trim().trim_end_matches('\\').trim();
+            if line.is_empty() || line.starts_with('#') || line.starts_with('-') {
+                return None;
+            }
+            let (name, rest) = line.split_once("==")?;
+            let version = rest.split_whitespace().next().unwrap_or_default();
+            if name.is_empty() {
+                return None;
+            }
+            Some(format!("{name} {version}"))
+        })
+        .collect()
+}
+
+/// 从快照文件读包名。文件读不到就当没有——展示信息不值得报错。
+pub fn lock_packages_from(path: &Path) -> Vec<String> {
+    fs::read_to_string(path)
+        .map(|text| lock_packages(&text))
+        .unwrap_or_default()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn resolve(
     paths: &Paths,
@@ -325,6 +382,19 @@ mod tests {
     use crate::env::runner::MockUvRunner;
     use crate::manifest::ModuleManifestV2;
     use crate::paths::{InstallMode, Paths};
+
+    #[test]
+    fn lock_packages_reads_uv_lock_and_requirements_formats() {
+        let uv = "version = 1\n\n[[package]]\nname = \"fastapi\"\nversion = \"0.115.6\"\n\n[[package]]\nname = \"uvicorn\"\nversion = \"0.34.0\"\n";
+        assert_eq!(lock_packages(uv), vec!["fastapi 0.115.6", "uvicorn 0.34.0"]);
+
+        let requirements = "# generated\nfastapi==0.115.6 \\\n    --hash=sha256:aa\nuvicorn==0.34.0\n";
+        assert_eq!(
+            lock_packages(requirements),
+            vec!["fastapi 0.115.6", "uvicorn 0.34.0"]
+        );
+        assert!(lock_packages("").is_empty());
+    }
 
     fn setup() -> (tempfile::TempDir, Paths, PathBuf, UvBinary, ManagedPython) {
         let dir = tempfile::tempdir().unwrap();

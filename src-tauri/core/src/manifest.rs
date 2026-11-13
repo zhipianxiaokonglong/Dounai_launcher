@@ -33,6 +33,17 @@ pub enum DepsKind {
     Pyproject,
 }
 
+impl DepsKind {
+    /// 界面与进度文案用的短名。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DepsKind::UvLock => "uv.lock",
+            DepsKind::Requirements => "requirements",
+            DepsKind::Pyproject => "pyproject",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DepsSpec {
     pub kind: DepsKind,
