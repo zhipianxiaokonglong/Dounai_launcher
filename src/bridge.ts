@@ -397,3 +397,235 @@ export async function openAdminWindow(moduleId: string): Promise<string> {
 export async function purgeLocalData(request: PurgeRequest): Promise<PurgeResponse> {
   return call<PurgeResponse>("purge_local_data", { request });
 }
+
+/* ------------------------------------------------------------------ */
+/* v2 实例面（M4 主界面按 role 分组、按实例渲染）                      */
+/* ------------------------------------------------------------------ */
+
+/** 与 `launcher_core::manifest::Role` 的 serde 形状一致。 */
+export type Role = "input" | "llm" | "output" | "shell" | "auxiliary";
+export type InstanceCategory = "core" | "optional" | "reserved";
+/** 四级验签结果；D 类硬拒，永远不会出现在实例表里。 */
+export type InstallVerdict = "A" | "B" | "C" | "D";
+export type InstanceSourceKind = "zip" | "dir";
+export type Phase = "stopped" | "starting" | "running" | "failed" | "stopping";
+export type ProbeState = "not_checked" | "pending" | "healthy" | "unhealthy";
+
+export interface GitObservation {
+  present: boolean;
+  origin?: string;
+  branch?: string;
+  head: string | null;
+  dirty: boolean;
+  observed_at: string;
+}
+
+/**
+ * 一个已登记实例。
+ *
+ * 字段名与 `installed.json` 完全一致（Rust 侧没有 rename），
+ * 所以这里不做 camelCase 转换——多一层映射只会多一处漂移点。
+ */
+export interface Instance {
+  instance_id: string;
+  module_id: string;
+  variant: string;
+  version: string;
+  role: Role;
+  category: InstanceCategory;
+  publisher_fp: string | null;
+  verdict: InstallVerdict;
+  confirmed_at: string;
+  installed_at: string;
+  source_kind: InstanceSourceKind;
+  source_path: string | null;
+  git?: GitObservation | null;
+  pinned: boolean;
+  auto_update: boolean;
+  zip_sha256?: string;
+  expected_signer_fp?: string;
+  signature_present?: boolean;
+  allow_unsigned_once?: boolean;
+  head_confirmed?: string;
+  data_dir?: string;
+  note?: string;
+}
+
+export interface InstanceSnapshot {
+  instance_id: string;
+  phase: Phase;
+  ticket: number;
+  pid: number | null;
+  health: ProbeState;
+  contract: ProbeState;
+  exit_code: number | null;
+  last_error: string | null;
+}
+
+/**
+ * 卡片渲染所需的一次性合并视图。
+ *
+ * `port` 只从 Rust 的 `assign_ports` 来：前端自己推算规范端口/备用端口
+ * 一定会与实际启动值分叉，那正是「显示什么 ≠ 跑什么」。
+ */
+export interface InstanceRuntimeView {
+  instance: Instance;
+  port: number | null;
+  active: boolean;
+  disabled: boolean;
+  snapshot: InstanceSnapshot | null;
+}
+
+export async function listInstanceViews(): Promise<InstanceRuntimeView[]> {
+  return call<InstanceRuntimeView[]>("list_instance_views");
+}
+
+export async function restartInstance(instanceId: string): Promise<RunView> {
+  return call<RunView>("restart_instance", { instanceId });
+}
+
+/** 切换 role 的 active 槽：停旧、起新、过探测、提交，失败回滚。 */
+export async function switchActive(instanceId: string): Promise<string[]> {
+  return call<string[]>("switch_active", { instanceId });
+}
+
+/** 确认目录实例的源码现状（写入 head 锚点）。 */
+export async function confirmLocalSource(instanceId: string): Promise<string> {
+  return call<string>("confirm_local_source", { instanceId });
+}
+
+/** 准备实例依赖环境；`allowOnline` 缺省为 false，离线优先。 */
+export async function prepareInstanceEnv(
+  instanceId: string,
+  allowOnline = false,
+): Promise<string> {
+  return call<string>("prepare_instance_env", { instanceId, allowOnline });
+}
+
+export interface InstanceLogs {
+  instance_id: string;
+  lines: string[];
+  files: number;
+  truncated: boolean;
+  note: string;
+}
+
+export async function readInstanceLogs(instanceId: string): Promise<InstanceLogs> {
+  return call<InstanceLogs>("read_instance_logs", { instanceId });
+}
+
+export async function getLifecycleSnapshot(): Promise<InstanceSnapshot[]> {
+  return call<InstanceSnapshot[]>("get_lifecycle_snapshot");
+}
+
+/* ------------------------------------------------------------------ */
+/* 设置面                                                              */
+/* ------------------------------------------------------------------ */
+
+export interface BuiltinKey {
+  key_id: string;
+  fingerprint: string;
+  purpose: string;
+  enabled: boolean;
+  deletable: boolean;
+}
+
+export interface TrustedKey {
+  fingerprint: string;
+  label: string;
+  confirmed_at: string;
+  enabled: boolean;
+  origin: string;
+  revoked_at?: string;
+  note?: string;
+}
+
+export interface TrustStore {
+  schema_version: number;
+  builtin: BuiltinKey[];
+  trusted: TrustedKey[];
+  last_updated?: string;
+}
+
+export interface RetentionPolicy {
+  schema_version: number;
+  keep_versions: number;
+  pinned: string[];
+  data_dir_policy: string;
+  source_dir_policy: string;
+  cleanup_trigger?: string;
+  last_cleanup_at?: string;
+}
+
+export interface SettingsSnapshot {
+  trust: TrustStore;
+  retention: RetentionPolicy;
+  k1_fingerprint: string;
+  k5_fingerprint: string;
+}
+
+export async function settingsSnapshot(): Promise<SettingsSnapshot> {
+  return call<SettingsSnapshot>("settings_snapshot");
+}
+
+export interface KeyInfo {
+  fingerprint: string;
+  accepted: boolean;
+  note: string;
+}
+
+/** 会话内替换 K5 公钥；重启回落到内置值。 */
+export async function setK5Pubkey(pubkeyB64: string): Promise<KeyInfo> {
+  return call<KeyInfo>("set_k5_pubkey", { pubkeyB64 });
+}
+
+export async function confirmTrustedKey(
+  fingerprint: string,
+  label?: string,
+): Promise<KeyInfo> {
+  return call<KeyInfo>("confirm_trusted_key", { request: { fingerprint, label } });
+}
+
+export async function revokeTrustedKey(fingerprint: string): Promise<KeyInfo> {
+  return call<KeyInfo>("revoke_trusted_key", { fingerprint });
+}
+
+export async function setKeepVersions(keepVersions: number): Promise<number> {
+  return call<number>("set_keep_versions", { keepVersions });
+}
+
+/* ------------------------------------------------------------------ */
+/* 生命周期事件                                                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 订阅生命周期快照推送。
+ *
+ * 只在 Tauri 里可用；浏览器模式返回一个不做事的退订函数，
+ * 调用方不必分支。事件名与 Rust 侧 `lifecycle-changed` 一致。
+ */
+export function onLifecycleChanged(handler: () => void): () => void {
+  const tauri = (globalThis as { __TAURI__?: { event?: { listen?: unknown } } }).__TAURI__;
+  const listen = tauri?.event?.listen;
+  if (typeof listen !== "function") return () => undefined;
+  type UnlistenFn = () => void;
+  const call = listen as (
+    event: string,
+    cb: () => void,
+  ) => Promise<UnlistenFn>;
+  let unlisten: UnlistenFn | null = null;
+  let cancelled = false;
+  void call("lifecycle-changed", handler)
+    .then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    })
+    .catch(() => undefined);
+  return () => {
+    cancelled = true;
+    if (unlisten) {
+      unlisten();
+      unlisten = null;
+    }
+  };
+}

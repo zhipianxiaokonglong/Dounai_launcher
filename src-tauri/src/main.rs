@@ -54,6 +54,7 @@ fn main() {
             dounai_launcher::commands_v2::download_package,
             dounai_launcher::commands_v2::refresh_catalog,
             dounai_launcher::commands_v2::trust_info,
+            dounai_launcher::commands_v2::settings_snapshot,
             dounai_launcher::commands_v2::hash_file,
             dounai_launcher::commands_v2::purge_local_data,
             dounai_launcher::commands_v2::read_module_manifests,
@@ -71,6 +72,7 @@ fn main() {
             dounai_launcher::env_probe::probe_environment,
             // v2 新增命令。
             dounai_launcher::commands_v2::list_instances,
+            dounai_launcher::commands_v2::list_instance_views,
             dounai_launcher::commands_v2::restart_instance,
             dounai_launcher::commands_v2::switch_active,
             dounai_launcher::commands_v2::confirm_local_source,

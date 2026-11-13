@@ -540,6 +540,69 @@ pub fn list_instances(state: State<'_, AppStateV2>) -> Vec<Instance> {
     state.with_installed(|s| s.instances.values().cloned().collect())
 }
 
+/// 界面一次拿齐渲染一张卡片所需的全部事实。
+///
+/// 光有 `Instance` 不够：端口由 `assign_ports` 按 active / 备用端口段分配，
+/// 前端自己推算必然与真实启动值分叉（M4 的卡片要显示端口）。
+/// 所以端口只从这里出，前端不复制分配规则。
+#[derive(Debug, Serialize)]
+pub struct InstanceRuntimeView {
+    pub instance: Instance,
+    /// 该实例真正会在用的端口；`shell` 与未分配备用端口时为 None。
+    pub port: Option<u16>,
+    /// 是否为所在 role 的 active 槽实例。
+    pub active: bool,
+    /// 模块级停用标记（按 module_id 记录，不是按实例）。
+    pub disabled: bool,
+    /// 生命周期快照；启动器没见过的实例为 None。
+    pub snapshot: Option<Snapshot>,
+}
+
+#[tauri::command]
+pub fn list_instance_views(
+    state: State<'_, AppStateV2>,
+    supervisor: State<'_, Supervisor>,
+) -> Vec<InstanceRuntimeView> {
+    let mut instances: Vec<Instance> =
+        state.with_installed(|s| s.instances.values().cloned().collect());
+    instances.sort_by(|a, b| a.instance_id.cmp(&b.instance_id));
+    let ports = assign_ports(&state, supervisor.roles(), &instances);
+    let active = state.with_installed(|s| s.active.clone());
+    let disabled: BTreeSet<String> = instances
+        .iter()
+        .map(|i| i.module_id.clone())
+        .filter(|id| state.is_disabled(id))
+        .collect();
+    compose_instance_views(
+        instances,
+        &ports,
+        &active,
+        &disabled,
+        &supervisor.snapshot(),
+    )
+}
+
+/// 组合逻辑单独成函数：命令层只取数据，排序、端口回填与 active 判定都在这里，
+/// 便于用普通单测覆盖（`State` 在测试里不可构造）。
+fn compose_instance_views(
+    instances: Vec<Instance>,
+    ports: &std::collections::BTreeMap<String, Option<u16>>,
+    active: &std::collections::BTreeMap<String, String>,
+    disabled: &BTreeSet<String>,
+    snapshots: &std::collections::BTreeMap<String, Snapshot>,
+) -> Vec<InstanceRuntimeView> {
+    instances
+        .into_iter()
+        .map(|instance| InstanceRuntimeView {
+            port: ports.get(&instance.instance_id).copied().flatten(),
+            active: active.values().any(|id| id == &instance.instance_id),
+            disabled: disabled.contains(&instance.module_id),
+            snapshot: snapshots.get(&instance.instance_id).cloned(),
+            instance,
+        })
+        .collect()
+}
+
 #[tauri::command]
 pub fn set_module_enabled(
     state: State<'_, AppStateV2>,
@@ -1681,6 +1744,32 @@ pub fn download_package(
     })
 }
 
+/// 设置页一次读完：信任表、保留策略与两枚内置公钥的指纹。
+///
+/// 指纹全部用编译期内嵌值或会话内 K5 重算，界面不自行拼装字符串——
+/// 指纹是必须一眼看出来的东西，不能出现「界面显示 A、判定用 B」。
+#[derive(Debug, Serialize)]
+pub struct SettingsSnapshot {
+    pub trust: launcher_core::m2::trust::TrustStore,
+    pub retention: launcher_core::m2::retention::RetentionPolicy,
+    pub k1_fingerprint: String,
+    pub k5_fingerprint: String,
+}
+
+#[tauri::command]
+pub fn settings_snapshot(state: State<'_, AppStateV2>) -> SettingsSnapshot {
+    let trust = state.with_trust(|store| store.clone());
+    let retention = state.with_retention(|policy| policy.clone());
+    let k5_fingerprint = launcher_core::m2::fingerprint(&state.k5_pubkey())
+        .unwrap_or_else(|_| crate::state_v2::BUILTIN_K5_FINGERPRINT.to_string());
+    SettingsSnapshot {
+        trust,
+        retention,
+        k1_fingerprint: crate::state_v2::BUILTIN_K1_FINGERPRINT.to_string(),
+        k5_fingerprint,
+    }
+}
+
 #[tauri::command]
 pub fn trust_info(state: State<'_, AppStateV2>) -> TrustInfo {
     let trusted_keys = state.with_trust(|store| {
@@ -1979,5 +2068,65 @@ mod tests {
             .position(|s| *s == ActivationStep::ProbeContract)
             .unwrap();
         assert!(probe < commit);
+    }
+
+    /// 卡片渲染所需的合并视图：端口、active、停用与快照各归各位。
+    #[test]
+    fn instance_views_carry_port_active_and_snapshot() {
+        let instance = |id: &str, role: &str| -> Instance {
+            serde_json::from_value(serde_json::json!({
+                "instance_id": id,
+                "module_id": "omninexus",
+                "variant": "stable",
+                "version": "0.1.0",
+                "role": role,
+                "category": "optional",
+                "verdict": "A",
+                "confirmed_at": "2026-11-13T00:00:00Z",
+                "installed_at": "2026-11-13T00:00:00Z",
+                "source_kind": "zip",
+                "pinned": false,
+                "auto_update": false,
+            }))
+            .unwrap()
+        };
+        let active_instance = instance("omninexus@stable", "llm");
+        let standby = instance("omninexus@local", "llm");
+        let mut ports = std::collections::BTreeMap::new();
+        ports.insert("omninexus@stable".to_string(), Some(8102));
+        ports.insert("omninexus@local".to_string(), Some(18101));
+        let mut active = std::collections::BTreeMap::new();
+        active.insert("llm".to_string(), "omninexus@stable".to_string());
+        let disabled: BTreeSet<String> = BTreeSet::new();
+        let mut snapshots = std::collections::BTreeMap::new();
+        snapshots.insert(
+            "omninexus@stable".to_string(),
+            Snapshot {
+                instance_id: "omninexus@stable".into(),
+                phase: Phase::Running,
+                ticket: 3,
+                pid: Some(99),
+                health: ProbeState::Healthy,
+                contract: ProbeState::Healthy,
+                exit_code: None,
+                last_error: None,
+            },
+        );
+
+        let views = compose_instance_views(
+            vec![active_instance, standby],
+            &ports,
+            &active,
+            &disabled,
+            &snapshots,
+        );
+        assert_eq!(views.len(), 2);
+        assert_eq!(views[0].port, Some(8102));
+        assert!(views[0].active);
+        assert_eq!(views[0].snapshot.as_ref().unwrap().pid, Some(99));
+        // 备用实例：端口不同、不是 active、没有快照（没被启动过）。
+        assert_eq!(views[1].port, Some(18101));
+        assert!(!views[1].active);
+        assert!(views[1].snapshot.is_none());
     }
 }
