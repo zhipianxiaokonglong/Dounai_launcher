@@ -2338,6 +2338,9 @@ mod tests {
 
         let body = b"[project]\nname = \"demo\"\n";
         let sha = format!("sha256:{}", hex::encode(Sha256::digest(body)));
+        // 上游仓库普遍带点开头的开发配置；打包器收它们，安装侧也必须收。
+        let dot = b".venv\n__pycache__/\n";
+        let dot_sha = format!("sha256:{}", hex::encode(Sha256::digest(dot)));
         let manifest = serde_json::json!({
             "schema_version": 2,
             "module_id": "dounai/demo-local",
@@ -2356,7 +2359,7 @@ mod tests {
             "entry": { "command": "{venv_python} -m demo", "env": {}, "health": null },
             "ports": [8101],
             "permissions": { "network": [], "filesystem": [], "devices": [] },
-            "files": { "pyproject.toml": sha },
+            "files": { "pyproject.toml": sha, ".gitignore": dot_sha },
             "signature": null
         });
         let mut out = Vec::new();
@@ -2367,6 +2370,8 @@ mod tests {
             writer.write_all(manifest.to_string().as_bytes()).unwrap();
             writer.start_file("pyproject.toml", options).unwrap();
             writer.write_all(body).unwrap();
+            writer.start_file(".gitignore", options).unwrap();
+            writer.write_all(dot).unwrap();
             writer.finish().unwrap();
         }
         out
@@ -2386,7 +2391,8 @@ mod tests {
         assert_eq!(trust.verdict, "C");
         assert!(trust.needs_confirmation);
         assert!(!trust.signed);
-        assert_eq!(verified.files.len(), 1);
+        assert_eq!(verified.files.len(), 2);
+        assert!(verified.files.iter().any(|f| f.path == ".gitignore"));
 
         let sha = verified.sha256.clone();
         let err = commit_install(&state, &bytes, &sha, None, None, false).unwrap_err();
@@ -2395,7 +2401,7 @@ mod tests {
 
         let response = commit_install(&state, &bytes, &sha, None, None, true).unwrap();
         assert_eq!(response.module_id, "dounai/demo-local");
-        assert_eq!(response.files, 1);
+        assert_eq!(response.files, 2);
         assert!(!response.replaced);
         assert!(state.instance("dounai/demo-local@stable").is_some());
 

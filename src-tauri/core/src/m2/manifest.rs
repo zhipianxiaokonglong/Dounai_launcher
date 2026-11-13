@@ -216,12 +216,32 @@ fn valid_module_id(s: &str) -> bool {
     segment(namespace) && segment(name)
 }
 
+/// 校验包内相对路径：POSIX 分隔、不许跳转、不许绝对路径与保留设备名。
+///
+/// 允许以点开头的名字（`.gitignore`、`.env.example`）。上游仓库普遍带这类
+/// 开发配置，打包器也一直认为它们合法；这里再拦一次，只会让打包方在安装时
+/// 才收到一条看不懂的报错，而安全性并没有增加——真正的护栏在
+/// `security::safe_join`：绝对路径、`..` 跳转与 Windows 保留设备名都在那里。
 pub fn validate_relative_path(path: &str) -> Result<(), M2Error> {
-    if path.is_empty() || !path.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_') {
-        return Err(M2Error::Invalid(format!("非法的包内路径：{path}")));
+    let invalid = |why: &str| M2Error::Invalid(format!("非法的包内路径 {path}：{why}"));
+    if path.is_empty() {
+        return Err(invalid("为空"));
     }
-    crate::security::safe_join(Path::new("package"), path)
-        .map_err(|e| M2Error::Invalid(format!("非法的包内路径 {path}：{e}")))?;
+    if path.contains('\\') {
+        return Err(invalid("必须用 / 分隔"));
+    }
+    if path.chars().any(char::is_control) {
+        return Err(invalid("含控制字符"));
+    }
+    if path.starts_with('/') || path.ends_with('/') {
+        return Err(invalid("不能以斜杠开头或结尾"));
+    }
+    for seg in path.split('/') {
+        if seg.is_empty() || seg == "." || seg == ".." {
+            return Err(invalid("含空路径段或相对跳转"));
+        }
+    }
+    crate::security::safe_join(Path::new("package"), path).map_err(|e| invalid(&e.to_string()))?;
     Ok(())
 }
 
@@ -251,5 +271,42 @@ mod tests {
         let mut value: serde_json::Value = serde_json::from_str(EXAMPLE).unwrap();
         value["entry"]["env"]["omni_port"] = serde_json::json!("1");
         assert!(PackageManifest::parse(&value.to_string()).is_err());
+    }
+
+    #[test]
+    fn manifest_parses_when_files_contain_dot_names() {
+        // 真实故障：上游仓库自带 .gitignore / .dockerignore，打包器照收，
+        // 安装侧却报「非法的包内路径」，包被自己的工具链拒收。
+        let mut value: serde_json::Value = serde_json::from_str(EXAMPLE).unwrap();
+        value["files"] = serde_json::json!({
+            ".dockerignore": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "src/.keep": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        });
+        let parsed = PackageManifest::parse(&value.to_string()).unwrap();
+        assert_eq!(parsed.files.len(), 2);
+    }
+
+    #[test]
+    fn relative_paths_accept_dot_files() {
+        // 上游仓库的常规内容；打包器也按同一套规则放行。
+        for path in [
+            "main.py",
+            "src/app.py",
+            ".gitignore",
+            ".env.example",
+            "src/.keep",
+            "docs/api.md",
+        ] {
+            assert!(validate_relative_path(path).is_ok(), "{path} 应当通过");
+        }
+    }
+
+    #[test]
+    fn relative_paths_reject_traversal_and_devices() {
+        for path in [
+            "", "../evil", "a/../b", "/abs", "a/", "a//b", "a\\b", "C:/x", "CON", "com1.txt",
+        ] {
+            assert!(validate_relative_path(path).is_err(), "{path} 应当被拒");
+        }
     }
 }

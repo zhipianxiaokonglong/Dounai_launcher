@@ -333,36 +333,14 @@ pub fn check_catalog(c: &Value) -> Result<(), ReleaseError> {
 
 // ---- 打包 ----
 
-/// 校验包内相对路径。规则比 schema 更严，生成的包一定合法。
+/// 校验包内相对路径。
+///
+/// 直接复用 core 的安装侧判定：打包与安装只有一份规则，不会打出
+/// 「打包器接受、启动器拒收」的包。历史上两边各写一套，结果 `.gitignore`
+/// 能通过打包却在安装时报「非法的包内路径」。
 pub fn safe_package_path(rel: &str) -> Result<(), ReleaseError> {
-    let bad = |why: &str| ReleaseError::BadPath(format!("{rel}：{why}"));
-    if rel.is_empty() || rel.starts_with('/') || rel.ends_with('/') {
-        return Err(bad("路径为空或以斜杠开头结尾"));
-    }
-    if !rel
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b"._/-".contains(&b))
-    {
-        return Err(bad("含非法字符"));
-    }
-    for seg in rel.split('/') {
-        if seg.is_empty() || seg == "." || seg == ".." {
-            return Err(bad("含空路径段或相对跳转"));
-        }
-        if seg.len() > 1 && seg.as_bytes()[1] == b':' {
-            return Err(bad("含盘符"));
-        }
-        let stem = seg.split('.').next().unwrap_or("").to_ascii_uppercase();
-        let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-            || ((stem.starts_with("COM") || stem.starts_with("LPT"))
-                && stem.len() == 4
-                && stem.as_bytes()[3].is_ascii_digit()
-                && stem.as_bytes()[3] != b'0');
-        if reserved {
-            return Err(bad("Windows 保留设备名"));
-        }
-    }
-    Ok(())
+    launcher_core::m2::manifest::validate_relative_path(rel)
+        .map_err(|e| ReleaseError::BadPath(e.to_string()))
 }
 
 fn hash_reader<R: Read>(mut reader: R) -> io::Result<String> {
