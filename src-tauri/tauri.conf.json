@@ -4,6 +4,9 @@
   "version": "0.3.1",
   "identifier": "com.dounai.launcher",
   "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "devUrl": "http://localhost:5175",
     "frontendDist": "../dist"
   },
   "app": {
@@ -22,7 +25,8 @@
     ],
     "withGlobalTauri": true,
     "security": {
-      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'"
+      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'",
+      "devCsp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ws://localhost:5175"
     }
   },
   "bundle": {
