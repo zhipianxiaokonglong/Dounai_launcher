@@ -1,0 +1,8 @@
+{
+  "algo": "Ed25519",
+  "fingerprint": "sha256:8c1d31cf6f5ce98961be579f88fe49f8521242bcaa07483e85d0bbea1532eff5",
+  "generated_at": "2026-11-13T07:06:26Z",
+  "key_id": "K5",
+  "pubkey": "+56W2k6Sw60cMspmEKUESgqX1TGJLqmVozPJvI0n8G8=",
+  "purpose": "catalog_signing"
+}

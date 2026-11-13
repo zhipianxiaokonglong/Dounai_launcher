@@ -888,7 +888,7 @@ pub fn set_k5_pubkey(pubkey_b64: String, state: State<'_, AppStateV2>) -> Result
     Ok(KeyInfo {
         fingerprint: fp,
         accepted: true,
-        note: "K5 公钥仅本次会话有效，重启回落到编译期占位值。".into(),
+        note: "K5 公钥仅本次会话有效，重启回落到内置公钥。".into(),
     })
 }
 

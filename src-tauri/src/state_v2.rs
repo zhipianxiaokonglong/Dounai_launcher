@@ -26,15 +26,15 @@ pub const BUILTIN_K1_PUBKEY_B64: &str = "8w9nSTqc4mWn1n9z1JITBHDU1RBFjU9iPjD2rSg
 pub const BUILTIN_K1_FINGERPRINT: &str =
     "sha256:7da721cb4346c215b857e50be8bbeeb89374180884eebc8802296b5a898bd909";
 
-/// K5 是 catalog 签名钥，必须与 K1 分离。这里仍是编译期占位值。
-/// catalog 的签名段不含 `pubkey`，启动器只能拿内置公钥验签；占位公钥不是
-/// 曲线上的 Ed25519 公钥，因此远程 catalog 一律验签失败（fail-closed），
-/// 不会伪造「官方已验证」。`register_trusted_key` 可在本次会话内替换，
-/// 重启回落到占位值。真正启用远程分发前必须生成 K5 并替换这两项。
+/// K5 是 catalog 签名钥，必须与 K1 分离，2026-11-13 生成，私钥离线保管在仓库外。
+/// 登记文件见仓库 `keys/K5.json`，生成与轮换规程见 `docs/SIGNING.md`。
+///
+/// catalog 的签名段不含 `pubkey`，启动器只能拿下面这枚内置公钥验签；信任判定
+/// 比对同一枚公钥算出的指纹。`set_k5_pubkey` 可在本次会话内替换公钥，
+/// 重启回落到内置值。
+pub const BUILTIN_K5_PUBKEY_B64: &str = "+56W2k6Sw60cMspmEKUESgqX1TGJLqmVozPJvI0n8G8=";
 pub const BUILTIN_K5_FINGERPRINT: &str =
-    "sha256:1111111111111111111111111111111111111111111111111111111111111111";
-/// 32 个零字节的 base64；不是曲线上的 Ed25519 公钥，验签必然失败。
-pub const BUILTIN_K5_PUBKEY_B64: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    "sha256:8c1d31cf6f5ce98961be579f88fe49f8521242bcaa07483e85d0bbea1532eff5";
 
 /// 允许的出网域名后缀集，与 `m2::source` 的双源白名单一致。
 pub fn allowed_hosts() -> Vec<String> {
@@ -331,16 +331,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builtin_k1_matches_its_pubkey_and_k5_stays_a_placeholder() {
+    fn builtin_keys_match_their_pubkeys_and_stay_separate() {
         assert_eq!(
             launcher_core::m2::fingerprint(BUILTIN_K1_PUBKEY_B64).unwrap(),
             BUILTIN_K1_FINGERPRINT
         );
-        assert!(launcher_core::m2::fingerprint(BUILTIN_K5_PUBKEY_B64).is_ok());
-        assert_ne!(
+        assert_eq!(
             launcher_core::m2::fingerprint(BUILTIN_K5_PUBKEY_B64).unwrap(),
             BUILTIN_K5_FINGERPRINT
         );
+        // 两钥分离是设计约束，不是巧合；同一把钥匙签包又签 catalog 会让
+        // K1 泄露方有能力伪造一份不含 revoked 的索引。
+        assert_ne!(BUILTIN_K1_PUBKEY_B64, BUILTIN_K5_PUBKEY_B64);
+        assert_ne!(BUILTIN_K1_FINGERPRINT, BUILTIN_K5_FINGERPRINT);
     }
 
     #[test]
