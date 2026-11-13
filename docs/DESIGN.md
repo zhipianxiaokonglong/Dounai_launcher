@@ -179,6 +179,8 @@ venv 也按 generation 分目录，路径是 `instances/<instance_key>/venvs/<sh
 
 每次 `prepare_instance` 在同步后追加一次离线 dry-run 复核。哈希变化时报 `SnapshotMismatch`，不静默重建，也不回退联网。`verify_instance` 只读状态、比对哈希与安装根，不启动任何子进程。缓存缺 wheels 时报 `OfflineCacheMiss`。
 
+界面把「装依赖」当独立一步，不只是启动失败后的一句报错。`list_instance_views` 带 `prepared`（对数据面实例调 `verify_instance` 探真实 venv，shell 角色恒真），未就绪时实例行的主按钮是「安装依赖」，`startOne` 也会先补这一步再启动。启动本身不重跑 prepare：装包与装依赖都是长任务，塞进启动会让「点一下就能跑」变成不可预期的等待，失败也分不清是环境问题还是代码问题。`start_all`、`stop_all`、`restart_instance`、`prepare_instance_env`、`switch_active` 一律走阻塞池——这些都是秒级到分钟级的等待，放主线程会把窗口冻住。
+
 警告：断网重跑必须全程带 `--offline`。只把 `UV_OFFLINE` 当可选项，验收会失败。
 
 `optional-dependencies` 必须显式选择。三家上游都有 `dev`，`Dounai_input` 另有 `keyring` 与 `local-asr`。`runtime.extras` 默认 `[]`，不默认安装 dev。

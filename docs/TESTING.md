@@ -349,3 +349,41 @@ SourceForge 上传通道已实测。2026-11-13 用本机 SSH 公钥通过 `tonyj
 门禁：core 155 项、app lib 102 项、`clippy --all-targets -- -D warnings`、契约 109 项通过。
 
 未实测：真机重新导入这三个包并启动模块。规则层已证明可通过，端到端仍要在界面上点一次。
+
+## 启动链路三个连着的毛病（2026-11-13）
+
+真机反馈三件事：单实例点「启动」报「模块 dounai/dounai-input@stable 未安装」；一键启动报「已启动 0 / 3 个实例」，随后窗口卡十几秒；装完包不装依赖也能点启动。
+
+**一、启动按 module_id 找实例，界面传的是 instance_id**
+
+`start_module` / `stop_module` 收参数叫 `module_id`，内部调 `resolve_instance(module_id)`，只按 `module_id` 过滤。M4 重写后界面按实例操作，传的是 `dounai/dounai-input@stable`，于是永远匹配不到，报「未安装」。
+
+修法：`resolve_instance` 先按 `instance_id` 精确匹配，再退回 `module_id`（active 优先）。两个命令面共用一套解析，界面传哪种键都对；找不到时的文案改成「没有找到实例或模块」，不再冒充「未安装」。
+
+**二、生命周期命令跑在主线程**
+
+Tauri 的同步命令在主线程执行。`start_all` 对每个实例先做端口短探（`PRESTART_TIMEOUT_MS`）再 spawn，三个实例串起来就是十几秒不重绘；`prepare_instance_env` 更糟，建 venv、跑 `uv sync` 可能几分钟。上一轮只修了 `probe_environment`，同类问题在启动链路上还在。
+
+修法：`start_module` / `stop_module` / `start_all` / `stop_all` / `restart_instance` / `prepare_instance_env` / `switch_active` 一律改 async，实活进 `tauri::async_runtime::spawn_blocking`，状态从 `AppHandle::state` 取。命令名与参数形状不变，`main.rs` 注册表不用动。
+
+**三、「已启动 0 / 3」是计数错了，不是没启动**
+
+`Supervisor::start` 返回的快照是 `Phase::Starting`，健康检查在后台继续；界面只数 `run === "running"`，正在起的全被算成没起来。改成 `running` 与 `starting` 都算启动成功，并单独说明「其中 N 个正在等健康检查」。
+
+**四、装完包没有装依赖这一步**
+
+`build_start_request` 早就拒绝未准备的环境，但报错写的是「请先执行 prepare_instance_env」，界面又把「启动」摆在最显眼的位置，用户只能撞到这条开发者措辞。
+
+修法：`list_instance_views` 增加 `prepared` 字段（`verify_instance` 探真实 venv，shell 角色恒真）。未就绪时实例行的主按钮就是「安装依赖」，附「依赖未装」徽标；`startOne` 若发现未就绪会先装再启，不让用户先撞一次错。菜单里两个入口：离线安装、允许联网安装。安装完成的提示改成「回模块页先点『安装依赖』」。
+
+## 卡片菜单盖住卡片内容（2026-11-13）
+
+现象：打开卡片底部「⋯」后，出现一块白板压住卡片正文，看着像卡片被挖空。
+
+实测（无头 Chrome 1200×780，用 `getBoundingClientRect` 取值）：卡片 `x=254 w=290`，菜单面板 `x=181 w=168`——**面板左边越出卡片 73px**。原因是 `.menu-body` 用 `right: 0` 按 `⋯` 的右边缘向左展开，而 `.card-foot` 里的 `⋯` 紧跟「详情」排，没有贴右，于是面板整体左移压在正文上；浅色主题下 `rgba(0,0,0,.35)` 的投影几乎看不出来，边界只剩一圈 0.2 透明度的边，视觉上就成了「白板」。
+
+修法：`.card-foot .menu { margin-left: auto }` 让 `⋯` 贴右，面板随之落回卡片内（实测 `x=513 w=168`，卡片右界 695）；浅色主题的投影改成 `rgba(15,23,42,.14)`；菜单项内边距 6→5px，面板高度 205→193px，展开后上边缘与卡片顶对齐不再顶到分组标题；`.cards` 的 `minmax(288px,…)` 提到 320px，实例行允许换行，`dounai/dounai-input@stable` 不再被截成 `…@s…`。
+
+门禁：app lib 103 项、core 155 项、契约 109 项、`tsc`、`npm test` 65 项、`vite build`、`clippy -D warnings` 通过。深浅两套截图核对过菜单、依赖未装状态与实例行排版。
+
+未实测：真机点「安装依赖」跑通 `uv sync`、以及三个实例真起来后的健康检查；无头浏览器造不出子进程与系统对话框。
