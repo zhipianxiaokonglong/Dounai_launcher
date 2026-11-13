@@ -142,12 +142,23 @@ impl Supervisor {
         lock(&self.external).contains(id)
     }
 
-    /// 这个实例的进程是不是由启动器拉起、且仍登记在册。
+    /// 这个实例的进程是不是由启动器拉起、且仍活着。
     ///
-    /// 与 `running()` 的区别：状态机可能已经把它判成 Failed（探测超时），
-    /// 进程却还活着。停止与「别再拉起一个」都要按这个口径判断。
+    /// 与 `running()` 的区别：状态机可能已经把它判成 Failed（探测超时或
+    /// 启动即退出），进程却还活着。停止与「别再拉起一个」都要按这个口径判断。
+    ///
+    /// 死句柄必须在这里摘掉：进程自己退出后没人清进程表，`contains_key`
+    /// 就会一直为真，界面点「启动」被挡成「进程还在运行」，却又不给停止按钮。
     pub fn owns(&self, id: &str) -> bool {
-        lock(&self.processes).contains_key(id)
+        let mut processes = lock(&self.processes);
+        match processes.get(id) {
+            Some(process) if process.is_alive() => true,
+            Some(_) => {
+                processes.remove(id);
+                false
+            }
+            None => false,
+        }
     }
 
     /// 探测超时之后进程其实一直健康：把状态收回到 Running。
@@ -259,7 +270,7 @@ impl Supervisor {
                 .map_err(|e| e.to_string())?;
         }
         self.spawn_watcher(&id, ticket, process.watcher_slot(), log.clone());
-        self.spawn_probe(&id, ticket, &request, log.clone());
+        self.spawn_probe(&id, ticket, &request, process.watcher_slot(), log.clone());
         lock(&self.processes).insert(id.clone(), process);
         lock(&self.roles_by_instance).insert(id.clone(), request.role);
         if let Some(log) = log {
@@ -309,8 +320,10 @@ impl Supervisor {
         let outcome = {
             let processes = lock(&self.processes);
             match processes.get(id) {
-                Some(process) => process.stop_graceful(GRACEFUL_TIMEOUT),
-                None => Ok(()),
+                // 已退出的句柄不必再 taskkill：那只会拿到「找不到进程」，
+                // 把一个早就结束的实例报成停止失败。
+                Some(process) if process.is_alive() => process.stop_graceful(GRACEFUL_TIMEOUT),
+                _ => Ok(()),
             }
         };
         lock(&self.processes).remove(id);
@@ -360,6 +373,18 @@ impl Supervisor {
         for id in &running {
             if !ids.contains(id) {
                 ids.push(id.clone());
+            }
+        }
+        // 探测超时被判 Failed、进程却还活着的实例不在 running() 里：
+        // 一键停止同样要收掉，否则退出时只能靠 Job 兜底。
+        let owned: Vec<String> = lock(&self.processes)
+            .iter()
+            .filter(|(_, process)| process.is_alive())
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in owned {
+            if !ids.contains(&id) {
+                ids.push(id);
             }
         }
         ids.iter().filter_map(|id| self.stop(id).ok()).collect()
@@ -414,7 +439,14 @@ impl Supervisor {
         });
     }
 
-    fn spawn_probe(&self, id: &str, ticket: u64, request: &StartRequest, log: Option<SharedLog>) {
+    fn spawn_probe(
+        &self,
+        id: &str,
+        ticket: u64,
+        request: &StartRequest,
+        slot: Arc<Mutex<Option<Child>>>,
+        log: Option<SharedLog>,
+    ) {
         let state = self.lifecycle.clone();
         let app = self.app.clone();
         let id = id.to_string();
@@ -433,18 +465,35 @@ impl Supervisor {
                 .timeout(single)
                 .build()
                 .ok();
+            // 进程已经退出就别再探到预算耗尽：启动即崩溃时白跑几十秒，
+            // 还会在日志里留下一条误导性的「探测超时」。
+            let alive = || lock_child(&slot).is_some();
 
             // 先只等 health：没起来就探契约，每次都要白等一个请求超时。
             let health = match (&client, &health_url) {
-                (Some(client), Some(url)) => probe_health(client, url, deadline),
+                (Some(client), Some(url)) => probe_health(client, url, deadline, &alive),
                 _ => ProbeState::Healthy,
             };
             let contract = match (&client, &contract_url) {
                 (Some(client), Some(url)) if health == ProbeState::Healthy => {
-                    probe_contract(client, url, role, deadline)
+                    probe_contract(client, url, role, deadline, &alive)
                 }
                 _ => health,
             };
+
+            if !alive() {
+                if let Some(log) = &log {
+                    diag_log::write(
+                        log,
+                        "probe",
+                        &format!(
+                            "skipped: process already exited after={}ms",
+                            started.elapsed().as_millis()
+                        ),
+                    );
+                }
+                return;
+            }
 
             if let Some(log) = &log {
                 diag_log::write(
@@ -496,7 +545,12 @@ fn spawn_pump(log: SharedLog, scope: &'static str, reader: impl Read + Send + 's
     });
 }
 
-fn probe_health(client: &reqwest::blocking::Client, url: &str, deadline: Instant) -> ProbeState {
+fn probe_health(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    deadline: Instant,
+    alive: &dyn Fn() -> bool,
+) -> ProbeState {
     let started = Instant::now();
     loop {
         if let Ok(response) = client.get(url).send() {
@@ -504,7 +558,7 @@ fn probe_health(client: &reqwest::blocking::Client, url: &str, deadline: Instant
                 return ProbeState::Healthy;
             }
         }
-        if Instant::now() >= deadline {
+        if !alive() || Instant::now() >= deadline {
             return ProbeState::Unhealthy;
         }
         std::thread::sleep(probe_gap(started.elapsed()));
@@ -528,6 +582,7 @@ fn probe_contract(
     url: &str,
     role: Role,
     deadline: Instant,
+    alive: &dyn Fn() -> bool,
 ) -> ProbeState {
     let started = Instant::now();
     loop {
@@ -541,7 +596,7 @@ fn probe_contract(
                 }
             }
         }
-        if Instant::now() >= deadline {
+        if !alive() || Instant::now() >= deadline {
             return ProbeState::Unhealthy;
         }
         std::thread::sleep(probe_gap(started.elapsed()));

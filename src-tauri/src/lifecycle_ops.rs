@@ -122,6 +122,7 @@ pub fn build_start_request(
         env.insert(key.clone(), expand_placeholders(raw, &pairs));
     }
     env.insert("DOUNAI_PORT".into(), port_text.clone());
+    prepend_python_path(&mut env, &module_dir);
 
     let working_dir = prepared
         .as_ref()
@@ -184,8 +185,28 @@ pub fn build_start_request(
     })
 }
 
-fn confirm_error(error: M2Error) -> String {
-    format!("目录实例启动被拒：{error}")
+/// `src` 布局的包要自己补 import 路径。
+///
+/// 引擎的 `uv sync` 带 `--no-install-project`：包自身不会装进 venv，
+/// 而 `python -m <pkg>` 只看得到工作目录。包根下是 `src/<pkg>` 时，
+/// 子进程会直接 `No module named <pkg>` 退出（退出码 1，几秒内消失）。
+/// 只补 `src`，不动包根：flat 布局本来就能从 cwd 找到包，把包根塞进
+/// `PYTHONPATH` 反而可能遮蔽标准库同名模块。
+fn prepend_python_path(env: &mut BTreeMap<String, String>, module_dir: &std::path::Path) {
+    let src = module_dir.join("src");
+    if !src.is_dir() {
+        return;
+    }
+    let src = src.to_string_lossy().into_owned();
+    // manifest 已经设了 PYTHONPATH 的话保留它，把自己的放前面。
+    let merged = match env.get("PYTHONPATH").map(|value| value.trim()) {
+        Some(existing) if !existing.is_empty() => format!("{src};{existing}"),
+        _ => src,
+    };
+    env.insert("PYTHONPATH".into(), merged);
+}
+
+fn confirm_error(error: M2Error) -> String {    format!("目录实例启动被拒：{error}")
 }
 
 /// 只按空白切分，拒绝 shell 元字符；命令一律来自已验签 manifest。
@@ -206,6 +227,14 @@ pub fn split_command(command: &str) -> Result<(String, Vec<String>), String> {
         .ok_or_else(|| "manifest 没有启动程序".to_string())?
         .to_string();
     Ok((program, parts.map(str::to_string).collect()))
+}
+
+/// 已登记的全部实例（含停用的）。
+///
+/// 端口分配与实例视图都按这个全集算：备用端口是顺序分配的，只拿当前
+/// 一个实例去算，每个非 active 实例都会分到同一个端点号。
+pub fn all_instances(state: &AppStateV2) -> Vec<Instance> {
+    state.with_installed(|s| s.instances.values().cloned().collect())
 }
 
 /// active 实例用规范端口；其余按字典序分配备用端口段。
@@ -292,6 +321,8 @@ pub fn package_dir(paths: &Paths, instance_id: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+
     use launcher_core::paths::InstallMode;
 
     fn state() -> (tempfile::TempDir, AppStateV2) {
@@ -308,6 +339,102 @@ mod tests {
         );
         assert!(split_command("python -m demo | cmd").is_err());
         assert!(split_command("   ").is_err());
+    }
+
+    /// 三个非 active 实例各占一个备用端口。
+    ///
+    /// 回归点：端口必须按整张实例表分配。只传当前实例时每个都会拿到
+    /// `18101`，后启动的两个撞端口退出（真机日志里 exit code=3）。
+    #[test]
+    fn standby_ports_are_unique_across_instances() {
+        let (_dir, state) = state();
+        let roles = launcher_core::lifecycle::embedded_roles().unwrap();
+        let instances: Vec<Instance> = [
+            ("dounai/dounai-input@stable", Role::Input),
+            ("dounai/omninexus@stable", Role::Llm),
+            ("dounai/moodvoice@stable", Role::Output),
+        ]
+        .into_iter()
+        .map(|(id, role)| demo_instance(id, role))
+        .collect();
+        state
+            .mutate_installed(|s| {
+                for instance in &instances {
+                    s.instances
+                        .insert(instance.instance_id.clone(), instance.clone());
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        let all = all_instances(&state);
+        assert_eq!(all.len(), 3, "端口分配必须覆盖全部已登记实例");
+
+        let ports = assign_ports(&state, &roles, &all);
+        let picked: Vec<u16> = instances
+            .iter()
+            .map(|instance| {
+                ports
+                    .get(&instance.instance_id)
+                    .copied()
+                    .flatten()
+                    .expect("每个需要运行时的实例都要分到端口")
+            })
+            .collect();
+        let unique: BTreeSet<u16> = picked.iter().copied().collect();
+        assert_eq!(unique.len(), 3, "多个实例拿到了同一个端口：{picked:?}");
+    }
+
+    /// src 布局的包：`src` 要进 PYTHONPATH，否则 `python -m <pkg>` 找不到包。
+    #[test]
+    fn src_layout_is_added_to_pythonpath() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src/demo")).unwrap();
+
+        let mut env = BTreeMap::new();
+        prepend_python_path(&mut env, dir.path());
+        let value = env.get("PYTHONPATH").expect("src 布局必须补 PYTHONPATH");
+        assert!(value.starts_with(&dir.path().join("src").to_string_lossy().into_owned()));
+
+        // manifest 自己设了就拼在前面，不覆盖。
+        let mut env = BTreeMap::new();
+        env.insert("PYTHONPATH".into(), "D:/keep".into());
+        prepend_python_path(&mut env, dir.path());
+        let value = env.get("PYTHONPATH").unwrap();
+        assert!(value.ends_with(";D:/keep"), "原有值要保留：{value}");
+
+        // flat 布局不动：包根进 PYTHONPATH 可能遮蔽标准库同名模块。
+        let flat = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(flat.path().join("demo")).unwrap();
+        let mut env = BTreeMap::new();
+        prepend_python_path(&mut env, flat.path());
+        assert!(!env.contains_key("PYTHONPATH"));
+    }
+
+    fn demo_instance(id: &str, role: Role) -> Instance {        Instance {
+            instance_id: id.into(),
+            module_id: "dounai/demo".into(),
+            variant: "stable".into(),
+            version: "1.0.0".into(),
+            role,
+            category: launcher_core::m2::Category::Optional,
+            publisher_fp: None,
+            verdict: launcher_core::m2::Verdict::A,
+            confirmed_at: "2026-01-01T00:00:00Z".into(),
+            installed_at: "2026-01-01T00:00:00Z".into(),
+            source_kind: launcher_core::m2::InstanceSourceKind::Zip,
+            source_path: None,
+            git: None,
+            pinned: false,
+            auto_update: true,
+            zip_sha256: None,
+            expected_signer_fp: None,
+            signature_present: None,
+            allow_unsigned_once: None,
+            head_confirmed: None,
+            data_dir: None,
+            note: None,
+        }
     }
 
     #[test]

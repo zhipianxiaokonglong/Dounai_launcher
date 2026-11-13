@@ -150,6 +150,19 @@ impl WinProcess {
         self.child.clone()
     }
 
+    /// 进程是否还在跑。
+    ///
+    /// 槽为空就说明 watcher 已经看到退出；槽还在时用 `try_wait` 兜住
+    /// 「刚退出、watcher 还没轮到」这段窗口。这里不清槽：退出原因由
+    /// watcher 统一记录，重复 reap 不会丢掉状态码。
+    pub fn is_alive(&self) -> bool {
+        let mut guard = self.child.lock().unwrap_or_else(|e| e.into_inner());
+        match guard.as_mut() {
+            Some(child) => matches!(child.try_wait(), Ok(None)),
+            None => false,
+        }
+    }
+
     /// 先请求优雅退出，超时后由 Job 一次性终止整棵进程树。
     pub fn stop_graceful(&self, timeout: Duration) -> Result<(), WinError> {
         let pid = self.pid.to_string();

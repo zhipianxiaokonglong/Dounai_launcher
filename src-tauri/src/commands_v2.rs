@@ -30,7 +30,7 @@ use launcher_core::m2::{Category, InstanceSourceKind, Verdict, MAX_UNPACKED_BYTE
 use launcher_core::manifest::{ModuleManifestV2, Role};
 
 use crate::lifecycle_ops::{
-    assign_ports, build_start_request, ordered_instances, package_dir, write_manifest,
+    all_instances, assign_ports, build_start_request, ordered_instances, package_dir, write_manifest,
     MANIFEST_FILE,
 };
 use crate::lifecycle_runtime::Supervisor;
@@ -336,12 +336,16 @@ enum StartOutcome {
 }
 
 /// 单实例启动时的端口；与 start_all 的整体分配保持同一套规则。
+///
+/// 必须传整张实例表：备用端口是按顺序分配的，只传当前这一个实例时，
+/// 每个非 active 实例都会拿到 `18101`，后启动的直接撞端口退出（退出码 3）。
 fn single_instance_port(
     state: &AppStateV2,
     supervisor: &Supervisor,
     instance: &Instance,
 ) -> Option<u16> {
-    assign_ports(state, supervisor.roles(), std::slice::from_ref(instance))
+    let all = all_instances(state);
+    assign_ports(state, supervisor.roles(), &all)
         .get(&instance.instance_id)
         .copied()
         .flatten()
@@ -430,18 +434,18 @@ pub async fn start_all(app: tauri::AppHandle) -> Vec<RunView> {
 }
 
 fn start_all_impl(state: &AppStateV2, supervisor: &Supervisor) -> Vec<RunView> {
-    let instances: Vec<Instance> = state.with_installed(|s| {
-        s.instances
-            .values()
-            .filter(|i| !state.is_disabled(&i.module_id))
-            .cloned()
-            .collect()
-    });
+    // 端口按全集分配，再挑出要启动的那些：只按启动集合算，同一实例
+    // 在列表里显示 18102、这里却可能分到 18101。
+    let all = all_instances(state);
+    let ports = assign_ports(state, supervisor.roles(), &all);
+    let instances: Vec<Instance> = all
+        .into_iter()
+        .filter(|i| !state.is_disabled(&i.module_id))
+        .collect();
     let ordered = match ordered_instances(supervisor.roles(), instances) {
         Ok(list) => list,
         Err(error) => return vec![run_view("start_all", None, Some(error))],
     };
-    let ports = assign_ports(state, supervisor.roles(), &ordered);
     let mut out = Vec::with_capacity(ordered.len());
     for instance in &ordered {
         // 整批分配端口仍在这里做，start_instance 只负责单个实例的启动前探测。
