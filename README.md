@@ -4,13 +4,13 @@ Dounai 启动器管理模块的安装、环境与进程生命周期。产品主�
 
 ## 当前状态
 
-本仓库处于 v2 重构期。`refactor/launcher-v2` 分支已冻结 M0 契约。M1 到 M3 的代码已提交到该分支，含环境引擎、双源包信任与生命周期命令面。v1 的进程管理、状态库与命令面已删除，Tauri 命令面由 `src-tauri/src/commands_v2.rs` 提供。界面重做在 M4。
+本仓库处于 v2 重构期。`refactor/launcher-v2` 分支已冻结 M0 契约。M1 到 M3 的代码已提交到该分支，含环境引擎、双源包信任与生命周期命令面。v1 的进程管理、状态库与命令面已删除，Tauri 命令面由 `src-tauri/src/commands_v2.rs` 提供。界面已在 M4 重写为六个视图与深浅双主题，首次向导与内嵌子 WebView 尚未开始。
 
 - 仅支持 Windows 10 与 Windows 11。
 - 不读取 v1 包格式，不设兼容层。v1 包格式从未打包分发。
-- `src-tauri/src/` 是 v2 命令面与进程托管，`src-tauri/core/` 是不依赖 Tauri 的独立 crate；`src/` 前端仍是 v1 界面，M4 重做。
+- `src-tauri/src/` 是 v2 命令面与进程托管，`src-tauri/core/` 是不依赖 Tauri 的独立 crate；`src/` 是 M4 重写的界面：`index.html` 只有骨架，视图与共享层在 `src/ui/`。
 - 本版本还不能在线安装模块。K1 与 K5 已于 2026-11-13 生成并内置，模块包托管在 [SourceForge 的 dounai-releases 项目](https://sourceforge.net/projects/dounai-releases/)；官方 catalog 尚未签发，远程分发未启用。
-- catalog 签名公钥 K5 已内置真实值，验签路径可用。没有已签发的 catalog 时仍按不可用处理，不降级放行。命令面已提供 `set_k5_pubkey`，界面入口在 M4。
+- catalog 签名公钥 K5 已内置真实值，验签路径可用。没有已签发的 catalog 时仍按不可用处理，不降级放行。命令面已提供 `set_k5_pubkey`，界面入口在设置页的「下载与网络」分组。
 - 日志按实例写入数据根的 `instances/<key>/logs/`：启动器事件默认记录，单文件超过 2 MiB 轮转、保留 3 份。子进程 stdout 与 stderr 默认丢弃，显式设置 `DOUNAI_LOG_CHILD_OUTPUT=1` 才接管管道。
 
 注意：安装程序启动时会索要管理员权限。安装模式定为 `both`，这一行为已接受并写进 M5 验收项。`both` 只是安装器的运行时选项；落盘到 `state/install.json` 时写成 `current_user` 或 `per_machine`，便携 exe 写 `portable`，`install-v1` 契约不收 `both`。

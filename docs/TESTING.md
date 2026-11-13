@@ -267,3 +267,19 @@ SourceForge 上传通道已实测。2026-11-13 用本机 SSH 公钥通过 `tonyj
 未实测：真机安装、从 SourceForge 拉取 catalog 与包、上传后的回读校验、私钥与上传凭据的保管过程。后两项属人工操作，离线断言不覆盖。按 [ROADMAP.md](ROADMAP.md) 开头的规则，这些结果不计真机验收通过。
 
 说明：`algo` 的契约值已改为 `Ed25519`。签名输入是 `canonical_payload` 的字节，Ed25519 内部用 SHA-512。SHA-256 只用于逐文件哈希与公钥指纹。旧字面量 `SHA-256 + Ed25519` 由 `validate.mjs` 的负例断言拒收，断言总数从 107 增至 109。口径见 [SIGNING.md](SIGNING.md)。
+
+## M4 界面重写离线验收（2026-11-13）
+
+结论：界面骨架、六个视图与深浅双主题落地，前端门禁全绿。首次向导、内嵌子 WebView 与真机 WebView 冒烟未做。
+
+结构：`index.html` 只剩骨架（左侧栏 232px、页头 60px、正文、状态栏 30px、模态挂点）。`src/ui/main.ts` 做内存路由与全局刷新，`store.ts` 管数据与派生查询，`dom.ts` 管转义与模态，`theme.ts` 管主题，`icons.ts` 提供内联 SVG。六个视图在 `src/ui/views/`。
+
+新增两个后端只读命令：`list_instance_views`（实例 + 端口 + active + 快照合并成一屏所需的最小集合）与 `settings_snapshot`（信任表、保留策略、K1 与 K5 指纹）。两者都在 `main.rs` 注册，`commands_v2` 有单测覆盖合并且端口分配的边界。
+
+文案：所有界面字符串按 STC `for-web-dev` 的 W1–W10 检查一遍。改动三处——`它们` 改写成「模块」、`去导入` 统一成「登记本地目录」、三条报错补上「接下来能做什么」。
+
+视觉核对：用无头 Chrome 加载构建产物，逐页截图检查模块、套装、环境、日志、设置、导入本地六页，深浅两套各一轮；另按 860×600 复核窄窗口。修掉三处：几何字符在缺字体环境下渲染成方块（改内联 SVG）、窄窗口安装清单把「必需」拆成两行（行内说明改为省略不换行）、设置页默认停在「信任与公钥」而首项是「外观」。
+
+门禁：`npm run typecheck` 通过，`npm test` 65 项全过，`vite build` 通过（产物 68 KB JS / 18 KB CSS），`cargo test --offline --workspace --all-targets` 全绿（app lib 97 项），契约 109 项断言未受影响。
+
+未实测：真机窗口内六个视图的实际渲染、子 WebView 相关七条断言、首次向导、第三方模块在真机上的「非沙箱」展示、主题跟随系统在 WebView2 下的行为。截图来自无头 Chrome，不等于 WebView2 渲染结果。按 [ROADMAP.md](ROADMAP.md) 开头的规则，这些不计验收通过。
