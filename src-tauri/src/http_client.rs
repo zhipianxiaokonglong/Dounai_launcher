@@ -1,4 +1,4 @@
-//! 基于 `reqwest` 的真实 HTTP 实现，对接 `download` 与 `catalog` 的 trait。
+//! 基于 `reqwest` 的真实 HTTP 实现，对接 `download` 的 trait。
 //!
 //! 设计要点：
 //! - **不跟随重定向**：跟随重定向可能把请求带到白名单外的域名，
@@ -8,7 +8,6 @@
 
 use std::time::Duration;
 
-use crate::catalog::CatalogFetcher;
 use crate::download::{FetchResponse, HttpFetcher};
 
 /// 真实 HTTP 客户端。
@@ -55,22 +54,6 @@ impl HttpFetcher for ReqwestClient {
             .map_err(|e| format!("读取响应体失败：{e}"))?
             .to_vec();
         Ok(FetchResponse { status, body })
-    }
-}
-
-impl CatalogFetcher for ReqwestClient {
-    fn get(&self, url: &str) -> Result<Vec<u8>, String> {
-        // 清单同样不跟随重定向
-        let resp = self
-            .client
-            .get(url)
-            .send()
-            .map_err(|e| format!("请求失败：{e}"))?;
-        let status = resp.status().as_u16();
-        if !(200..300).contains(&status) {
-            return Err(format!("清单请求返回状态 {status}"));
-        }
-        Ok(resp.bytes().map_err(|e| format!("读取失败：{e}"))?.to_vec())
     }
 }
 

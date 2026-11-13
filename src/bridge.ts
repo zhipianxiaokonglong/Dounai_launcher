@@ -163,10 +163,6 @@ export async function stopAll(): Promise<RunView[]> {
 /* 模块状态                                                            */
 /* ------------------------------------------------------------------ */
 
-export async function listModuleStates(): Promise<ModuleView[]> {
-  return call<ModuleView[]>("list_module_states");
-}
-
 export async function setModuleEnabled(
   moduleId: string,
   enabled: boolean,
@@ -320,35 +316,8 @@ export async function installLocalPackage(
 }
 
 /* ------------------------------------------------------------------ */
-/* 安装                                                                */
+/* 在线安装：catalog 选源 → 下载到本地 → 走同一条本地包安装链路          */
 /* ------------------------------------------------------------------ */
-
-/**
- * 安装一个模块。
- *
- * 调用方必须先完成下载并拿到**确定的 SHA-256**；
- * 桥接层不接受"没有哈希"的请求，Rust 侧也会拒绝空哈希。
- * `manifest` 用于签名校验——发布构建下未签名会被拒绝。
- */
-export async function installModule(req: {
-  moduleId: string;
-  category: string;
-  version: string;
-  zipBase64: string;
-  expectedSha256: string;
-  manifest: Record<string, unknown>;
-}): Promise<InstallResponse> {
-  return call<InstallResponse>("install_module", {
-    request: {
-      module_id: req.moduleId,
-      category: req.category,
-      version: req.version,
-      zip_base64: req.zipBase64,
-      expected_sha256: req.expectedSha256,
-      manifest: req.manifest,
-    },
-  });
-}
 
 /** 下载模块包（重试 / 断点续传 / 镜像加速 / 哈希校验）。 */
 export async function downloadPackage(req: {
@@ -423,29 +392,6 @@ export async function probeEnvironmentCmd(): Promise<RustEnvReport> {
 export async function refreshCatalog(catalogUrl: string): Promise<CatalogResponse> {
   return call<CatalogResponse>("refresh_catalog", { catalogUrl });
 }
-
-export async function hashFile(path: string): Promise<string> {
-  return call<string>("hash_file", { path });
-}
-
-
-/* ------------------------------------------------------------------ */
-
-export type ProviderAction =
-  | "list"
-  | "builtin"
-  | "models"
-  | "defaults"
-  | "create"
-  | "update"
-  | "delete"
-  | "set_enabled"
-  | "test"
-  | "test_saved"
-  | "discover"
-  | "discover_saved"
-  | "set_defaults";
-
 
 /* ------------------------------------------------------------------ */
 /* 模块根 manifest（界面展示的权威来源）                                */
@@ -614,10 +560,6 @@ export interface InstanceLogs {
 
 export async function readInstanceLogs(instanceId: string): Promise<InstanceLogs> {
   return call<InstanceLogs>("read_instance_logs", { instanceId });
-}
-
-export async function getLifecycleSnapshot(): Promise<InstanceSnapshot[]> {
-  return call<InstanceSnapshot[]>("get_lifecycle_snapshot");
 }
 
 /* ------------------------------------------------------------------ */

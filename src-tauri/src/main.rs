@@ -49,17 +49,14 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             // v1 命令名与返回形状原样保留，内部改走 v2；前端 bridge.ts 不用改。
-            dounai_launcher::commands_v2::list_module_states,
             dounai_launcher::commands_v2::set_module_enabled,
             dounai_launcher::commands_v2::uninstall_module,
-            dounai_launcher::commands_v2::install_module,
             dounai_launcher::commands_v2::inspect_local_package,
             dounai_launcher::commands_v2::install_local_package,
             dounai_launcher::commands_v2::download_package,
             dounai_launcher::commands_v2::refresh_catalog,
             dounai_launcher::commands_v2::trust_info,
             dounai_launcher::commands_v2::settings_snapshot,
-            dounai_launcher::commands_v2::hash_file,
             dounai_launcher::commands_v2::purge_local_data,
             dounai_launcher::commands_v2::read_module_manifests,
             dounai_launcher::commands_v2::open_admin_window,
@@ -75,12 +72,10 @@ fn main() {
             dounai_launcher::commands_v2::enable_dev_mode,
             dounai_launcher::env_probe::probe_environment,
             // v2 新增命令。
-            dounai_launcher::commands_v2::list_instances,
             dounai_launcher::commands_v2::list_instance_views,
             dounai_launcher::commands_v2::restart_instance,
             dounai_launcher::commands_v2::switch_active,
             dounai_launcher::commands_v2::confirm_local_source,
-            dounai_launcher::commands_v2::get_lifecycle_snapshot,
             dounai_launcher::commands_v2::read_instance_logs,
             dounai_launcher::commands_v2::prepare_instance_env,
             dounai_launcher::commands_v2::set_keep_versions,

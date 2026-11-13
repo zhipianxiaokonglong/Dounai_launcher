@@ -125,10 +125,6 @@ impl AppStateV2 {
         self.paths.state_dir().join("retention.json")
     }
 
-    pub fn catalog_cache_path(&self) -> PathBuf {
-        self.paths.state_dir().join("catalog-cache.json")
-    }
-
     pub fn with_installed<R>(&self, f: impl FnOnce(&InstalledState) -> R) -> R {
         f(&lock(&self.installed))
     }

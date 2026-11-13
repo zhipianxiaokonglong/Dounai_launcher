@@ -10,10 +10,9 @@
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import {
   isDesktop,
-  listModuleStates,
+  listInstanceViews,
   setModuleEnabled,
   uninstallModule,
-  installModule,
   refreshCatalog,
   downloadPackage,
   trustInfo,
@@ -67,12 +66,12 @@ describe("浏览器模式下的行为", () => {
   beforeEach(clearTauri);
 
   it("调用命令抛出 BridgeUnavailableError", async () => {
-    await expect(listModuleStates()).rejects.toBeInstanceOf(BridgeUnavailableError);
+    await expect(listInstanceViews()).rejects.toBeInstanceOf(BridgeUnavailableError);
   });
 
   it("错误信息明确说明需要桌面端", async () => {
     try {
-      await listModuleStates();
+      await listInstanceViews();
       expect.fail("应抛出错误");
     } catch (e) {
       expect((e as Error).message).toContain("桌面端");
@@ -83,11 +82,11 @@ describe("浏览器模式下的行为", () => {
 describe("命令调用参数格式", () => {
   afterEach(clearTauri);
 
-  it("list_module_states 不带参数", async () => {
+  it("list_instance_views 不带参数", async () => {
     const calls: Call[] = [];
     installTauri("core", calls, []);
-    await listModuleStates();
-    expect(calls[0]?.cmd).toBe("list_module_states");
+    await listInstanceViews();
+    expect(calls[0]?.cmd).toBe("list_instance_views");
     expect(calls[0]?.args).toBeUndefined();
   });
 
@@ -109,24 +108,6 @@ describe("命令调用参数格式", () => {
     expect(calls[0]?.args).toEqual({
       request: { module_id: "mod-b", category: "optional", remove_files: true },
     });
-  });
-
-  it("install_module 传 zip_base64、必填哈希与 manifest", async () => {
-    const calls: Call[] = [];
-    installTauri("core", calls, { module_id: "m", files: 1, bytes: 2, replaced: false, install_dir: "/x" });
-    await installModule({
-      moduleId: "m",
-      category: "optional",
-      version: "1.0.0",
-      zipBase64: "AAA=",
-      expectedSha256: "abc",
-      manifest: { module_id: "m" },
-    });
-    const req = (calls[0]?.args as { request: Record<string, unknown> }).request;
-    expect(req.module_id).toBe("m");
-    expect(req.zip_base64).toBe("AAA=");
-    expect(req.expected_sha256).toBe("abc");
-    expect(req.manifest).toEqual({ module_id: "m" });
   });
 
   it("download_package 带默认重试次数", async () => {
@@ -208,7 +189,7 @@ describe("旧式 invoke 也能正常工作（兼容性）", () => {
   it("legacy 形式下命令调用成功", async () => {
     const calls: Call[] = [];
     installTauri("legacy", calls, []);
-    await listModuleStates();
+    await listInstanceViews();
     expect(calls).toHaveLength(1);
   });
 });

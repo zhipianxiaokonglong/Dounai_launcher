@@ -1,18 +1,25 @@
-//! 模糊测试：解压与 manifest 解析。
+//! 模糊测试：验包、安装落盘、清单与 catalog 解析。
 //!
-//! 目的不是"找到所有 bug"，而是**证明两个安全不变量在大量畸形输入下仍然成立**：
-//!  1. 任何字节序列都不会让解压越界写出目标目录；
-//!  2. 任何字节序列都不会让解析器 panic（只会返回错误）。
+//! 目的不是"找到所有 bug"，而是**证明安全不变量在大量畸形输入下仍然成立**：
+//!  1. 任何字节序列都不会让路径解析越界；
+//!  2. 任何字节序列都不会让验包与解析器 panic（只会返回错误）；
+//!  3. 含恶意条目名的 zip 被**整体拒绝**，不会部分落盘。
+//!
+//! 被测对象是 v2 的真实安装路径：`core::m2::package::{verify_zip, install_package}`。
+//! v1 的 `install.rs` 已删除，这里的不变量直接压在活代码上。
 //!
 //! 采用**确定性伪随机 + 结构化变异**而非外部 fuzz 引擎：
 //! - 无需 nightly 与额外工具链，CI 可直接跑；
 //! - 种子固定，失败可复现（记录种子即可重放）；
 //! - 覆盖真实攻击面（zip 头、路径字段、JSON 结构）而非纯随机噪声。
 
-use dounai_launcher::install::{extract_zip_into, InstallTransaction};
-use dounai_launcher::security::safe_join;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+
+use launcher_core::m2::catalog::CatalogDocument;
+use launcher_core::m2::manifest::PackageManifest;
+use launcher_core::m2::package::{install_package, verify_zip, ZipExpectation};
+use launcher_core::security::{safe_join, sha256_hex};
 
 /// 确定性伪随机（xorshift64*），保证同一 seed 产生同一序列。
 struct Rng(u64);
@@ -143,7 +150,7 @@ fn fuzz_safe_join_never_escapes_destination() {
 /// 纵深防御的价值是"双保险"，但不能因为第二道还在就默许第一道失效。
 #[test]
 fn fuzz_attack_strings_are_explicitly_rejected_by_design() {
-    use dounai_launcher::security::PathError;
+    use launcher_core::security::PathError;
 
     let dest = Path::new("C:\\app\\modules\\mod");
 
@@ -201,16 +208,15 @@ fn normalize_for_check(p: &Path) -> PathBuf {
 }
 
 /* ------------------------------------------------------------------ */
-/* 不变量 2：任意字节都不能让解压越界或 panic                          */
+/* 不变量 2：任意字节都不能让验包越界或 panic                          */
 /* ------------------------------------------------------------------ */
 
 #[test]
-fn fuzz_extract_arbitrary_bytes_never_escapes_or_panics() {
+fn fuzz_verify_zip_arbitrary_bytes_never_escapes_or_panics() {
     let mut rng = Rng::new(0xDEADBEEF);
 
     for iteration in 0..300 {
         let root = tmp_root(&format!("bytes{iteration}"));
-        let dest = root.join("mod");
 
         // 随机长度的随机字节
         let len = 1 + rng.below(512);
@@ -221,19 +227,14 @@ fn fuzz_extract_arbitrary_bytes_never_escapes_or_panics() {
 
         // 允许失败，但绝不 panic
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let tx = InstallTransaction::begin(&dest).expect("begin 不应失败");
-            let r = extract_zip_into(&tx, &data, None);
-            // tx 在作用域结束时自动回滚（未 commit）
-            r.is_ok()
+            verify_zip(&data, &ZipExpectation::default()).is_ok()
         }));
 
         assert!(result.is_ok(), "第 {iteration} 次：随机字节导致 panic");
 
-        // 关键不变量：未 commit 时不得产生最终目录
-        assert!(
-            !dest.exists() || dest.is_dir(),
-            "第 {iteration} 次：产生了异常的目标路径"
-        );
+        // 验包阶段不落盘：工作目录必须还是空的
+        let leftovers = std::fs::read_dir(&root).map(|d| d.count()).unwrap_or(0);
+        assert_eq!(leftovers, 0, "第 {iteration} 次：验包阶段写入了文件");
 
         // 数据根内不应出现 ../ 逃逸产物
         let escaped = root.parent().unwrap().join("escape.txt");
@@ -269,26 +270,64 @@ fn zip_with_entries(entries: &[(&str, &[u8])]) -> Vec<u8> {
 fn fuzz_malicious_entry_names_are_rejected_as_a_whole() {
     for (i, evil) in EVIL_PATHS.iter().enumerate() {
         let root = tmp_root(&format!("evil{i}"));
-        let dest = root.join("mod");
 
         // 混合包：一个合法条目 + 一个恶意条目
         let zip = zip_with_entries(&[("good.txt", b"ok"), (evil, b"evil")]);
 
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let tx = InstallTransaction::begin(&dest).unwrap();
-            extract_zip_into(&tx, &zip, None).is_err()
+            verify_zip(&zip, &ZipExpectation::default())
         }));
-        assert!(outcome.is_ok(), "{evil:?} 导致 panic");
+        let verified = outcome.expect("恶意条目导致 panic");
+        assert!(verified.is_err(), "{evil:?} 应被整体拒绝");
 
-        // 不管 zip 是否能构造出恶意条目，最终目录都不应存在（未 commit）
-        assert!(!dest.exists(), "{evil:?} 不应产生安装结果");
-
-        // 检查数据根外没有被写出
+        // 被拒绝时既不落盘，也不产生越界产物
+        let leftovers = std::fs::read_dir(&root).map(|d| d.count()).unwrap_or(0);
+        assert_eq!(leftovers, 0, "{evil:?} 不应产生安装结果");
         let outside = root.parent().unwrap().join("escape.txt");
         assert!(!outside.exists(), "{evil:?} 越界写出了文件");
 
         std::fs::remove_dir_all(&root).ok();
     }
+}
+
+/// 构造一个字段完整、files 哈希正确的 shell 包。
+fn valid_package(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut files = serde_json::Map::new();
+    for (path, bytes) in entries {
+        files.insert(
+            (*path).to_string(),
+            serde_json::Value::String(format!("sha256:{}", sha256_hex(bytes))),
+        );
+    }
+    let manifest = serde_json::json!({
+        "schema_version": 2,
+        "module_id": "dounai/fuzz",
+        "name": "fuzz",
+        "version": "1.0.0",
+        "variant": "stable",
+        "role": "shell",
+        "category": "optional",
+        "publisher": { "id": "dounai", "name": "Dounai" },
+        "requires": { "launcher": ">=0.3.0" },
+        "entry": { "command": "{install_root}/fuzz.exe", "env": {}, "health": null },
+        "ports": [],
+        "permissions": { "network": [], "filesystem": [], "devices": [] },
+        "files": files,
+    });
+
+    let mut buf = Vec::new();
+    {
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+        let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default();
+        w.start_file("manifest.json", opts).unwrap();
+        w.write_all(manifest.to_string().as_bytes()).unwrap();
+        for (path, data) in entries {
+            w.start_file(*path, opts).unwrap();
+            w.write_all(data).unwrap();
+        }
+        let _ = w.finish();
+    }
+    buf
 }
 
 #[test]
@@ -297,25 +336,34 @@ fn fuzz_good_entries_still_accepted() {
     for (i, good) in GOOD_PATHS.iter().enumerate() {
         let root = tmp_root(&format!("good{i}"));
         let dest = root.join("mod");
-        let zip = zip_with_entries(&[(good, b"data")]);
+        let zip = valid_package(&[(good, b"data")]);
 
-        let tx = InstallTransaction::begin(&dest).unwrap();
-        let result = extract_zip_into(&tx, &zip, None);
-        assert!(result.is_ok(), "正常条目 {good:?} 被误拒：{result:?}");
-        drop(tx); // 不 commit，自动清理
+        let pkg = verify_zip(&zip, &ZipExpectation::default())
+            .unwrap_or_else(|e| panic!("正常条目 {good:?} 被误拒：{e:?}"));
+        install_package(&pkg, &dest).expect("正常包应能落盘");
+
+        let landed = dest.join(good);
+        assert!(landed.is_file(), "{good:?} 没有落盘");
+        assert_eq!(std::fs::read(&landed).unwrap(), b"data");
+
+        // 落盘必须留在 dest 内：dest 的父目录只应多出 mod
+        let siblings: Vec<String> = std::fs::read_dir(&root)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(siblings, vec!["mod".to_string()], "{good:?} 产生了越界产物");
 
         std::fs::remove_dir_all(&root).ok();
     }
 }
 
 /* ------------------------------------------------------------------ */
-/* 不变量 4：manifest / 清单解析不 panic                               */
+/* 不变量 4：manifest / catalog 解析不 panic                           */
 /* ------------------------------------------------------------------ */
 
 #[test]
 fn fuzz_json_parsers_never_panic() {
-    use dounai_launcher::catalog::parse_catalog;
-
     let mut rng = Rng::new(0x1234_5678);
 
     for iteration in 0..500 {
@@ -324,28 +372,29 @@ fn fuzz_json_parsers_never_panic() {
         for _ in 0..len {
             data.push(rng.byte());
         }
+        let text = String::from_utf8_lossy(&data).into_owned();
 
-        // 三种解析器都不得 panic
-        let r1 = std::panic::catch_unwind(|| parse_catalog(&data));
-        assert!(r1.is_ok(), "第 {iteration} 次：parse_catalog panic");
+        let r1 = std::panic::catch_unwind(|| PackageManifest::parse(&text).is_ok());
+        assert!(r1.is_ok(), "第 {iteration} 次：PackageManifest::parse panic");
 
         let r2 = std::panic::catch_unwind(|| {
-            // 把字节当作 JSON 文本解析
-            if let Ok(text) = std::str::from_utf8(&data) {
-                let _: Result<serde_json::Value, _> = serde_json::from_str(text);
-            }
+            CatalogDocument::parse(&text, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").is_ok()
         });
-        assert!(r2.is_ok(), "第 {iteration} 次：JSON 解析 panic");
+        assert!(r2.is_ok(), "第 {iteration} 次：CatalogDocument::parse panic");
     }
 }
 
 #[test]
 fn fuzz_catalog_with_structured_mutations() {
-    use dounai_launcher::catalog::parse_catalog;
-
-    // 以真实清单为基底做结构化变异
-    let base = br#"{"modules":[{"module_id":"a","name":"A","version":"1.0.0",
-        "download_url":"https://dl.example.com/a.zip","sha256":"abc"}]}"#;
+    // 以真实 catalog 为基底做结构化变异：字段名与嵌套都是真的，
+    // 随机字节很难命中这些分支。
+    let base = br#"{"schema_version":2,"sequence":1,"generated_at":"2026-01-01T00:00:00Z",
+        "expires":"2026-01-07T00:00:00Z","sources":[{"id":"github","kind":"github",
+        "base_url":"https://github.com/dounai/releases","priority":1}],
+        "modules":[{"module_id":"dounai/demo","name":"demo","version":"1.0.0",
+        "variant":"stable","download_url":"https://dl.example.com/a.zip","sha256":"abc"}],
+        "revoked":[],"signature":{"algo":"Ed25519","key_id":"K5",
+        "signed_at":"2026-01-01T00:00:00Z","value":""}}"#;
 
     let mut rng = Rng::new(0xABCD);
     for iteration in 0..300 {
@@ -373,30 +422,10 @@ fn fuzz_catalog_with_structured_mutations() {
             }
         }
 
-        let outcome = std::panic::catch_unwind(|| parse_catalog(&data));
+        let text = String::from_utf8_lossy(&data).into_owned();
+        let outcome = std::panic::catch_unwind(|| {
+            CatalogDocument::parse(&text, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").is_ok()
+        });
         assert!(outcome.is_ok(), "第 {iteration} 次：结构化变异导致 panic");
-    }
-}
-
-/* ------------------------------------------------------------------ */
-/* 不变量 5：base64 解码不 panic                                       */
-/* ------------------------------------------------------------------ */
-
-#[test]
-fn fuzz_base64_decode_never_panics() {
-    use base64::engine::general_purpose::STANDARD as B64;
-    use base64::Engine as _;
-
-    let mut rng = Rng::new(0x7777);
-    for iteration in 0..800 {
-        let len = rng.below(128);
-        let mut s = String::with_capacity(len);
-        for _ in 0..len {
-            // 用可打印字符构造，覆盖各种非法 base64
-            let b = 32 + (rng.byte() % 95);
-            s.push(b as char);
-        }
-        let outcome = std::panic::catch_unwind(|| B64.decode(s.as_bytes()));
-        assert!(outcome.is_ok(), "第 {iteration} 次：base64 解码 panic");
     }
 }

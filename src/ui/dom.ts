@@ -59,15 +59,6 @@ export function toast(message: string, tone: "info" | "ok" | "error" = "info"): 
   );
 }
 
-export function hideToast(): void {
-  const node = document.getElementById("toast");
-  if (node) node.hidden = true;
-  if (toastTimer !== null) {
-    window.clearTimeout(toastTimer);
-    toastTimer = null;
-  }
-}
-
 /* ------------------------------------------------------------------ */
 /* 模态                                                                */
 /* ------------------------------------------------------------------ */

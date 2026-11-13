@@ -148,11 +148,6 @@ export function manifestOf(moduleId: string): ModuleManifest | null {
   return store.manifests.get(moduleId) ?? null;
 }
 
-/** 同一模块下的所有实例（一个模块可以有多个实例，M2 起就是常态）。 */
-export function instancesOfModule(moduleId: string): InstanceRuntimeView[] {
-  return store.views.filter((view) => view.instance.module_id === moduleId);
-}
-
 /** 已登记的模块 id（去重、稳定顺序）。 */
 export function installedModuleIds(): string[] {
   const seen = new Set<string>();

@@ -482,8 +482,3 @@ fn probe_contract(
         std::thread::sleep(POLL_INTERVAL);
     }
 }
-
-/// 启动器数据根下的状态文件路径，命令面据此读写 installed.json 与 retention.json。
-pub fn state_file(data_root: &std::path::Path, name: &str) -> PathBuf {
-    data_root.join("state").join(name)
-}

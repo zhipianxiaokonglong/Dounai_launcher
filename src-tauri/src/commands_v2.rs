@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
 
@@ -222,23 +221,6 @@ pub struct UninstallRequest {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct InstallRequest {
-    pub module_id: String,
-    #[serde(default)]
-    pub category: Option<String>,
-    #[serde(default)]
-    pub version: Option<String>,
-    pub zip_base64: String,
-    pub expected_sha256: String,
-    /// v1 遗留字段：签名判定一律以包内 manifest 为准，这里只用来传用户确认。
-    #[serde(default)]
-    pub manifest: serde_json::Value,
-    /// B/C 类安装必须显式确认；缺省即拒绝，不能靠「不填就放行」。
-    #[serde(default)]
-    pub confirm: Option<bool>,
-}
-
-#[derive(Debug, Deserialize)]
 pub struct AddLocalModuleRequest {
     pub path: String,
 }
@@ -331,27 +313,6 @@ fn external_run_view(module_id: &str) -> RunView {
         last_error: None,
         healthy: true,
         external: true,
-    }
-}
-
-fn module_view(state: &AppStateV2, instance: &Instance, supervisor: &Supervisor) -> ModuleView {
-    let snapshot = supervisor.snapshot().remove(&instance.instance_id);
-    let view = run_view(&instance.module_id, snapshot.as_ref(), None);
-    let linked = instance.source_kind == InstanceSourceKind::Dir;
-    ModuleView {
-        module_id: instance.module_id.clone(),
-        install: InstallStateView::Installed,
-        enabled: !state.is_disabled(&instance.module_id),
-        version: instance.version.clone(),
-        path: state.module_dir(instance).to_string_lossy().into_owned(),
-        run: view.run,
-        last_error: view.last_error,
-        pid: view.pid,
-        healthy: view.healthy,
-        linked,
-        // 启动前短探发现端口上已有健康服务时置 true（上游 D-4）。
-        // 快照里也已并入合成的 Running/Healthy 状态，卡片不会显示「启动失败」。
-        external: supervisor.is_external(&instance.instance_id),
     }
 }
 
@@ -547,43 +508,9 @@ fn restart_instance_impl(
     })
 }
 
-#[tauri::command]
-pub fn get_lifecycle_snapshot(supervisor: State<'_, Supervisor>) -> Vec<Snapshot> {
-    supervisor.snapshot().into_values().collect()
-}
-
 /* ------------------------------------------------------------------ */
 /* 状态查询与开关                                                      */
 /* ------------------------------------------------------------------ */
-
-#[tauri::command]
-pub fn list_module_states(
-    state: State<'_, AppStateV2>,
-    supervisor: State<'_, Supervisor>,
-) -> Result<Vec<ModuleView>, String> {
-    let mut seen = BTreeSet::new();
-    let mut out = Vec::new();
-    let ids: Vec<String> = state.with_installed(|s| s.instances.keys().cloned().collect());
-    for id in ids {
-        let Some(instance) = state.instance(&id) else {
-            continue;
-        };
-        if !seen.insert(instance.module_id.clone()) {
-            continue;
-        }
-        // 多实例时展示 active 槽指向的那个，与启停命令的解析保持一致。
-        let chosen = state
-            .resolve_instance(&instance.module_id)
-            .unwrap_or(instance);
-        out.push(module_view(&state, &chosen, &supervisor));
-    }
-    Ok(out)
-}
-
-#[tauri::command]
-pub fn list_instances(state: State<'_, AppStateV2>) -> Vec<Instance> {
-    state.with_installed(|s| s.instances.values().cloned().collect())
-}
 
 /// 界面一次拿齐渲染一张卡片所需的全部事实。
 ///
@@ -1113,29 +1040,6 @@ fn commit_install(
             TrustVerdictView::UnsignedAllowed
         },
     })
-}
-
-#[tauri::command]
-pub fn install_module(
-    state: State<'_, AppStateV2>,
-    request: InstallRequest,
-) -> Result<InstallResponse, String> {
-    let bytes = base64_decode(&request.zip_base64)?;
-    // v1 遗留字段只用来传用户确认，签名判定一律以包内 manifest 为准。
-    let confirmed = request.confirm.unwrap_or(false)
-        || request
-            .manifest
-            .get("confirm")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-    commit_install(
-        &state,
-        &bytes,
-        &request.expected_sha256,
-        Some(&request.module_id),
-        request.version.as_deref(),
-        confirmed,
-    )
 }
 
 /* ------------------------------------------------------------------ */
@@ -1870,12 +1774,6 @@ pub fn read_module_manifests(state: State<'_, AppStateV2>) -> Vec<ModuleManifest
     out
 }
 
-fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
-    base64::engine::general_purpose::STANDARD
-        .decode(input.trim())
-        .map_err(|e| format!("不是合法 base64：{e}"))
-}
-
 fn admin_url_v2(
     state: &AppStateV2,
     supervisor: &Supervisor,
@@ -2211,25 +2109,6 @@ pub fn read_instance_logs(instance_id: String, state: State<'_, AppStateV2>) -> 
     }
 }
 
-#[tauri::command]
-pub fn hash_file(path: String, state: State<'_, AppStateV2>) -> Result<String, String> {
-    let target = PathBuf::from(&path);
-    let canonical = target
-        .canonicalize()
-        .map_err(|e| format!("无法解析路径：{e}"))?;
-    // 与 v1 一致：只放行数据目录，不把命令变成任意文件读取原语。
-    let root = state
-        .paths
-        .data_root
-        .canonicalize()
-        .map_err(|e| format!("无法解析数据目录：{e}"))?;
-    if !canonical.starts_with(&root) {
-        return Err("只能读取启动器数据目录内的文件".into());
-    }
-    let bytes = std::fs::read(&canonical).map_err(|e| e.to_string())?;
-    Ok(launcher_core::security::sha256_hex(&bytes))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2297,12 +2176,6 @@ mod tests {
         assert_eq!(signed["key_index"], 0);
         let allowed = serde_json::to_value(TrustVerdictView::UnsignedAllowed).unwrap();
         assert_eq!(allowed["kind"], "unsigned_allowed");
-    }
-
-    #[test]
-    fn base64_decode_rejects_garbage() {
-        assert!(base64_decode("not-base64!!").is_err());
-        assert_eq!(base64_decode("aGk=").unwrap(), b"hi");
     }
 
     #[test]
