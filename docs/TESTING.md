@@ -514,3 +514,36 @@ core 新增 5 项：缺 pinned 放行且记 `snapshot_pinned = false`（用 `ins
 **门禁**：core 166 lib + 23 集成、app lib 69、`bundled_uv` 3、契约 109、`tsc`、`npm test` 23、`clippy --workspace --all-targets -D warnings` 全绿。
 
 **未实测**：真机上「安装依赖」全程跑完并让三个模块 health 200——需要用户在安装包上跑一次，且要真的联网拉 wheel。`-v` 的包名行格式按 uv 0.13.7 的 stderr 写的，若上游改格式，表现为卡片只显示阶段不显示包名，不影响安装本身。
+
+## M1 返修：启动被判超时与四倍启动请求（2026-11-13 20:20）
+
+真机日志：12:20:51 四行 `[lifecycle] start role=Input ...`，只有一行 `spawned pid=40112`；12:20:57 `[probe] health=Unhealthy contract=Unhealthy`；随后 health 已能 200，再点启动提示「已在外部运行，本次没有重启」。
+
+**一、四行 start 是前端重复绑定**
+
+`renderModules` 每次刷新都调 `bindBodyActions(body)` / `bindActions(head, …)`，而 `body`、`head` 是常驻元素，`bindActions` 里直接 `addEventListener`。刷新一次多一个监听器，点一次按钮就把 `data-act` 处理函数跑 N 次。状态机 `begin_start` 的互斥把后三个挡成 `AlreadyStarting`，所以只有一个 `spawned`，但用户看到的是「启动失败：实例已在启动中」。
+
+改法：`bindActions` 用 `WeakMap<HTMLElement, Map<act, run>>` 存表，容器只挂一个监听器，重复调用只替换表。`startOne`/`stopOne`/`restartOne` 另加按实例的在途标记，一键启停共用 `bulkBusy` 闸门——按钮在异步返回前仍可点，双击同样会发第二个请求。
+
+**二、六秒判 Unhealthy 是预算口径错误**
+
+`PROBE_BUDGET` 固定 4 秒，`timeout_ms`（3000）是单次请求超时，两者都不是「进程起来要多久」。Python 冷启动要加载解释器与全部 import，四五秒才监听是常态。日志里从 spawn 到 `probe` 6 秒，正好是「4 秒预算 + 一次卡满 3 秒的请求」。
+
+改为 roles 契约里的 `startup_timeout_ms`：`input` 60 秒，`llm`/`output` 90 秒，缺省 60 秒。探测顺序也改了：先只等 health，通了再探契约——health 都没通时探契约只是白等一个请求超时。间隔前 5 秒 50 ms、之后 400 ms，避免长预算下每分钟上千个请求跟刚起来的进程抢 CPU。
+
+**三、判失败不能丢掉 pid**
+
+旧代码走 `mark_failed`，它把 `pid` 清成 `None`。界面于是认为没有进程，用户再点启动时 `start_instance` 的前置短探发现端口健康，就把这个实例标成「外部启动」——启动器自己拉起的进程，却失去了停止权，也解释不了「已在外部运行」这句提示。
+
+- 新增 `mark_probe_timeout`：阶段 `failed`、保留 `pid`、`last_error` 写「启动超时：N 秒内健康检查未通过，进程仍在运行」。
+- 新增 `mark_recovered`：只认「`failed` 且 `pid` 还在」的条目，收回到 `running`，`contract` 保持 `not_checked`（只确认了 health）。
+- `Supervisor::owns` 与 `start_instance` 的 owns 分支：自己还持有进程时，健康就直接收回状态，不健康就明确要求先停止，绝不 `mark_external`。`mark_external` 自己加守卫，作为第二道保险。
+- 界面 `hasLiveProcess` 让「启动超时」的实例显示「停止」而不是「启动」，模块级 chip 用 `启动超时`（warn）而不是 `启动失败`（fail）。
+
+**四、验证**
+
+- core 新增 3 项：超时保留 pid 且迟到探测不改写、`mark_recovered` 回到 `running`、无 pid 时拒绝收回。lib 166 → 169。
+- 前端新增 `tests/bind-actions.test.ts` 3 项：重复绑定只留一个监听器、重绑后走最新处理函数、未登记的 act 不触发。
+- 门禁：core 169 lib + 23 集成、app lib 69、契约 109、`tsc`、`npm test` 26、`clippy --workspace --all-targets -D warnings` 全绿。
+
+**未实测**：真机上点一次「启动」只发一个请求、60 秒内转 `running`、以及超时后「先停止再启动」能走通。需要用户在安装包上复跑。
