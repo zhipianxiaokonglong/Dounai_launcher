@@ -524,7 +524,7 @@ code,
 
 .cards {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(288px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
   gap: 10px;
 }
 
@@ -682,6 +682,8 @@ code,
   align-items: center;
   gap: 6px;
   min-width: 0;
+  flex-wrap: wrap;
+  row-gap: 4px;
 }
 
 .inst-name {
@@ -691,6 +693,8 @@ code,
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex: 1 1 150px;
+  min-width: 0;
 }
 
 .inst-meta {
@@ -719,6 +723,12 @@ code,
   position: relative;
 }
 
+/* 卡片底栏里 ⋯ 要贴右：菜单面板是按它的右边缘向左展开的，
+   若它跟着「详情」靠左，面板会越出卡片左边界盖住正文。 */
+.card-foot .menu {
+  margin-left: auto;
+}
+
 .menu > summary {
   list-style: none;
   cursor: pointer;
@@ -739,6 +749,7 @@ code,
   bottom: calc(100% + 4px);
   z-index: 30;
   min-width: 168px;
+  max-width: min(240px, calc(100vw - 72px));
   background: var(--panel);
   border: 1px solid var(--line-2);
   border-radius: var(--r-s);
@@ -749,15 +760,21 @@ code,
   box-shadow: 0 10px 26px rgba(0, 0, 0, 0.35);
 }
 
+/* 浅色主题下 0.35 的黑影太重，边界靠一圈实线更清楚。 */
+:root[data-theme="light"] .menu-body {
+  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.14);
+}
+
 .menu-body button {
   border: 0;
   background: transparent;
   color: var(--fg-2);
   font: 400 11.5px var(--sans);
   text-align: left;
-  padding: 6px 8px;
+  padding: 5px 8px;
   border-radius: 4px;
   cursor: pointer;
+  white-space: nowrap;
 }
 
 .menu-body button:hover:not(:disabled) {

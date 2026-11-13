@@ -360,19 +360,28 @@ fn module_view(state: &AppStateV2, instance: &Instance, supervisor: &Supervisor)
 /* ------------------------------------------------------------------ */
 
 #[tauri::command]
-pub fn start_module(
-    module_id: String,
-    state: State<'_, AppStateV2>,
-    supervisor: State<'_, Supervisor>,
+pub async fn start_module(module_id: String, app: tauri::AppHandle) -> Result<RunView, String> {
+    // 启动要 spawn 进程、短探端口、等健康检查，放主线程会冻住窗口。
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppStateV2>();
+        let supervisor = app.state::<Supervisor>();
+        start_module_impl(&module_id, &state, &supervisor)
+    })
+    .await
+    .map_err(|e| format!("启动没有跑完：{e}"))?
+}
+
+fn start_module_impl(
+    key: &str,
+    state: &AppStateV2,
+    supervisor: &Supervisor,
 ) -> Result<RunView, String> {
-    let instance = state.resolve_instance(&module_id)?;
-    let port = single_instance_port(&state, &supervisor, &instance);
-    Ok(
-        match start_instance(&state, &supervisor, &instance, port)? {
-            StartOutcome::Managed(snap) => run_view(&instance.module_id, Some(&snap), None),
-            StartOutcome::External => external_run_view(&instance.module_id),
-        },
-    )
+    let instance = state.resolve_instance(key)?;
+    let port = single_instance_port(state, supervisor, &instance);
+    Ok(match start_instance(state, supervisor, &instance, port)? {
+        StartOutcome::Managed(snap) => run_view(&instance.module_id, Some(&snap), None),
+        StartOutcome::External => external_run_view(&instance.module_id),
+    })
 }
 
 /// 启动结果：由本启动器托管，或端口上已有外部健康服务。
@@ -424,18 +433,37 @@ fn start_instance(
 }
 
 #[tauri::command]
-pub fn stop_module(
-    module_id: String,
-    state: State<'_, AppStateV2>,
-    supervisor: State<'_, Supervisor>,
-) -> Result<RunView, String> {
-    let instance = state.resolve_instance(&module_id)?;
-    let snap = supervisor.stop(&instance.instance_id)?;
-    Ok(run_view(&module_id, Some(&snap), None))
+pub async fn stop_module(module_id: String, app: tauri::AppHandle) -> Result<RunView, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppStateV2>();
+        let supervisor = app.state::<Supervisor>();
+        let instance = state.resolve_instance(&module_id)?;
+        let snap = supervisor.stop(&instance.instance_id)?;
+        Ok(run_view(&instance.module_id, Some(&snap), None))
+    })
+    .await
+    .map_err(|e| format!("停止没有跑完：{e}"))?
 }
 
 #[tauri::command]
-pub fn start_all(state: State<'_, AppStateV2>, supervisor: State<'_, Supervisor>) -> Vec<RunView> {
+pub async fn start_all(app: tauri::AppHandle) -> Vec<RunView> {
+    match tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppStateV2>();
+        let supervisor = app.state::<Supervisor>();
+        start_all_impl(&state, &supervisor)
+    })
+    .await
+    {
+        Ok(out) => out,
+        Err(error) => vec![run_view(
+            "start_all",
+            None,
+            Some(format!("启动没有跑完：{error}")),
+        )],
+    }
+}
+
+fn start_all_impl(state: &AppStateV2, supervisor: &Supervisor) -> Vec<RunView> {
     let instances: Vec<Instance> = state.with_installed(|s| {
         s.instances
             .values()
@@ -447,12 +475,12 @@ pub fn start_all(state: State<'_, AppStateV2>, supervisor: State<'_, Supervisor>
         Ok(list) => list,
         Err(error) => return vec![run_view("start_all", None, Some(error))],
     };
-    let ports = assign_ports(&state, supervisor.roles(), &ordered);
+    let ports = assign_ports(state, supervisor.roles(), &ordered);
     let mut out = Vec::with_capacity(ordered.len());
     for instance in &ordered {
         // 整批分配端口仍在这里做，start_instance 只负责单个实例的启动前探测。
         let port = ports.get(&instance.instance_id).copied().flatten();
-        match start_instance(&state, &supervisor, instance, port) {
+        match start_instance(state, supervisor, instance, port) {
             Ok(StartOutcome::Managed(snap)) => {
                 out.push(run_view(&instance.module_id, Some(&snap), None))
             }
@@ -464,42 +492,59 @@ pub fn start_all(state: State<'_, AppStateV2>, supervisor: State<'_, Supervisor>
 }
 
 #[tauri::command]
-pub fn stop_all(state: State<'_, AppStateV2>, supervisor: State<'_, Supervisor>) -> Vec<RunView> {
-    supervisor
-        .stop_all()
-        .into_iter()
-        .map(|snap| {
-            let module_id = state
-                .instance(&snap.instance_id)
-                .map(|i| i.module_id)
-                .unwrap_or_else(|| snap.instance_id.clone());
-            run_view(&module_id, Some(&snap), None)
-        })
-        .collect()
+pub async fn stop_all(app: tauri::AppHandle) -> Vec<RunView> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppStateV2>();
+        let supervisor = app.state::<Supervisor>();
+        supervisor
+            .stop_all()
+            .into_iter()
+            .map(|snap| {
+                let module_id = state
+                    .instance(&snap.instance_id)
+                    .map(|i| i.module_id)
+                    .unwrap_or_else(|| snap.instance_id.clone());
+                run_view(&module_id, Some(&snap), None)
+            })
+            .collect()
+    })
+    .await
+    .unwrap_or_default()
 }
 
 #[tauri::command]
-pub fn restart_instance(
+pub async fn restart_instance(
     instance_id: String,
-    state: State<'_, AppStateV2>,
-    supervisor: State<'_, Supervisor>,
+    app: tauri::AppHandle,
+) -> Result<RunView, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppStateV2>();
+        let supervisor = app.state::<Supervisor>();
+        restart_instance_impl(&instance_id, &state, &supervisor)
+    })
+    .await
+    .map_err(|e| format!("重启没有跑完：{e}"))?
+}
+
+fn restart_instance_impl(
+    instance_id: &str,
+    state: &AppStateV2,
+    supervisor: &Supervisor,
 ) -> Result<RunView, String> {
     let instance = state
-        .instance(&instance_id)
+        .instance(instance_id)
         .ok_or_else(|| format!("实例不存在：{instance_id}"))?;
-    if supervisor.is_external(&instance_id) {
+    if supervisor.is_external(instance_id) {
         return Err(format!("实例 {instance_id} 由外部启动，启动器无法重启"));
     }
-    if supervisor.running().contains(&instance_id) {
-        supervisor.stop(&instance_id)?;
+    if supervisor.running().contains(instance_id) {
+        supervisor.stop(instance_id)?;
     }
-    let port = single_instance_port(&state, &supervisor, &instance);
-    Ok(
-        match start_instance(&state, &supervisor, &instance, port)? {
-            StartOutcome::Managed(snap) => run_view(&instance.module_id, Some(&snap), None),
-            StartOutcome::External => external_run_view(&instance.module_id),
-        },
-    )
+    let port = single_instance_port(state, supervisor, &instance);
+    Ok(match start_instance(state, supervisor, &instance, port)? {
+        StartOutcome::Managed(snap) => run_view(&instance.module_id, Some(&snap), None),
+        StartOutcome::External => external_run_view(&instance.module_id),
+    })
 }
 
 #[tauri::command]
@@ -556,6 +601,9 @@ pub struct InstanceRuntimeView {
     pub disabled: bool,
     /// 生命周期快照；启动器没见过的实例为 None。
     pub snapshot: Option<Snapshot>,
+    /// 依赖环境是否已就绪。shell 角色不要运行时，恒为 true。
+    /// 未就绪时界面不给「启动」，先引导装依赖——否则点下去只会失败。
+    pub prepared: bool,
 }
 
 #[tauri::command]
@@ -573,12 +621,22 @@ pub fn list_instance_views(
         .map(|i| i.module_id.clone())
         .filter(|id| state.is_disabled(id))
         .collect();
+    let prepared: BTreeSet<String> = instances
+        .iter()
+        .filter(|i| {
+            // shell 不需要运行时，直接算就绪；其余要能读到生成好的 venv。
+            !i.role.needs_runtime()
+                || launcher_core::verify_instance(&state.paths, &i.instance_id).is_ok()
+        })
+        .map(|i| i.instance_id.clone())
+        .collect();
     compose_instance_views(
         instances,
         &ports,
         &active,
         &disabled,
         &supervisor.snapshot(),
+        &prepared,
     )
 }
 
@@ -590,6 +648,7 @@ fn compose_instance_views(
     active: &std::collections::BTreeMap<String, String>,
     disabled: &BTreeSet<String>,
     snapshots: &std::collections::BTreeMap<String, Snapshot>,
+    prepared: &BTreeSet<String>,
 ) -> Vec<InstanceRuntimeView> {
     instances
         .into_iter()
@@ -597,6 +656,7 @@ fn compose_instance_views(
             port: ports.get(&instance.instance_id).copied().flatten(),
             active: active.values().any(|id| id == &instance.instance_id),
             disabled: disabled.contains(&instance.module_id),
+            prepared: prepared.contains(&instance.instance_id),
             snapshot: snapshots.get(&instance.instance_id).cloned(),
             instance,
         })
@@ -786,13 +846,27 @@ fn activation_plan(
 /// v1 只改槽位不碰进程，切完 active 指向的实例还是旧的。这里把 core 里已有的
 /// `activation_steps` / `rollback_steps` 真正执行掉。
 #[tauri::command]
-pub fn switch_active(
+pub async fn switch_active(
     instance_id: String,
-    state: State<'_, AppStateV2>,
-    supervisor: State<'_, Supervisor>,
+    app: tauri::AppHandle,
+) -> Result<Vec<String>, String> {
+    // 切换要停旧、起新、同步等 health，最长接近契约上限，必须离开主线程。
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppStateV2>();
+        let supervisor = app.state::<Supervisor>();
+        switch_active_impl(&instance_id, &state, &supervisor)
+    })
+    .await
+    .map_err(|e| format!("切换没有跑完：{e}"))?
+}
+
+fn switch_active_impl(
+    instance_id: &str,
+    state: &AppStateV2,
+    supervisor: &Supervisor,
 ) -> Result<Vec<String>, String> {
     let instance = state
-        .instance(&instance_id)
+        .instance(instance_id)
         .ok_or_else(|| format!("实例不存在：{instance_id}"))?;
     if instance.role == Role::Auxiliary {
         return Err("auxiliary 角色不设 active 槽".into());
@@ -840,7 +914,7 @@ pub fn switch_active(
                     Ok(())
                 } else {
                     let port = supervisor.roles().canonical_port(instance.role);
-                    match start_instance(&state, &supervisor, &instance, port) {
+                    match start_instance(state, supervisor, &instance, port) {
                         Ok(StartOutcome::Managed(_)) => Ok(()),
                         Ok(StartOutcome::External) => Err(format!(
                             "规范端口上已有外部服务，无法确认它就是 {next}；请先关闭再切换"
@@ -849,8 +923,8 @@ pub fn switch_active(
                     }
                 }
             }
-            ActivationStep::ProbeHealth => wait_for_activation(&supervisor, &next, false),
-            ActivationStep::ProbeContract => wait_for_activation(&supervisor, &next, true),
+            ActivationStep::ProbeHealth => wait_for_activation(supervisor, &next, false),
+            ActivationStep::ProbeContract => wait_for_activation(supervisor, &next, true),
             ActivationStep::CommitActive => {
                 let path = state.installed_path();
                 state.mutate_installed(|st| {
@@ -869,7 +943,7 @@ pub fn switch_active(
     }
 
     if let Some((failed, error)) = failure {
-        let notes = rollback_activation(&state, &supervisor, previous.as_deref(), &next, failed);
+        let notes = rollback_activation(state, supervisor, previous.as_deref(), &next, failed);
         let suffix = if notes.is_empty() {
             String::new()
         } else {
@@ -1237,21 +1311,36 @@ pub async fn install_local_package(
 }
 
 #[tauri::command]
-pub fn prepare_instance_env(
+pub async fn prepare_instance_env(
     instance_id: String,
     allow_online: Option<bool>,
-    state: State<'_, AppStateV2>,
-    supervisor: State<'_, Supervisor>,
+    app: tauri::AppHandle,
+) -> Result<String, String> {
+    // 依赖准备要建 venv、跑 uv sync，离线也可能几十秒，联网更久。
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppStateV2>();
+        let supervisor = app.state::<Supervisor>();
+        prepare_instance_env_impl(&instance_id, allow_online, &state, &supervisor)
+    })
+    .await
+    .map_err(|e| format!("依赖准备没有跑完：{e}"))?
+}
+
+fn prepare_instance_env_impl(
+    instance_id: &str,
+    allow_online: Option<bool>,
+    state: &AppStateV2,
+    supervisor: &Supervisor,
 ) -> Result<String, String> {
     let instance = state
-        .instance(&instance_id)
+        .instance(instance_id)
         .ok_or_else(|| format!("实例不存在：{instance_id}"))?;
     if !instance.role.needs_runtime() {
         return Err(format!("{:?} 角色不需要准备依赖环境", instance.role));
     }
     // `.staging` 路径按实例哈希固定，同一实例并发 prepare 会互删。
     // 锁槽在实例粒度，不同实例的准备仍然并行。
-    let slot = state.instance_slot(&instance_id);
+    let slot = state.instance_slot(instance_id);
     let _exclusive = slot.lock().unwrap_or_else(|e| e.into_inner());
     let dir = state.module_dir(&instance);
     let raw = read_manifest_value(&dir)?;
@@ -1273,20 +1362,15 @@ pub fn prepare_instance_env(
         runner: &runner,
         fetcher: &fetcher,
     };
-    let prepared = launcher_core::env::prepare_instance_with(
-        &state.paths,
-        &instance_id,
-        &manifest,
-        &dir,
-        &ctx,
-    )
-    .map_err(|e| {
-        if online {
-            format!("依赖准备失败：{e}")
-        } else {
-            format!("离线依赖准备失败（{e}）。如确需联网补齐依赖，请显式放行后重试。")
-        }
-    })?;
+    let prepared =
+        launcher_core::env::prepare_instance_with(&state.paths, instance_id, &manifest, &dir, &ctx)
+            .map_err(|e| {
+                if online {
+                    format!("依赖准备失败：{e}")
+                } else {
+                    format!("离线依赖准备失败（{e}）。如确需联网补齐依赖，请显式放行后重试。")
+                }
+            })?;
     Ok(prepared.venv_python.to_string_lossy().into_owned())
 }
 
@@ -2313,16 +2397,24 @@ mod tests {
             },
         );
 
+        let prepared: BTreeSet<String> = ["omninexus@stable", "omninexus@local"]
+            .iter()
+            .map(|id| id.to_string())
+            .collect();
         let views = compose_instance_views(
             vec![active_instance, standby],
             &ports,
             &active,
             &disabled,
             &snapshots,
+            &prepared,
         );
         assert_eq!(views.len(), 2);
         assert_eq!(views[0].port, Some(8102));
         assert!(views[0].active);
+        // 依赖就绪标记由调用方算好传进来，视图只负责落位。
+        assert!(views[0].prepared);
+        assert!(views[1].prepared);
         assert_eq!(views[0].snapshot.as_ref().unwrap().pid, Some(99));
         // 备用实例：端口不同、不是 active、没有快照（没被启动过）。
         assert_eq!(views[1].port, Some(18101));
@@ -2420,5 +2512,50 @@ mod tests {
         let err = commit_install(&state, &bytes, &bogus, None, None, true).unwrap_err();
         assert!(err.contains("整包哈希不符"), "{err}");
         assert!(state.instance("dounai/demo-local@stable").is_none());
+    }
+
+    /// 界面按 instance_id 调启动/停止，v1 命令面按 module_id 调；两者都得认。
+    #[test]
+    fn resolve_instance_accepts_instance_id_and_module_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppStateV2::new(dir.path().join("app"), dir.path().join("data")).unwrap();
+        let instance = |id: &str| -> Instance {
+            serde_json::from_value(serde_json::json!({
+                "instance_id": id,
+                "module_id": "dounai/omninexus",
+                "variant": "stable",
+                "version": "0.3.4",
+                "role": "llm",
+                "category": "core",
+                "verdict": "A",
+                "confirmed_at": "2026-11-13T00:00:00Z",
+                "installed_at": "2026-11-13T00:00:00Z",
+                "source_kind": "zip",
+                "pinned": false,
+                "auto_update": false,
+            }))
+            .unwrap()
+        };
+        state.upsert(instance("dounai/omninexus@stable")).unwrap();
+
+        // 界面路径：精确 instance_id。
+        assert_eq!(
+            state
+                .resolve_instance("dounai/omninexus@stable")
+                .unwrap()
+                .module_id,
+            "dounai/omninexus"
+        );
+        // v1 路径：module_id 落到唯一实例。
+        assert_eq!(
+            state
+                .resolve_instance("dounai/omninexus")
+                .unwrap()
+                .instance_id,
+            "dounai/omninexus@stable"
+        );
+        // 都不匹配时给的是「没找到」而不是「未安装某个模块」。
+        let err = state.resolve_instance("dounai/nope@stable").unwrap_err();
+        assert!(err.contains("没有找到实例或模块"), "{err}");
     }
 }

@@ -573,6 +573,8 @@ export interface InstanceRuntimeView {
   port: number | null;
   active: boolean;
   disabled: boolean;
+  /** 依赖环境是否已就绪；未就绪时界面先引导装依赖，不给「启动」。 */
+  prepared: boolean;
   snapshot: InstanceSnapshot | null;
 }
 

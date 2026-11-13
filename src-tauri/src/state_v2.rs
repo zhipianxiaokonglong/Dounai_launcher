@@ -258,16 +258,23 @@ impl AppStateV2 {
         self.with_installed(|state| state.instances.get(instance_id).cloned())
     }
 
-    /// v1 命令按 module_id 调用；优先 active 槽，其次按 instance_id 稳定取第一个。
-    pub fn resolve_instance(&self, module_id: &str) -> Result<Instance, String> {
+    /// v1 命令按 module_id 调用，v2 界面按 instance_id 调用；两种键都认。
+    ///
+    /// 先按 instance_id 精确匹配，再退回 module_id：active 槽优先，其次按
+    /// instance_id 稳定取第一个。这样「启动某个实例」与「启动某模块」不会
+    /// 各自实现一套解析，界面传 instance_id 也不会被当成模块名判「未安装」。
+    pub fn resolve_instance(&self, key: &str) -> Result<Instance, String> {
         let state = lock(&self.installed);
+        if let Some(exact) = state.instances.get(key) {
+            return Ok(exact.clone());
+        }
         let mut matching: Vec<&Instance> = state
             .instances
             .values()
-            .filter(|i| i.module_id == module_id)
+            .filter(|i| i.module_id == key)
             .collect();
         if matching.is_empty() {
-            return Err(format!("模块 {module_id} 未安装"));
+            return Err(format!("没有找到实例或模块：{key}"));
         }
         matching.sort_by(|a, b| a.instance_id.cmp(&b.instance_id));
         let active = state
@@ -277,7 +284,7 @@ impl AppStateV2 {
         active
             .or_else(|| matching.first().copied())
             .cloned()
-            .ok_or_else(|| format!("模块 {module_id} 没有可用实例"))
+            .ok_or_else(|| format!("模块 {key} 没有可用实例"))
     }
 
     /// 登记或更新实例，落盘一次原子写。

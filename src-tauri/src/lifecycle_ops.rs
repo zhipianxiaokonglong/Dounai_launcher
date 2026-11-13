@@ -74,10 +74,7 @@ pub fn build_start_request(
     let prepared = if instance.role.needs_runtime() {
         Some(
             launcher_core::verify_instance(&state.paths, &instance.instance_id).map_err(|e| {
-                format!(
-                    "实例 {} 的依赖环境未就绪（{}）。请先执行 prepare_instance_env，再启动。",
-                    instance.instance_id, e
-                )
+                format!("这个实例的依赖还没装好（{e}）。先在卡片上点「安装依赖」，装完再启动。")
             })?,
         )
     } else {

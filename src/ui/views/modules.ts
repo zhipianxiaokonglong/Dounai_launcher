@@ -332,6 +332,7 @@ function buildInstanceRow(view: InstanceRuntimeView): HTMLElement {
   if (external) chips.push('<span class="chip chip--warn">外部启动</span>');
   else if (view.instance.source_kind === "dir") chips.push('<span class="chip chip--warn">未验证</span>');
   if (view.disabled) chips.push('<span class="chip chip--stop">已停用</span>');
+  if (!view.prepared && !isRunning(view)) chips.push('<span class="chip chip--warn">依赖未装</span>');
 
   const health = healthChip(view);
   const detail = instanceDetailText(view);
@@ -386,6 +387,10 @@ function instanceButtons(view: InstanceRuntimeView): string {
     return `<button class="btn btn--sm" type="button" data-act="stop" data-id="${id}">停止</button>`;
   }
   const disabledAttr = view.disabled ? " disabled title=\"模块已停用，先启用\"" : "";
+  // 依赖没装就启动只会失败，还容易让人以为模块坏了。先给装依赖这一步。
+  if (!view.prepared) {
+    return `<button class="btn btn--sm btn--primary" type="button" data-act="prepare" data-id="${id}"${disabledAttr} title="这个模块要先装依赖才能启动">安装依赖</button>`;
+  }
   return `<button class="btn btn--sm btn--primary" type="button" data-act="start" data-id="${id}"${disabledAttr}>启动</button>`;
 }
 
@@ -423,7 +428,10 @@ function cardFootHtml(moduleId: string, views: InstanceRuntimeView[]): string {
     }
     if (primary.instance.role !== "shell") {
       menuItems.push(
-        `<button type="button" data-act="prepare-env" data-id="${esc(primary.instance.instance_id)}">准备依赖（离线）</button>`,
+        `<button type="button" data-act="prepare" data-id="${esc(primary.instance.instance_id)}">安装依赖（离线）</button>`,
+      );
+      menuItems.push(
+        `<button type="button" data-act="prepare-online" data-id="${esc(primary.instance.instance_id)}">安装依赖（允许联网）</button>`,
       );
     }
   }
@@ -512,7 +520,8 @@ function bindBodyActions(body: HTMLElement): void {
     { act: "logs", run: (node) => openLogsFor(node.dataset.id ?? "") },
     { act: "switch-active", run: (node) => makeActive(node.dataset.id ?? "") },
     { act: "confirm-source", run: (node) => confirmSource(node.dataset.id ?? "") },
-    { act: "prepare-env", run: (node) => prepareEnv(node.dataset.id ?? "") },
+    { act: "prepare", run: (node) => prepareEnv(node.dataset.id ?? "") },
+    { act: "prepare-online", run: (node) => prepareEnv(node.dataset.id ?? "", true) },
     { act: "admin", run: (node) => openAdmin(node.dataset.id ?? "") },
     { act: "toggle", run: (node) => toggleModule(node.dataset.id ?? "") },
     { act: "uninstall", run: (node) => askUninstall(node.dataset.id ?? "") },
@@ -538,15 +547,27 @@ function bindBodyActions(body: HTMLElement): void {
 
 async function startOne(instanceId: string): Promise<void> {
   if (!instanceId) return;
+  const view = store.views.find((item) => item.instance.instance_id === instanceId);
+  // 依赖没装就点启动：先把这一步补上，而不是让后端报「环境未就绪」。
+  if (view && !view.prepared) {
+    toast(`${instanceId} 还没装依赖，先装依赖…`);
+    try {
+      await prepareInstanceEnv(instanceId);
+    } catch (error) {
+      toast(`安装依赖失败：${describeError(error)}`, "error");
+      await refreshModules();
+      return;
+    }
+  }
   try {
     toast(`正在启动 ${instanceId}…`);
-    const view = await startModule(instanceId);
-    if (view.run === "failed") {
-      toast(`启动失败：${view.last_error ?? "未知原因"}`, "error");
-    } else if (view.external) {
+    const result = await startModule(instanceId);
+    if (result.run === "failed") {
+      toast(`启动失败：${result.last_error ?? "未知原因"}`, "error");
+    } else if (result.external) {
       toast(`${instanceId} 已在外部运行，本次没有重启`, "ok");
     } else {
-      const pid = view.pid ? `（pid ${view.pid}）` : "";
+      const pid = result.pid ? `（pid ${result.pid}）` : "";
       toast(`已启动 ${instanceId}${pid}`, "ok");
     }
   } catch (error) {
@@ -586,13 +607,17 @@ async function startEverything(): Promise<void> {
   try {
     toast("正在按拓扑顺序启动…");
     const results = await startAll();
-    const ok = results.filter((r) => r.run === "running").length;
+    // 启动返回时实例通常还在 Starting，等健康检查才转 Running。
+    // 只数 running 会报「已启动 0 个」，把正在起的也算上，另说清有几个在等。
+    const started = results.filter((r) => r.run === "running" || r.run === "starting").length;
+    const waiting = results.filter((r) => r.run === "starting").length;
     const failed = results.filter((r) => r.run === "failed");
     if (failed.length === 0) {
-      toast(`已启动 ${ok} / ${results.length} 个实例`, "ok");
+      const tail = waiting > 0 ? `，其中 ${waiting} 个正在等健康检查` : "";
+      toast(`已启动 ${started} / ${results.length} 个实例${tail}`, "ok");
     } else {
       toast(
-        `启动 ${ok} / ${results.length}，失败：${failed
+        `启动 ${started} / ${results.length}，失败：${failed
           .map((r) => `${r.module_id}（${r.last_error ?? "未知原因"}）`)
           .join("；")}`,
         "error",
@@ -656,14 +681,19 @@ HEAD　${esc(git?.head ?? "（不是 git 仓库或读取失败）")}
   });
 }
 
-async function prepareEnv(instanceId: string): Promise<void> {
+async function prepareEnv(instanceId: string, allowOnline = false): Promise<void> {
   try {
-    toast("正在准备依赖（离线优先）…");
-    const python = await prepareInstanceEnv(instanceId);
-    toast(`依赖已就绪：${python}`, "ok");
+    toast(
+      allowOnline
+        ? `正在安装依赖（允许联网）：${instanceId}…这一步可能要几分钟`
+        : `正在安装依赖（离线）：${instanceId}…`,
+    );
+    const python = await prepareInstanceEnv(instanceId, allowOnline);
+    toast(`依赖装好了：${python}`, "ok");
   } catch (error) {
-    toast(`依赖准备失败：${describeError(error)}`, "error");
+    toast(`安装依赖失败：${describeError(error)}`, "error");
   }
+  await refreshModules();
 }
 
 async function openAdmin(moduleId: string): Promise<void> {
