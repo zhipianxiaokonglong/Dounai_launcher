@@ -15,11 +15,30 @@ import {
   trustInfo,
   devModeStatus,
   BridgeUnavailableError,
+  type EnvPhaseName,
+  type EnvProgressEvent,
   type InstanceRuntimeView,
   type RustEnvReport,
   type SettingsSnapshot,
   type TrustInfo,
 } from "../bridge.js";
+
+/**
+ * 一次依赖安装在界面上的状态。
+ *
+ * 这是纯界面状态，不进后端：Rust 只报「现在在哪一步」，开始与结束由发起方
+ * 决定——invoke 返回或抛错就是结束，不需要一条额外的结束事件。
+ */
+export interface EnvJob {
+  phase: EnvPhaseName | "starting";
+  title: string;
+  detail: string | null;
+  current: number | null;
+  total: number | null;
+  /** 失败原因；成功后为 null。有值时卡片保留这段文字，直到下次重试。 */
+  error: string | null;
+  startedAt: number;
+}
 
 export interface Store {
   /** 已登记实例的合并视图（含端口、active、快照）。 */
@@ -30,6 +49,8 @@ export interface Store {
   settings: SettingsSnapshot | null;
   trust: TrustInfo | null;
   devMode: boolean;
+  /** 依赖安装的进行中/失败状态，按 instance_id 存。 */
+  envJobs: Record<string, EnvJob>;
 }
 
 export const store: Store = {
@@ -39,6 +60,7 @@ export const store: Store = {
   settings: null,
   trust: null,
   devMode: false,
+  envJobs: {},
 };
 
 /** 桥接错误的可读文案。 */
@@ -129,8 +151,7 @@ export function isExternal(view: InstanceRuntimeView): boolean {
   return view.snapshot?.phase === "running" && view.snapshot.pid === null;
 }
 
-/** 页头与状态栏用的计数。 */
-export interface RunCounts {
+/** 页头与状态栏用的计数。 */export interface RunCounts {
   running: number;
   starting: number;
   failed: number;
@@ -155,4 +176,63 @@ export function runCounts(): RunCounts {
     }
   }
   return { running, starting, failed, external, total: store.views.length };
+}
+
+/* ------------------------------------------------------------------ */
+/* 依赖安装进度（纯界面状态）                                          */
+/* ------------------------------------------------------------------ */
+
+/** 开始一次安装：先把卡片切到「准备中」，避免点下去几秒内没有任何反馈。 */
+export function beginEnvJob(instanceId: string): void {
+  store.envJobs[instanceId] = {
+    phase: "starting",
+    title: "准备开始",
+    detail: null,
+    current: null,
+    total: null,
+    error: null,
+    startedAt: Date.now(),
+  };
+}
+
+/** 收到后端的一次阶段上报。 */
+export function applyEnvProgress(progress: EnvProgressEvent): void {
+  const current = store.envJobs[progress.instanceId];
+  store.envJobs[progress.instanceId] = {
+    phase: progress.phase,
+    title: progress.title,
+    detail: progress.detail,
+    current: progress.current,
+    total: progress.total,
+    // 新阶段意味着重试过一次，旧错误就不再成立。
+    error: null,
+    startedAt: current?.startedAt ?? Date.now(),
+  };
+}
+
+/**
+ * 结束一次安装。
+ *
+ * 成功就整条抹掉——卡片回到「依赖已装」的正常样子；失败留下 error，
+ * 卡片继续显示原因，用户重试时才覆盖。
+ */
+export function endEnvJob(instanceId: string, error?: string): void {
+  const current = store.envJobs[instanceId];
+  if (!error) {
+    delete store.envJobs[instanceId];
+    return;
+  }
+  store.envJobs[instanceId] = {
+    phase: current?.phase ?? "starting",
+    title: current?.title ?? "安装中断",
+    detail: null,
+    current: null,
+    total: null,
+    error,
+    startedAt: current?.startedAt ?? Date.now(),
+  };
+}
+
+export function envJobOf(instanceId: string): EnvJob | null {
+  return store.envJobs[instanceId] ?? null;
 }

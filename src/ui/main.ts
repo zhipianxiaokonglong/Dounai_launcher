@@ -6,10 +6,11 @@
  * 没有「后退到上一页」的语义，浏览器历史只会让 Backspace 误触。
  */
 
-import { isDesktop, onLifecycleChanged } from "../bridge.js";
+import { isDesktop, onEnvProgress, onLifecycleChanged } from "../bridge.js";
 import { esc, must, toast } from "./dom.js";
 import { initTheme } from "./theme.js";
 import {
+  applyEnvProgress,
   describeError,
   refreshDevMode,
   refreshEnv,
@@ -21,7 +22,7 @@ import {
 import { renderEnv } from "./views/env.js";
 import { renderImport } from "./views/import.js";
 import { focusInstance, renderLogs } from "./views/logs.js";
-import { refreshModules, renderModules } from "./views/modules.js";
+import { patchEnvJob, refreshModules, renderModules } from "./views/modules.js";
 import { renderSettings } from "./views/settings.js";
 
 type ViewId = "modules" | "env" | "logs" | "settings" | "import";
@@ -222,6 +223,13 @@ function wireEvents(): void {
   });
 
   onLifecycleChanged(() => scheduleRefresh());
+
+  // 依赖安装进度：只改对应卡片上的那一行。整页重绘会把滚动位置、展开的菜单
+  // 都打回原样，而这个事件在装包时每 150ms 就可能来一次。
+  onEnvProgress((progress) => {
+    applyEnvProgress(progress);
+    patchEnvJob(progress.instanceId);
+  });
 }
 
 void boot();

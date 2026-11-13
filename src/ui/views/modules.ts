@@ -37,13 +37,17 @@ import {
 } from "../dom.js";
 import { icon } from "../icons.js";
 import {
+  beginEnvJob,
   describeError,
+  endEnvJob,
+  envJobOf,
   isExternal,
   isRunning,
   moduleName,
   refreshViews,
   runCounts,
   store,
+  type EnvJob,
 } from "../store.js";
 
 const ROLE_ORDER: Role[] = ["input", "llm", "output", "shell", "auxiliary"];
@@ -340,6 +344,13 @@ function buildInstanceRow(view: InstanceRuntimeView): HTMLElement {
   else if (view.instance.source_kind === "dir") chips.push('<span class="chip chip--warn">未验证</span>');
   if (view.disabled) chips.push('<span class="chip chip--stop">已停用</span>');
   if (!view.prepared && !isRunning(view)) chips.push('<span class="chip chip--warn">依赖未装</span>');
+  // 包内没声明 snapshot_sha256 时，这份快照是运行时算出来的，不是发布者的承诺。
+  // 不是错误，但要让人知道「换成重装能恢复锚定」这条线索存在。
+  if (view.prepared && view.env_pinned === false && view.instance.source_kind === "zip") {
+    chips.push(
+      '<span class="chip chip--warn" title="这个包的 manifest 没有声明依赖快照哈希，本次哈希由本地解析得出">快照未锚定</span>',
+    );
+  }
 
   const health = healthChip(view);
   const detail = instanceDetailText(view);
@@ -356,8 +367,76 @@ function buildInstanceRow(view: InstanceRuntimeView): HTMLElement {
       <span class="sp" style="margin-left:auto"></span>
       ${instanceButtons(view)}
     </div>
+    <div class="env-slot" data-env-job="${esc(view.instance.instance_id)}"></div>
   `;
+  paintEnvJob(row, view.instance.instance_id);
   return row;
+}
+
+/* ------------------------------------------------------------------ */
+/* 依赖安装进度                                                        */
+/* ------------------------------------------------------------------ */
+
+/** 引擎阶段的序号与总数，只用于把「同步依赖」这类文案变成 4/6。 */
+const PHASE_STEP: Record<string, number> = {
+  uv: 1,
+  python: 2,
+  resolve: 3,
+  sync: 4,
+  verify: 5,
+  done: 6,
+};
+const PHASE_TOTAL = 6;
+
+/**
+ * 一行进度。失败后保留原因，成功后整行消失。
+ *
+ * 为什么不做百分比进度条：uv 不提供「已装 N 个」的稳定接口，按行猜出来的数字
+ * 会是假的。这里只按阶段推进，细节交给后端报上来的包名。
+ */
+function envJobHtml(job: EnvJob): string {
+  if (job.error) {
+    return `
+      <div class="env-job env-job--fail" title="${esc(job.error)}">
+        <span class="env-job-title">安装依赖失败</span>
+        <span class="env-job-detail">${esc(job.error)}</span>
+      </div>`;
+  }
+  const step = job.phase === "starting" ? 0 : PHASE_STEP[job.phase] ?? 0;
+  const elapsed = Math.max(0, Math.round((Date.now() - job.startedAt) / 1000));
+  const counter = step > 0 ? `${step}/${PHASE_TOTAL} ` : "";
+  const detail = job.detail
+    ? `<span class="env-job-detail" title="${esc(job.detail)}">${esc(job.detail)}</span>`
+    : "";
+  const width = Math.round((step / PHASE_TOTAL) * 100);
+  return `
+    <div class="env-job">
+      <span class="env-job-spin" aria-hidden="true"></span>
+      <span class="env-job-title">安装依赖 · ${counter}${esc(job.title)}</span>
+      <span class="env-job-time">${elapsed}s</span>
+      ${detail}
+      <span class="env-job-bar" aria-hidden="true"><i style="width:${width}%"></i></span>
+    </div>`;
+}
+
+function paintEnvJob(root: ParentNode, instanceId: string): void {
+  const slot = Array.from(root.querySelectorAll<HTMLElement>("[data-env-job]")).find(
+    (node) => node.dataset.envJob === instanceId,
+  );
+  if (!slot) return;
+  const job = envJobOf(instanceId);
+  slot.innerHTML = job ? envJobHtml(job) : "";
+}
+
+/** 后端推来一条进度：只改这一行，不重绘整页。 */
+export function patchEnvJob(instanceId: string): void {
+  const slots = Array.from(document.querySelectorAll<HTMLElement>("[data-env-job]")).filter(
+    (node) => node.dataset.envJob === instanceId,
+  );
+  if (slots.length === 0) return;
+  const job = envJobOf(instanceId);
+  const html = job ? envJobHtml(job) : "";
+  for (const node of slots) node.innerHTML = html;
 }
 
 function phaseDot(view: InstanceRuntimeView): string {
@@ -505,13 +584,8 @@ async function startOne(instanceId: string): Promise<void> {
   // 依赖没装就点启动：先把这一步补上，而不是让后端报「环境未就绪」。
   if (view && !view.prepared) {
     toast(`${instanceId} 还没装依赖，先装依赖…`);
-    try {
-      await prepareInstanceEnv(instanceId, true);
-    } catch (error) {
-      toast(`安装依赖失败：${describeError(error)}`, "error");
-      await refreshModules();
-      return;
-    }
+    const ready = await prepareEnv(instanceId, true);
+    if (!ready) return;
   }
   try {
     toast(`正在启动 ${instanceId}…`);
@@ -635,7 +709,15 @@ HEAD　${esc(git?.head ?? "（不是 git 仓库或读取失败）")}
   });
 }
 
-async function prepareEnv(instanceId: string, allowOnline = true): Promise<void> {
+/**
+ * 装依赖。返回是否成功，供「启动前顺手补依赖」决定要不要继续。
+ *
+ * 进度由后端按阶段推事件，这里只管开始与结束两个端点：点下去先落一行
+ * 「准备开始」，避免前几秒看起来像没反应。
+ */
+async function prepareEnv(instanceId: string, allowOnline = true): Promise<boolean> {
+  beginEnvJob(instanceId);
+  patchEnvJob(instanceId);
   try {
     toast(
       allowOnline
@@ -643,11 +725,19 @@ async function prepareEnv(instanceId: string, allowOnline = true): Promise<void>
         : `正在安装依赖（离线，只用本机缓存）：${instanceId}…`,
     );
     const python = await prepareInstanceEnv(instanceId, allowOnline);
+    endEnvJob(instanceId);
     toast(`依赖装好了：${python}`, "ok");
+    return true;
   } catch (error) {
-    toast(`安装依赖失败：${describeError(error)}`, "error");
+    const message = describeError(error);
+    // 失败原因留在卡片上：toast 会自己消失，装依赖失败通常要看第二遍。
+    endEnvJob(instanceId, message);
+    toast(`安装依赖失败：${message}`, "error");
+    return false;
+  } finally {
+    patchEnvJob(instanceId);
+    await refreshModules();
   }
-  await refreshModules();
 }
 
 async function openAdmin(moduleId: string): Promise<void> {
@@ -740,6 +830,14 @@ function showInstanceDetail(instanceId: string): void {
     ["安装时间", i.installed_at],
     ["确认时间", i.confirmed_at],
     ["发布者指纹", i.publisher_fp ?? "—"],
+    [
+      "依赖快照",
+      view.env_pinned === null || view.env_pinned === undefined
+        ? "未准备"
+        : view.env_pinned
+          ? "已由签名包的 pinned 哈希锚定"
+          : "未锚定（包内没声明 snapshot_sha256，本次哈希由本地解析得出）",
+    ],
     ["zip sha256", i.zip_sha256 ?? "—"],
     ["数据目录", i.data_dir ?? "—"],
   ];

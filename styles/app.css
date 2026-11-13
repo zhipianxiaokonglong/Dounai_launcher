@@ -705,6 +705,102 @@ code,
   white-space: nowrap;
 }
 
+/* 依赖安装进度：贴在该实例行下方，只占一行 + 一条细进度条。
+   空的时候整块不占位（slot 里没有内容时不产生高度）。 */
+.env-slot:empty {
+  display: none;
+}
+
+.env-job {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  row-gap: 3px;
+  margin-top: 4px;
+  padding: 5px 7px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
+  background: var(--panel);
+  font-size: 10.5px;
+  position: relative;
+}
+
+.env-job--fail {
+  border-color: rgba(239, 68, 68, 0.35);
+  background: rgba(239, 68, 68, 0.06);
+}
+
+.env-job-title {
+  font-weight: 500;
+  color: var(--fg);
+}
+
+.env-job-time {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-3);
+  margin-left: auto;
+}
+
+.env-job-detail {
+  flex: 1 1 100%;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.env-job--fail .env-job-detail {
+  color: var(--danger-fg);
+  white-space: normal;
+  word-break: break-word;
+}
+
+/* 细进度条：底部 2px，按阶段推进 */
+.env-job-bar {
+  flex: 1 1 100%;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.env-job-bar i {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.25s ease;
+}
+
+/* 转圈：用 border 做，不引资源文件 */
+.env-job-spin {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 1.5px solid var(--line);
+  border-top-color: var(--accent);
+  animation: env-spin 0.8s linear infinite;
+  flex: none;
+}
+
+@keyframes env-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .env-job-spin {
+    animation: none;
+  }
+  .env-job-bar i {
+    transition: none;
+  }
+}
+
 .card-foot {
   display: flex;
   gap: 6px;

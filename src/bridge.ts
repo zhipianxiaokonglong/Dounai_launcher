@@ -532,6 +532,8 @@ export interface InstanceRuntimeView {
   disabled: boolean;
   /** 依赖环境是否已就绪；未就绪时界面先引导装依赖，不给「启动」。 */
   prepared: boolean;
+  /** 快照是否由签名包锚定；null 表示无记录（未准备或 shell）。 */
+  env_pinned: boolean | null;
   snapshot: InstanceSnapshot | null;
 }
 
@@ -662,17 +664,54 @@ export async function setKeepVersions(keepVersions: number): Promise<number> {
  * 调用方不必分支。事件名与 Rust 侧 `lifecycle-changed` 一致。
  */
 export function onLifecycleChanged(handler: () => void): () => void {
+  return listenEvent("lifecycle-changed", () => handler());
+}
+
+/* ------------------------------------------------------------------ */
+/* 依赖准备进度                                                        */
+/* ------------------------------------------------------------------ */
+
+export type EnvPhaseName = "uv" | "python" | "resolve" | "sync" | "verify" | "done";
+
+/** 引擎每一步上报的内容。字段与 Rust 侧 `EnvProgressEvent` 一一对应。 */
+export interface EnvProgressEvent {
+  instanceId: string;
+  phase: EnvPhaseName;
+  title: string;
+  /** 更细的一行：包名、哈希、路径。没有时为 null。 */
+  detail: string | null;
+  current: number | null;
+  total: number | null;
+}
+
+/** 订阅依赖准备进度。浏览器模式同样返回不做事的退订函数。 */
+export function onEnvProgress(handler: (event: EnvProgressEvent) => void): () => void {
+  return listenEvent<EnvProgressEvent>("instance-env-progress", (payload) => {
+    if (payload && typeof payload.instanceId === "string") handler(payload);
+  });
+}
+
+/**
+ * 事件订阅的唯一出口。
+ *
+ * Tauri 2 的 `listen` 是异步注册，取消可能早于注册完成，这里用一个标记挡住
+ * 迟到的注册，避免卸载后仍然收到回调。
+ */
+function listenEvent<T>(
+  name: string,
+  handler: (payload: T) => void,
+): () => void {
   const tauri = (globalThis as { __TAURI__?: { event?: { listen?: unknown } } }).__TAURI__;
   const listen = tauri?.event?.listen;
   if (typeof listen !== "function") return () => undefined;
   type UnlistenFn = () => void;
   const call = listen as (
     event: string,
-    cb: () => void,
+    cb: (event: { payload: unknown }) => void,
   ) => Promise<UnlistenFn>;
   let unlisten: UnlistenFn | null = null;
   let cancelled = false;
-  void call("lifecycle-changed", handler)
+  void call(name, (event) => handler(event.payload as T))
     .then((fn) => {
       if (cancelled) fn();
       else unlisten = fn;
