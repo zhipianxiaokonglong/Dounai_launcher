@@ -2,7 +2,7 @@
 //!
 //! 用法：
 //! ```text
-//! dounai-pack keygen --out-private priv.b64 --out-public pub.b64
+//! dounai-pack keygen --out-private priv.key --out-public pub.b64 [--key-id K1] [--meta k1.json]
 //! dounai-pack pack   --dir <源目录> --key <K1 私钥> --out <zip> [--key-id K1]
 //! dounai-pack verify --pubkey <公钥文件> --zip <zip>
 //! ```
@@ -53,11 +53,13 @@ fn print_usage() {
         "Dounai 模块发布包工具\n\
          \n\
          用法:\n\
-         \x20 dounai-pack keygen --out-private <路径> --out-public <路径>\n\
+         \x20 dounai-pack keygen --out-private <路径> --out-public <路径> [--key-id K1] [--meta <路径>]\n\
          \x20 dounai-pack pack   --dir <源目录> --key <K1 私钥> --out <zip> [--key-id K1]\n\
          \x20 dounai-pack verify --pubkey <公钥文件> --zip <zip>\n\
          \n\
          说明:\n\
+         \x20 keygen 拒绝覆盖已存在的文件。--meta 只写公钥、指纹与用途，不含私钥。\n\
+         \x20 K1 签模块包，K5 签 catalog，两把钥匙不得混用。\n\
          \x20 pack 输出 catalog 条目需要的 sha256、size 与 publisher_fp。\n\
          \x20 私钥不进仓库，也不要写进 CI 变量。"
     );
@@ -92,17 +94,81 @@ fn pubkey_fingerprint(pubkey_b64: &str) -> Result<String, ReleaseError> {
     Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
 }
 
+/// key_id 决定用途。K1 与 K5 分离是契约要求，自定义标识不会被当成官方钥匙。
+fn purpose_for(key_id: &str) -> &'static str {
+    match key_id {
+        "K1" => "module_signing",
+        "K5" => "catalog_signing",
+        _ => "custom",
+    }
+}
+
+/// 公钥登记文件。私钥只写进 --out-private，绝不进入这份 JSON。
+fn key_metadata(key_id: &str, pk: &str, fp: &str) -> Result<Value, ReleaseError> {
+    Ok(json!({
+        "key_id": key_id,
+        "purpose": purpose_for(key_id),
+        "algo": SUPPORTED_ALGO,
+        "pubkey": pk,
+        "fingerprint": fp,
+        "generated_at": dounai_launcher::release::utc_now()?,
+    }))
+}
+
 fn cmd_keygen(args: &[String]) -> Result<(), ReleaseError> {
     let priv_path = require(args, "--out-private")?;
     let pub_path = require(args, "--out-public")?;
+    let meta_path = flag(args, "--meta");
+    let key_id = flag(args, "--key-id").unwrap_or_else(|| "K1".to_string());
+    if key_id.trim().is_empty() {
+        return Err(ReleaseError::BadKey("key_id 不得为空".into()));
+    }
+
+    let mut targets = vec![priv_path.as_str(), pub_path.as_str()];
+    if let Some(path) = meta_path.as_deref() {
+        targets.push(path);
+    }
+    let mut unique = targets.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    if unique.len() != targets.len() {
+        return Err(ReleaseError::BadKey(
+            "私钥、公钥与元数据必须使用不同路径".into(),
+        ));
+    }
+    for path in &targets {
+        if Path::new(path).exists() {
+            return Err(ReleaseError::BadKey(format!(
+                "目标文件已存在，拒绝覆盖：{path}"
+            )));
+        }
+    }
+
     let (sk, pk) = generate_keypair()?;
+    let fp = pubkey_fingerprint(&pk)?;
+    let purpose = purpose_for(&key_id);
+
     std::fs::write(&priv_path, B64.encode(sk.to_bytes()))?;
     std::fs::write(&pub_path, &pk)?;
+    if let Some(path) = &meta_path {
+        let meta = key_metadata(&key_id, &pk, &fp)?;
+        std::fs::write(path, format!("{}\n", serde_json::to_string_pretty(&meta)?))?;
+    }
+
     println!("已生成密钥对");
-    println!("  私钥：{priv_path}（切勿提交或外传）");
-    println!("  公钥：{pub_path}");
-    println!("  公钥值：{pk}");
-    println!("  指纹：{}", pubkey_fingerprint(&pk)?);
+    println!("  key_id    = {key_id}");
+    println!("  purpose   = {purpose}");
+    println!("  algo      = {SUPPORTED_ALGO}");
+    println!("  私钥      = {priv_path}（离线保管，不入库）");
+    println!("  公钥      = {pub_path}");
+    println!("  公钥值    = {pk}");
+    println!("  指纹      = {fp}");
+    if let Some(path) = &meta_path {
+        println!("  登记文件  = {path}（只含公钥，可入库）");
+    }
+    if purpose == "custom" {
+        eprintln!("注意：自定义 key_id 不会被内置信任表识别，签出的包按 B 类处理。");
+    }
     Ok(())
 }
 
@@ -199,5 +265,42 @@ mod tests {
             .collect();
         assert_eq!(flag(&args, "--dir").as_deref(), Some("src"));
         assert_eq!(flag(&args, "--key-id"), None);
+    }
+
+    #[test]
+    fn key_id_selects_the_purpose() {
+        assert_eq!(purpose_for("K1"), "module_signing");
+        assert_eq!(purpose_for("K5"), "catalog_signing");
+        assert_eq!(purpose_for("dev"), "custom");
+    }
+
+    #[test]
+    fn metadata_never_contains_private_material() {
+        let meta = key_metadata("K1", "AAAA", "sha256:abcd").unwrap();
+        let text = serde_json::to_string(&meta).unwrap();
+        assert!(meta.get("pubkey").is_some());
+        assert!(meta.get("fingerprint").is_some());
+        for banned in ["private", "priv", "seed", "secret", "signing_key"] {
+            assert!(meta.get(banned).is_none(), "登记文件泄漏了 {banned}");
+            assert!(!text.contains(banned), "登记文件泄漏了 {banned}");
+        }
+    }
+
+    #[test]
+    fn keygen_refuses_to_overwrite_an_existing_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let priv_path = dir.path().join("k1.key");
+        let pub_path = dir.path().join("k1.pub.b64");
+        std::fs::write(&priv_path, "existing").unwrap();
+        let args = vec![
+            "--out-private".to_string(),
+            priv_path.to_string_lossy().to_string(),
+            "--out-public".to_string(),
+            pub_path.to_string_lossy().to_string(),
+        ];
+        let err = cmd_keygen(&args).unwrap_err();
+        assert!(err.to_string().contains("拒绝覆盖"));
+        assert_eq!(std::fs::read_to_string(&priv_path).unwrap(), "existing");
+        assert!(!pub_path.exists());
     }
 }
