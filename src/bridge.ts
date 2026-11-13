@@ -576,10 +576,35 @@ export interface InstanceLogs {
   files: number;
   truncated: boolean;
   note: string;
+  /** 本次读的是哪一份；null 表示跨文件的最新尾部。 */
+  file: string | null;
+  /** 子进程输出是否落盘。 */
+  child_output: boolean;
+  /** 日志目录绝对路径。 */
+  dir: string;
 }
 
-export async function readInstanceLogs(instanceId: string): Promise<InstanceLogs> {
-  return call<InstanceLogs>("read_instance_logs", { instanceId });
+export interface LogFileInfo {
+  name: string;
+  size: number;
+  modified_at: string;
+  current: boolean;
+}
+
+export async function readInstanceLogs(
+  instanceId: string,
+  file: string | null = null,
+): Promise<InstanceLogs> {
+  return call<InstanceLogs>("read_instance_logs", { instanceId, file });
+}
+
+export async function listInstanceLogs(instanceId: string): Promise<LogFileInfo[]> {
+  return call<LogFileInfo[]>("list_instance_logs", { instanceId });
+}
+
+/** 在文件管理器里打开日志目录；返回打开的路径。 */
+export async function openInstanceLogsDir(instanceId: string): Promise<string> {
+  return call<string>("open_instance_logs_dir", { instanceId });
 }
 
 /* ------------------------------------------------------------------ */
@@ -628,6 +653,8 @@ export interface SettingsSnapshot {
   k5_fingerprint: string;
   /** 启动时补写/校正 install.json 的说明；null 表示本来就一致。 */
   install_note: string | null;
+  /** 新拉起的实例是否捕获子进程 stdout/stderr。 */
+  child_output: boolean;
 }
 
 export async function settingsSnapshot(): Promise<SettingsSnapshot> {
@@ -658,6 +685,11 @@ export async function revokeTrustedKey(fingerprint: string): Promise<KeyInfo> {
 
 export async function setKeepVersions(keepVersions: number): Promise<number> {
   return call<number>("set_keep_versions", { keepVersions });
+}
+
+/** 开关子进程输出捕获；只影响之后拉起的实例。 */
+export async function setChildOutput(enabled: boolean): Promise<boolean> {
+  return call<boolean>("set_child_output", { enabled });
 }
 
 /* ------------------------------------------------------------------ */

@@ -440,6 +440,12 @@ code,
   background: rgba(239, 68, 68, 0.1);
 }
 
+/* 中性态：设置页与日志页都用它表示「关」。 */
+.chip--stop {
+  color: var(--fg-3);
+  border-color: var(--line-2);
+}
+
 .chip--active {
   color: var(--accent-fg);
   border-color: rgba(76, 141, 255, 0.45);
@@ -1082,79 +1088,204 @@ select.input:focus-visible {
 
 /* ---------------- 日志 ---------------- */
 
-.two {
-  display: grid;
-  grid-template-columns: 1.05fr 0.95fr;
-  gap: 16px;
-  height: 100%;
-  min-height: 0;
-}
-
-.logbox {
-  border: 1px solid var(--line);
-  border-radius: var(--r-m);
+.logpage {
   display: flex;
   flex-direction: column;
-  overflow: hidden;
   height: 100%;
   min-height: 0;
-  background: var(--panel);
 }
 
-.loghead {
+.logbar {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 8px 10px;
+  gap: 8px;
+  padding: 10px 16px;
   border-bottom: 1px solid var(--line);
   background: var(--panel);
   flex: 0 0 auto;
+  flex-wrap: wrap;
 }
 
-.logfile {
-  font-family: var(--mono);
-  font-size: 10px;
+.logfield {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
   color: var(--fg-3);
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  padding: 2px 6px;
+  white-space: nowrap;
 }
 
-.logfile.is-now {
-  color: var(--accent-fg);
-  border-color: rgba(76, 141, 255, 0.4);
-  background: var(--accent-soft);
+.logfield select {
+  max-width: 250px;
 }
 
-.logview {
-  margin: 0;
-  padding: 10px 12px;
+#log-file {
+  max-width: 290px;
+}
+
+.logsearch {
+  width: 210px;
+}
+
+.logmeta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-2);
   font-family: var(--mono);
-  font-size: 11px;
-  line-height: 1.85;
-  color: var(--log-fg);
-  overflow: auto;
-  flex: 1;
-  min-height: 0;
-  background: var(--code);
-  white-space: pre-wrap;
-  word-break: break-word;
+  font-size: 10.5px;
+  color: var(--fg-3);
+  flex: 0 0 auto;
+  min-height: 30px;
+  overflow: hidden;
 }
 
-.logview .ts {
+.logmeta-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.logmeta .sep {
   color: var(--stop-weak);
 }
 
-.logview .ok {
-  color: var(--run-fg);
+.logpane {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: var(--code);
 }
 
-.logview .wn {
+.loglines {
+  padding: 6px 0 12px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+/* 每行独立成网格：行号、时间、来源三段定宽，消息列吃满剩余宽度。
+   用整表而不是 <pre>，换行时各列才能对齐。 */
+.logline {
+  display: grid;
+  grid-template-columns: 52px 88px 96px minmax(0, 1fr);
+  gap: 10px;
+  padding: 1px 16px 1px 0;
+  line-height: 1.8;
+  border-left: 2px solid transparent;
+}
+
+.logline:hover {
+  background: var(--panel-2);
+}
+
+.logline--error {
+  border-left-color: var(--danger);
+}
+
+.logline--warn {
+  border-left-color: var(--warn);
+}
+
+.logline--ok {
+  border-left-color: var(--run);
+}
+
+.logline .ln {
+  color: var(--stop-weak);
+  text-align: right;
+  user-select: none;
+}
+
+.logline .lt {
+  color: var(--stop-weak);
+  white-space: nowrap;
+}
+
+.logline .ls {
+  color: var(--accent-fg);
+  opacity: 0.75;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.logline .lm {
+  color: var(--log-fg);
+  white-space: pre;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.loglines.is-wrap .lm {
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow: visible;
+}
+
+.logline--error .lm {
+  color: var(--danger-fg);
+}
+
+.logline--warn .lm {
   color: var(--warn-fg);
 }
 
-.logview .er {
-  color: var(--danger-fg);
+.chip--act {
+  border: 1px solid var(--line-2);
+  background: transparent;
+  cursor: pointer;
+  font-family: var(--mono);
+  padding: 3px 7px;
+}
+
+.chip--act:hover {
+  border-color: var(--accent);
+  color: var(--accent-fg);
+}
+
+.logempty-act {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.loglines mark {
+  background: rgba(245, 158, 11, 0.28);
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 1px;
+}
+
+.logempty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 44px 24px;
+  text-align: center;
+  color: var(--fg-3);
+  font-family: var(--sans);
+}
+
+.logempty b {
+  color: var(--fg-2);
+  font: 600 13px var(--sans);
+}
+
+.logempty p {
+  margin: 0;
+  font-size: 12px;
+  max-width: 620px;
+  line-height: 1.7;
+}
+
+.logempty code {
+  color: var(--fg-2);
 }
 
 /* ---------------- 设置 ---------------- */
@@ -1649,9 +1780,13 @@ select.input:focus-visible {
     width: 76px;
   }
 
-  .two {
-    grid-template-columns: 1fr;
-    grid-template-rows: auto auto;
+  .logline {
+    grid-template-columns: 40px 74px 76px minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  .logsearch {
+    width: 150px;
   }
 }
 

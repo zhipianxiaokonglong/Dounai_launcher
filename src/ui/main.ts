@@ -21,7 +21,7 @@ import {
 } from "./store.js";
 import { renderEnv } from "./views/env.js";
 import { renderImport } from "./views/import.js";
-import { focusInstance, renderLogs } from "./views/logs.js";
+import { disposeLogs, focusInstance, renderLogs } from "./views/logs.js";
 import { patchEnvJob, refreshModules, renderModules } from "./views/modules.js";
 import { renderSettings } from "./views/settings.js";
 
@@ -42,6 +42,8 @@ const slots = {
 
 async function renderView(view: ViewId, arg?: string): Promise<void> {
   current = view;
+  // 日志页的自动刷新要随切页停掉，否则后台一直在读磁盘。
+  if (view !== "logs") disposeLogs();
   slots.body.dataset.view = view;
   // 设置页会把容器切成无内边距的两栏，切页时必须还原。
   slots.body.className = "pbody";

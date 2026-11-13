@@ -11,6 +11,7 @@ import {
   refreshCatalog,
   revokeTrustedKey,
   confirmTrustedKey,
+  setChildOutput,
   setKeepVersions,
   type CatalogResponse,
 } from "../../bridge.js";
@@ -284,8 +285,12 @@ function diagnosticsHtml(): string {
     ) +
     row(
       "子进程输出",
-      "默认关",
-      `<p class="cap" style="margin:0">模块 stdout/stderr 默认丢弃——输出里可能有你的对话内容。需要排障时用环境变量 <code>DOUNAI_LOG_CHILD_OUTPUT=1</code> 启动启动器。</p>`
+      store.settings?.child_output ? "已开启" : "默认关",
+      `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <span class="chip ${store.settings?.child_output ? "chip--run" : "chip--stop"}">${store.settings?.child_output ? "会写进日志" : "丢弃"}</span>
+        <button class="btn btn--sm" type="button" data-act="child-output">${store.settings?.child_output ? "关闭捕获" : "开启捕获"}</button>
+      </div>
+      <p class="cap" style="margin:6px 0 0">模块 stdout/stderr 里可能有你的对话内容，默认丢弃。开启后只影响之后拉起的实例，已在跑的要重启才会接管；日志页也能直接切换。</p>`
     ) +
     row(
       "本地模块登记",
@@ -429,6 +434,18 @@ function bindSection(form: Element): void {
 
   form.querySelector('[data-act="dev-mode"]')?.addEventListener("click", () => {
     void openDevMode();
+  });
+
+  form.querySelector('[data-act="child-output"]')?.addEventListener("click", () => {
+    const next = !(store.settings?.child_output ?? false);
+    void setChildOutput(next)
+      .then(async () => {
+        await refreshSettings();
+        toast(next ? "已开启子进程输出捕获，重启实例后生效" : "已关闭子进程输出捕获", "ok");
+        const body = document.getElementById("pbody");
+        if (body) renderBody(body);
+      })
+      .catch((error: unknown) => toast(`切换失败：${describeError(error)}`, "error"));
   });
 
   form.querySelector('[data-act="goto-import"]')?.addEventListener("click", () => {
