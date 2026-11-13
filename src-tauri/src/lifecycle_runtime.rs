@@ -2,6 +2,7 @@
 //! 命令面只读内存快照，不在调用线程发 HTTP。
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::{BufRead, Read};
 use std::path::PathBuf;
 use std::process::Child;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -16,6 +17,7 @@ use serde::Serialize;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter};
 
+use crate::diag_log::{self, SharedLog};
 use crate::process::win::{SpawnSpec, WinProcess};
 
 pub const EVENT_NAME: &str = "lifecycle-changed";
@@ -43,6 +45,8 @@ pub struct StartRequest {
     pub health_url: Option<String>,
     pub contract_url: Option<String>,
     pub timeout_ms: u64,
+    /// 实例日志目录；为 None 时不落盘。
+    pub log_dir: Option<PathBuf>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -90,6 +94,8 @@ pub struct Supervisor {
     processes: Mutex<BTreeMap<String, WinProcess>>,
     roles_by_instance: Mutex<BTreeMap<String, Role>>,
     external: Mutex<BTreeSet<String>>,
+    /// 每实例一份日志句柄，watcher 与探测线程共用。
+    logs: Mutex<BTreeMap<String, SharedLog>>,
     /// 包住 begin_start 到进程登记，状态机本身不代替临界区。
     start_lock: Mutex<()>,
     roles: RolesDoc,
@@ -104,6 +110,7 @@ impl Supervisor {
             processes: Mutex::new(BTreeMap::new()),
             roles_by_instance: Mutex::new(BTreeMap::new()),
             external: Mutex::new(BTreeSet::new()),
+            logs: Mutex::new(BTreeMap::new()),
             start_lock: Mutex::new(()),
             roles,
             app,
@@ -169,6 +176,20 @@ impl Supervisor {
     pub fn start(&self, request: StartRequest) -> Result<Snapshot, String> {
         let _critical = lock(&self.start_lock);
         let id = request.instance_id.clone();
+        let log = self.open_log(&id, request.log_dir.as_deref());
+        if let Some(log) = &log {
+            diag_log::write(
+                log,
+                "lifecycle",
+                &format!(
+                    "start role={:?} program={} health={}",
+                    request.role,
+                    request.spec.program.display(),
+                    request.health_url.as_deref().unwrap_or("-")
+                ),
+            );
+        }
+
         let ticket = {
             let mut state = lock(&self.lifecycle);
             let ticket = state.allocate_ticket();
@@ -176,9 +197,12 @@ impl Supervisor {
             ticket
         };
 
-        let process = match WinProcess::spawn(&request.spec) {
+        let mut process = match WinProcess::spawn(&request.spec) {
             Ok(process) => process,
             Err(error) => {
+                if let Some(log) = &log {
+                    diag_log::write(log, "lifecycle", &format!("spawn failed: {error}"));
+                }
                 let mut state = lock(&self.lifecycle);
                 let _ = state.mark_failed(&id, ticket, &error.to_string());
                 emit_snapshot(&self.app, &id, state.get(&id));
@@ -187,16 +211,26 @@ impl Supervisor {
         };
 
         let pid = process.pid;
+        if let Some(log) = &log {
+            diag_log::write(log, "lifecycle", &format!("spawned pid={pid}"));
+            if let Some((stdout, stderr)) = process.take_output() {
+                spawn_pump(log.clone(), "stdout", stdout);
+                spawn_pump(log.clone(), "stderr", stderr);
+            }
+        }
         {
             let mut state = lock(&self.lifecycle);
             state
                 .attach_process(&id, ticket, pid)
                 .map_err(|e| e.to_string())?;
         }
-        self.spawn_watcher(&id, ticket, process.watcher_slot());
-        self.spawn_probe(&id, ticket, &request);
+        self.spawn_watcher(&id, ticket, process.watcher_slot(), log.clone());
+        self.spawn_probe(&id, ticket, &request, log.clone());
         lock(&self.processes).insert(id.clone(), process);
         lock(&self.roles_by_instance).insert(id.clone(), request.role);
+        if let Some(log) = log {
+            lock(&self.logs).insert(id.clone(), log);
+        }
         // 真正接管成功，外部标记失效。
         self.clear_external(&id);
 
@@ -207,6 +241,22 @@ impl Supervisor {
             snap
         };
         snapshot.ok_or_else(|| "状态机缺少刚登记的实例".into())
+    }
+
+    /// 打开（或复用）实例日志。目录不可写时退化为不落盘，不阻断启动。
+    fn open_log(&self, id: &str, dir: Option<&std::path::Path>) -> Option<SharedLog> {
+        if let Some(existing) = lock(&self.logs).get(id) {
+            return Some(existing.clone());
+        }
+        let dir = dir?;
+        diag_log::open_shared(dir).ok()
+    }
+
+    fn log_line(&self, id: &str, scope: &str, message: &str) {
+        let log = lock(&self.logs).get(id).cloned();
+        if let Some(log) = log {
+            diag_log::write(&log, scope, message);
+        }
     }
 
     pub fn stop(&self, id: &str) -> Result<Snapshot, String> {
@@ -220,6 +270,7 @@ impl Supervisor {
             state.begin_stop(id).map_err(|e| e.to_string())?;
             state.get(id).map(|s| s.ticket).unwrap_or(0)
         };
+        self.log_line(id, "lifecycle", "stop requested");
 
         let outcome = {
             let processes = lock(&self.processes);
@@ -229,6 +280,10 @@ impl Supervisor {
             }
         };
         lock(&self.processes).remove(id);
+        match &outcome {
+            Ok(()) => self.log_line(id, "lifecycle", "stopped"),
+            Err(error) => self.log_line(id, "lifecycle", &format!("stop failed: {error}")),
+        }
 
         let snapshot = {
             let mut state = lock(&self.lifecycle);
@@ -276,7 +331,13 @@ impl Supervisor {
         ids.iter().filter_map(|id| self.stop(id).ok()).collect()
     }
 
-    fn spawn_watcher(&self, id: &str, ticket: u64, slot: Arc<Mutex<Option<Child>>>) {
+    fn spawn_watcher(
+        &self,
+        id: &str,
+        ticket: u64,
+        slot: Arc<Mutex<Option<Child>>>,
+        log: Option<SharedLog>,
+    ) {
         let state = self.lifecycle.clone();
         let app = self.app.clone();
         let id = id.to_string();
@@ -299,6 +360,14 @@ impl Supervisor {
                 }
             };
             if let Some(code) = outcome {
+                if let Some(log) = &log {
+                    let text = match code {
+                        Some(code) => format!("exited code={code}"),
+                        // 系统强杀拿不到退出码，不能写成 0 冒充正常退出。
+                        None => "exited without an exit code".to_string(),
+                    };
+                    diag_log::write(log, "lifecycle", &text);
+                }
                 let snap = {
                     let mut guard = lock(&state);
                     guard.mark_exited_for(&id, ticket, code);
@@ -311,7 +380,7 @@ impl Supervisor {
         });
     }
 
-    fn spawn_probe(&self, id: &str, ticket: u64, request: &StartRequest) {
+    fn spawn_probe(&self, id: &str, ticket: u64, request: &StartRequest, log: Option<SharedLog>) {
         let state = self.lifecycle.clone();
         let app = self.app.clone();
         let id = id.to_string();
@@ -336,6 +405,14 @@ impl Supervisor {
                 _ => ProbeState::Healthy,
             };
 
+            if let Some(log) = &log {
+                diag_log::write(
+                    log,
+                    "probe",
+                    &format!("health={health:?} contract={contract:?}"),
+                );
+            }
+
             let snap = {
                 let mut guard = lock(&state);
                 if guard.mark_probe(&id, ticket, health, contract).is_ok() {
@@ -346,6 +423,26 @@ impl Supervisor {
             emit_snapshot(&app, &id, snap.as_ref());
         });
     }
+}
+
+/// 把子进程输出按行泵进日志。管道关闭即线程结束，不另设停止信号。
+fn spawn_pump(log: SharedLog, scope: &'static str, reader: impl Read + Send + 'static) {
+    std::thread::spawn(move || {
+        let mut reader = std::io::BufReader::new(reader);
+        let mut buffer = Vec::new();
+        loop {
+            buffer.clear();
+            // 用字节读到换行再解码：子进程可能输出非 UTF-8，不能让解码失败终止日志。
+            match reader.read_until(b'\n', &mut buffer) {
+                Ok(0) => break,
+                Ok(_) => {
+                    let text = String::from_utf8_lossy(&buffer);
+                    diag_log::write(&log, scope, text.trim_end_matches(['\r', '\n']));
+                }
+                Err(_) => break,
+            }
+        }
+    });
 }
 
 fn probe_health(client: &reqwest::blocking::Client, url: &str, deadline: Instant) -> ProbeState {

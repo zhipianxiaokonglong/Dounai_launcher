@@ -6,6 +6,7 @@
 
 pub mod catalog;
 pub mod commands_v2;
+pub mod diag_log;
 pub mod download;
 pub mod env_probe;
 pub mod http_client;

@@ -6,7 +6,7 @@ use std::ffi::c_void;
 use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -46,6 +46,8 @@ pub struct SpawnSpec {
     pub args: Vec<String>,
     pub working_dir: PathBuf,
     pub env: BTreeMap<String, String>,
+    /// 打开时接管子进程的 stdout/stderr 管道；默认丢弃，与 M3 之前一致。
+    pub capture_output: bool,
 }
 
 /// job 存成 usize，让整个结构可以跨 Tauri 的命令线程传递。
@@ -53,6 +55,8 @@ pub struct WinProcess {
     job: usize,
     pub pid: u32,
     child: Arc<Mutex<Option<Child>>>,
+    /// 只有在 `SpawnSpec::capture_output` 打开时才存在，由调用方取走接管。
+    output: Option<(ChildStdout, ChildStderr)>,
 }
 
 impl WinProcess {
@@ -87,8 +91,16 @@ impl WinProcess {
             .args(&spec.args)
             .current_dir(&spec.working_dir)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(if spec.capture_output {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
+            .stderr(if spec.capture_output {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .creation_flags(CREATE_NO_WINDOW);
         for (key, value) in &spec.env {
             command.env(key, value);
@@ -111,11 +123,26 @@ impl WinProcess {
         }
 
         let pid = child.id();
+        let output = match (child.stdout.take(), child.stderr.take()) {
+            (Some(out), Some(err)) => Some((out, err)),
+            // 只有一个管道拿到时把另一个放回，不让描述符在半路丢失。
+            (out, err) => {
+                child.stdout = out;
+                child.stderr = err;
+                None
+            }
+        };
         Ok(Self {
             job: job as usize,
             pid,
             child: Arc::new(Mutex::new(Some(child))),
+            output,
         })
+    }
+
+    /// 取走输出管道，交给日志泵线程；只能取一次。
+    pub fn take_output(&mut self) -> Option<(ChildStdout, ChildStderr)> {
+        self.output.take()
     }
 
     /// watcher 独占这份 Child，用 try_wait 轮询，退出即把槽清空。
@@ -175,6 +202,7 @@ mod tests {
             args: Vec::new(),
             working_dir: std::env::current_dir().unwrap(),
             env: BTreeMap::new(),
+            capture_output: false,
         }
     }
 

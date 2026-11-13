@@ -4,10 +4,10 @@
 //! `launcher-core` 的 v2 状态文件（installed/trust/retention），进程表
 //! 由 `lifecycle_runtime::Supervisor` 独立持有。运行态不落盘。
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use launcher_core::m2::catalog::CatalogDocument;
 use launcher_core::m2::installed::{InstalledState, Instance};
@@ -63,6 +63,8 @@ pub struct AppStateV2 {
     disabled: Mutex<BTreeSet<String>>,
     pub dev_mode: AtomicBool,
     k5_pubkey_b64: Mutex<String>,
+    /// 每实例一把互斥锁：依赖准备、卸载与清理共用，避免 `.staging` 并发互删。
+    instance_locks: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
 }
 
 impl AppStateV2 {
@@ -96,7 +98,19 @@ impl AppStateV2 {
             disabled: Mutex::new(BTreeSet::new()),
             dev_mode: AtomicBool::new(false),
             k5_pubkey_b64: Mutex::new(BUILTIN_K5_PUBKEY_B64.to_string()),
+            instance_locks: Mutex::new(BTreeMap::new()),
         })
+    }
+
+    /// 取实例锁槽。同一实例永远拿到同一个 `Arc`，不同实例互不阻塞。
+    ///
+    /// 调用方必须自己持有 guard：`let slot = state.instance_slot(id); let _held = slot.lock()…`。
+    /// 不做「返回 guard」的包装，是因为 guard 的生命周期绑在局部 `Arc` 上，返回即借用错误。
+    pub fn instance_slot(&self, instance_id: &str) -> Arc<Mutex<()>> {
+        let mut map = lock(&self.instance_locks);
+        map.entry(instance_id.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 
     pub fn installed_path(&self) -> PathBuf {
@@ -357,6 +371,24 @@ mod tests {
         assert!(state.retention_path().exists());
         let reopened = AppStateV2::new(dir.path().join("app"), data).unwrap();
         assert!(reopened.with_installed(|s| s.instances.is_empty()));
+    }
+
+    #[test]
+    fn instance_slots_are_shared_per_instance_and_independent_across() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppStateV2::new(dir.path().join("app"), dir.path().join("data")).unwrap();
+        let first = state.instance_slot("a");
+        let second = state.instance_slot("a");
+        let other = state.instance_slot("b");
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(!Arc::ptr_eq(&first, &other));
+
+        let held = first.lock().unwrap();
+        // 同实例第二次进入必须排队；不同实例不受影响。
+        assert!(second.try_lock().is_err());
+        assert!(other.try_lock().is_ok());
+        drop(held);
+        assert!(second.try_lock().is_ok());
     }
 
     #[test]

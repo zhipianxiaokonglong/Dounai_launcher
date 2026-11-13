@@ -9,12 +9,16 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
 
-use launcher_core::lifecycle::{Phase, ProbeState, RolesDoc, Snapshot};
+use launcher_core::lifecycle::{
+    activation_steps, rollback_steps, ActivationStep, Phase, ProbeState, RecoveryStep, RolesDoc,
+    Snapshot,
+};
 use launcher_core::m2::adapters::RemoteCatalogAdapter;
 use launcher_core::m2::catalog::{select_catalog, CatalogState};
 use launcher_core::m2::installed::Instance;
@@ -182,6 +186,10 @@ pub struct DevModeInfo {
 pub struct InstanceLogs {
     pub instance_id: String,
     pub lines: Vec<String>,
+    /// 保留窗口内的日志文件数。
+    pub files: usize,
+    /// 是否截掉了更早的内容。
+    pub truncated: bool,
     pub note: String,
 }
 
@@ -563,18 +571,162 @@ pub fn uninstall_module(
     }
     let dir = state.module_dir(&instance);
     let removable = instance.source_kind == InstanceSourceKind::Zip;
+    // 与 prepare 互斥：正在写 venv 时不允许删目录。
+    let slot = state.instance_slot(&instance.instance_id);
+    let _exclusive = slot.lock().unwrap_or_else(|e| e.into_inner());
     state.remove_instance(&instance.instance_id)?;
-    if request.remove_files && removable && dir.exists() {
-        std::fs::remove_dir_all(&dir)
-            .map_err(|e| format!("删除实例包目录失败（{}）：{e}", dir.display()))?;
+    if request.remove_files && removable {
+        let base = state.paths.instance_dir_keyed(&instance.instance_id);
+        // data/ 是用户数据，按 never_auto_delete 契约保留；包、venv 与日志一起清。
+        let mut targets = vec![dir];
+        for child in ["venvs", "logs"] {
+            targets.push(base.join(child));
+        }
+        for path in targets {
+            if !path.exists() {
+                continue;
+            }
+            std::fs::remove_dir_all(&path)
+                .map_err(|e| format!("删除 {} 失败：{e}", path.display()))?;
+        }
     }
     Ok(())
 }
 
+/// active 切换的探测预算：比单次 health 超时宽裕，仍不足以让界面看起来卡死。
+const ACTIVATION_PROBE_TIMEOUT: Duration = Duration::from_secs(8);
+const ACTIVATION_POLL: Duration = Duration::from_millis(50);
+
+/// 等待后台探测收敛到可判定状态。
+///
+/// `need_contract` 为真时要求契约也通过；角色没有 health 端点时探测线程会直接
+/// 置 Healthy，所以这里不需要知道角色细节。
+fn wait_for_activation(
+    supervisor: &Supervisor,
+    instance_id: &str,
+    need_contract: bool,
+) -> Result<(), String> {
+    let deadline = Instant::now() + ACTIVATION_PROBE_TIMEOUT;
+    loop {
+        match supervisor.snapshot().get(instance_id).cloned() {
+            None => return Err("启动后状态机里没有该实例".into()),
+            Some(snap) => {
+                if snap.phase == Phase::Failed {
+                    return Err(match (&snap.last_error, snap.exit_code) {
+                        (Some(error), _) => format!("实例启动失败：{error}"),
+                        (None, Some(code)) => format!("实例启动后退出，退出码 {code}"),
+                        _ => "实例启动失败".into(),
+                    });
+                }
+                if snap.health == ProbeState::Unhealthy {
+                    return Err("健康检查未通过".into());
+                }
+                if snap.contract == ProbeState::Unhealthy {
+                    return Err("契约探测未通过，模块与当前契约不兼容".into());
+                }
+                let healthy = snap.health == ProbeState::Healthy
+                    && (!need_contract || snap.contract == ProbeState::Healthy);
+                if healthy {
+                    return Ok(());
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "等待探测结果超时（{} 秒）",
+                ACTIVATION_PROBE_TIMEOUT.as_secs()
+            ));
+        }
+        std::thread::sleep(ACTIVATION_POLL);
+    }
+}
+
+fn activation_step_label(step: ActivationStep) -> &'static str {
+    match step {
+        ActivationStep::StopPrevious => "停止上一个实例",
+        ActivationStep::StartNextOnCanonicalPort => "在规范端口启动目标实例",
+        ActivationStep::ProbeHealth => "健康检查",
+        ActivationStep::ProbeContract => "契约探测",
+        ActivationStep::CommitActive => "提交 active 槽",
+        ActivationStep::Cleanup => "清理",
+    }
+}
+
+/// 按 core 给出的恢复步骤执行，返回可读的处置说明。
+///
+/// 只尽力而为：回滚本身失败不能让原始错误消失，所以每步都记在说明里。
+fn rollback_activation(
+    state: &AppStateV2,
+    supervisor: &Supervisor,
+    previous: Option<&str>,
+    next: &str,
+    failed: ActivationStep,
+) -> Vec<String> {
+    let mut notes = Vec::new();
+    for step in rollback_steps(previous, failed) {
+        match step {
+            RecoveryStep::StopFailedCandidate => {
+                if supervisor.running().contains(next) {
+                    match supervisor.stop(next) {
+                        Ok(_) => notes.push(format!("已停止未通过探测的 {next}")),
+                        Err(error) => notes.push(format!("停止 {next} 失败：{error}")),
+                    }
+                }
+            }
+            RecoveryStep::RestorePrevious => {
+                if let Some(prev) = previous.filter(|p| *p != next) {
+                    if !supervisor.running().contains(prev) {
+                        match state.instance(prev) {
+                            Some(prev_instance) => {
+                                let port = supervisor.roles().canonical_port(prev_instance.role);
+                                match start_instance(state, supervisor, &prev_instance, port) {
+                                    Ok(_) => notes.push(format!("已重新拉起上一个实例 {prev}")),
+                                    Err(error) => {
+                                        notes.push(format!("重新拉起 {prev} 失败：{error}"))
+                                    }
+                                }
+                            }
+                            None => {
+                                notes.push(format!("上一个实例 {prev} 已不在实例表里，无法恢复"))
+                            }
+                        }
+                    }
+                }
+            }
+            RecoveryStep::RestoreActiveSlot => {
+                // 提交前失败时槽位本来就没动；提交后失败由 mutate_installed 自己回滚内存值。
+                notes.push("active 槽位保持原值".to_string());
+            }
+            RecoveryStep::ReportFailure => {}
+        }
+    }
+    notes
+}
+
+/// 同一个实例且已在跑：只重新探测，不动槽位也不重启。
+/// 同一个实例但没在跑：按「没有上一个」处理，否则事务会退化成空转。
+fn activation_plan(
+    previous: Option<&str>,
+    next: &str,
+    target_running: bool,
+) -> Vec<ActivationStep> {
+    let baseline = if previous == Some(next) && !target_running {
+        None
+    } else {
+        previous
+    };
+    activation_steps(baseline, next)
+}
+
+/// 切换 active：停旧、起新、过健康与契约、提交槽位，失败按计划回滚。
+///
+/// v1 只改槽位不碰进程，切完 active 指向的实例还是旧的。这里把 core 里已有的
+/// `activation_steps` / `rollback_steps` 真正执行掉。
 #[tauri::command]
 pub fn switch_active(
     instance_id: String,
     state: State<'_, AppStateV2>,
+    supervisor: State<'_, Supervisor>,
 ) -> Result<Vec<String>, String> {
     let instance = state
         .instance(&instance_id)
@@ -582,14 +734,94 @@ pub fn switch_active(
     if instance.role == Role::Auxiliary {
         return Err("auxiliary 角色不设 active 槽".into());
     }
-    let path = state.installed_path();
-    // switch_active 内部已做一次原子写；外层 mutate 再写一次同样的最终态，
-    // 保证即使将来 core 改了保存时机，内存与磁盘也不会分叉。
-    state.mutate_installed(|s| {
-        s.switch_active(&path, instance.role, &instance_id, true)
-            .map(|plan| vec![plan.role, plan.next])
-            .map_err(|e| e.to_string())
-    })
+    let next = instance.instance_id.clone();
+
+    // 目标服务若是外部拉起的，重启与回滚都做不到，契约也验不了，直接拒绝。
+    if supervisor.is_external(&next) {
+        return Err(format!(
+            "目标实例 {next} 的服务由外部进程提供，启动器无法验证契约一致性，也无法在失败时回滚；请先手动关闭该服务再切换"
+        ));
+    }
+
+    // 同角色当前的 active；指向已卸载实例时等同于没有上一个。
+    let previous = state.with_installed(|st| {
+        st.active
+            .values()
+            .find(|id| {
+                st.instances
+                    .get(*id)
+                    .map(|i| i.role == instance.role)
+                    .unwrap_or(false)
+            })
+            .cloned()
+    });
+
+    // 同一个实例且已在跑只重新探测；同一个实例没在跑则按「没有上一个」起一次。
+    let target_running = supervisor.running().contains(&next);
+    let steps = activation_plan(previous.as_deref(), &next, target_running);
+
+    let mut failure: Option<(ActivationStep, String)> = None;
+    for step in steps {
+        let outcome = match step {
+            ActivationStep::StopPrevious => match previous.as_deref() {
+                None => Ok(()),
+                Some(prev) if supervisor.running().contains(prev) => supervisor
+                    .stop(prev)
+                    .map(|_| ())
+                    .map_err(|error| format!("停止 {prev} 失败：{error}")),
+                // 上一个已在运行态之外（崩溃后未清理、或本来就停着）不需要动作。
+                Some(_) => Ok(()),
+            },
+            ActivationStep::StartNextOnCanonicalPort => {
+                if supervisor.running().contains(&next) {
+                    Ok(())
+                } else {
+                    let port = supervisor.roles().canonical_port(instance.role);
+                    match start_instance(&state, &supervisor, &instance, port) {
+                        Ok(StartOutcome::Managed(_)) => Ok(()),
+                        Ok(StartOutcome::External) => Err(format!(
+                            "规范端口上已有外部服务，无法确认它就是 {next}；请先关闭再切换"
+                        )),
+                        Err(error) => Err(error),
+                    }
+                }
+            }
+            ActivationStep::ProbeHealth => wait_for_activation(&supervisor, &next, false),
+            ActivationStep::ProbeContract => wait_for_activation(&supervisor, &next, true),
+            ActivationStep::CommitActive => {
+                let path = state.installed_path();
+                state.mutate_installed(|st| {
+                    st.switch_active(&path, instance.role, &next, true)
+                        .map(|_| ())
+                        .map_err(|e| e.to_string())
+                })
+            }
+            // 旧实例的包、venv 与数据由保留策略处理，切换本身没有临时产物要收。
+            ActivationStep::Cleanup => Ok(()),
+        };
+        if let Err(error) = outcome {
+            failure = Some((step, error));
+            break;
+        }
+    }
+
+    if let Some((failed, error)) = failure {
+        let notes = rollback_activation(&state, &supervisor, previous.as_deref(), &next, failed);
+        let suffix = if notes.is_empty() {
+            String::new()
+        } else {
+            format!("；{}", notes.join("；"))
+        };
+        return Err(format!(
+            "切换 active 在「{}」失败：{error}{suffix}",
+            activation_step_label(failed)
+        ));
+    }
+
+    Ok(vec![
+        launcher_core::lifecycle::role_name(instance.role).to_string(),
+        next,
+    ])
 }
 
 /* ------------------------------------------------------------------ */
@@ -754,6 +986,10 @@ pub fn prepare_instance_env(
     if !instance.role.needs_runtime() {
         return Err(format!("{:?} 角色不需要准备依赖环境", instance.role));
     }
+    // `.staging` 路径按实例哈希固定，同一实例并发 prepare 会互删。
+    // 锁槽在实例粒度，不同实例的准备仍然并行。
+    let slot = state.instance_slot(&instance_id);
+    let _exclusive = slot.lock().unwrap_or_else(|e| e.into_inner());
     let dir = state.module_dir(&instance);
     let raw = read_manifest_value(&dir)?;
     let manifest = runtime_manifest(&raw)?;
@@ -1533,9 +1769,12 @@ pub fn purge_local_data(
     }
 
     if request.module_files {
-        let running = supervisor.running();
-        let ids: Vec<String> = state.with_installed(|s| s.instances.keys().cloned().collect());
-        for id in ids {
+        // 顺序是「先停再删」：运行中的进程握着 venv 里的文件句柄，直接删会半途失败。
+        // 只停自己拉起的；外部实例不在 Job 里，启动器无权停，只能跳过并如实报告。
+        if !supervisor.running().is_empty() {
+            supervisor.stop_all();
+        }
+        for id in state.with_installed(|s| s.instances.keys().cloned().collect::<Vec<_>>()) {
             let Some(instance) = state.instance(&id) else {
                 continue;
             };
@@ -1543,10 +1782,12 @@ pub fn purge_local_data(
                 // 源码目录归用户，永不删除。
                 continue;
             }
-            if running.contains(&id) || supervisor.is_external(&id) {
-                errors.push(format!("实例 {id} 正在运行（含外部启动），跳过清理"));
+            if supervisor.running().contains(&id) || supervisor.is_external(&id) {
+                errors.push(format!("实例 {id} 由外部启动且无法停止，跳过清理"));
                 continue;
             }
+            let slot = state.instance_slot(&id);
+            let _exclusive = slot.lock().unwrap_or_else(|e| e.into_inner());
             let base = state.paths.instance_dir_keyed(&id);
             for child in ["package", "venvs", "logs"] {
                 let path = base.join(child);
@@ -1570,11 +1811,30 @@ pub fn purge_local_data(
 }
 
 #[tauri::command]
-pub fn read_instance_logs(instance_id: String) -> InstanceLogs {
+pub fn read_instance_logs(instance_id: String, state: State<'_, AppStateV2>) -> InstanceLogs {
+    let dir = state.paths.instance_logs_dir_keyed(&instance_id);
+    let tail = crate::diag_log::read_tail(&dir, crate::diag_log::MAX_TAIL_LINES);
+    let note = if tail.files == 0 {
+        "该实例还没有日志：启动过一次才会写入。启动器事件始终记录，子进程输出需显式打开诊断开关。"
+            .to_string()
+    } else if tail.truncated {
+        format!(
+            "显示最近 {} 行，更早的内容已截断。保留 {} 个文件，每个超过 2 MiB 时轮转。",
+            tail.lines.len(),
+            tail.files
+        )
+    } else {
+        format!(
+            "共 {} 个文件。启动器事件始终记录，子进程输出需显式打开诊断开关。",
+            tail.files
+        )
+    };
     InstanceLogs {
         instance_id,
-        lines: Vec::new(),
-        note: "M3 不落盘日志：上游 stdout/stderr 仍为空设备，诊断只在内存快照里；M4 的诊断开关才启用文件轮转。".into(),
+        lines: tail.lines,
+        files: tail.files,
+        truncated: tail.truncated,
+        note,
     }
 }
 
@@ -1670,5 +1930,54 @@ mod tests {
     fn base64_decode_rejects_garbage() {
         assert!(base64_decode("not-base64!!").is_err());
         assert_eq!(base64_decode("aGk=").unwrap(), b"hi");
+    }
+
+    #[test]
+    fn activation_plan_covers_all_four_shapes() {
+        // 没有上一个：起新、探测、提交、清理。
+        assert_eq!(
+            activation_plan(None, "b", false),
+            vec![
+                ActivationStep::StartNextOnCanonicalPort,
+                ActivationStep::ProbeHealth,
+                ActivationStep::ProbeContract,
+                ActivationStep::CommitActive,
+                ActivationStep::Cleanup,
+            ]
+        );
+        // 有上一个：先停旧的，再走同一串。
+        let full = activation_plan(Some("a"), "b", false);
+        assert_eq!(full.first(), Some(&ActivationStep::StopPrevious));
+        assert_eq!(full.len(), 6);
+        // 目标就是当前 active 且在跑：只重新探测，既不重启也不动槽位。
+        assert_eq!(
+            activation_plan(Some("b"), "b", true),
+            vec![ActivationStep::ProbeHealth, ActivationStep::ProbeContract]
+        );
+        // 目标就是当前 active 但没在跑：必须真的拉起，不能空转。
+        let restart = activation_plan(Some("b"), "b", false);
+        assert_eq!(
+            restart.first(),
+            Some(&ActivationStep::StartNextOnCanonicalPort)
+        );
+        assert!(!restart.contains(&ActivationStep::StopPrevious));
+    }
+
+    #[test]
+    fn commit_active_is_the_last_state_change() {
+        // 槽位只能在探测全过之后提交：提交后只剩 Cleanup，回滚才有意义。
+        let steps = activation_plan(Some("a"), "b", false);
+        let commit = steps
+            .iter()
+            .position(|s| *s == ActivationStep::CommitActive)
+            .expect("缺少提交步骤");
+        assert_eq!(commit, steps.len() - 2);
+        assert_eq!(steps[commit + 1], ActivationStep::Cleanup);
+        // 探测排在提交之前，保证失败时槽位未被改写。
+        let probe = steps
+            .iter()
+            .position(|s| *s == ActivationStep::ProbeContract)
+            .unwrap();
+        assert!(probe < commit);
     }
 }

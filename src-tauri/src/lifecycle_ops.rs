@@ -169,10 +169,13 @@ pub fn build_start_request(
                 args,
                 working_dir,
                 env,
+                // 子进程输出可能含用户内容，默认丢弃；显式打开才接管管道。
+                capture_output: crate::diag_log::child_output_enabled(),
             },
             health_url,
             contract_url,
             timeout_ms,
+            log_dir: Some(state.paths.instance_logs_dir_keyed(&instance.instance_id)),
         },
         manifest: runtime_manifest,
     })

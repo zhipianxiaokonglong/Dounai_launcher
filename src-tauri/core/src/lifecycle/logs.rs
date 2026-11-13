@@ -1,4 +1,5 @@
-//! 诊断日志的轮转策略。M3 默认不落盘，这里只算规则，不碰文件句柄与 Win32 ACL。
+//! 诊断日志的轮转策略。这里只算规则，不碰文件句柄与 Win32 ACL；落盘与读取在
+//! 桌面壳的 `diag_log` 模块。启动器自身事件默认记录，子进程输出需要显式开关。
 
 use std::path::PathBuf;
 
@@ -6,7 +7,7 @@ pub const LOG_DIR_NAME: &str = "logs";
 pub const DEFAULT_MAX_BYTES: u64 = 2 * 1024 * 1024;
 pub const DEFAULT_KEEP_FILES: usize = 3;
 pub const DEFAULT_DIAGNOSTIC_MODE: bool = false;
-pub const LOG_DIR_ACL_RULE: &str = "仅当前用户与启动器进程可写；M4 开启诊断模式时设置";
+pub const LOG_DIR_ACL_RULE: &str = "仅当前用户与启动器进程可写；目录随数据根创建，M4 设置显式 ACL";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogFile {
