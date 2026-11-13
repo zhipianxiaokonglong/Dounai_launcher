@@ -30,5 +30,5 @@
     "contract_version": "1.0",
     "note": "契约冻结；禁止实现真实记忆管线；验收走 mock。"
   },
-  "signature": { "algo": "SHA-256 + Ed25519", "value": "" }
+  "signature": { "algo": "Ed25519", "value": "" }
 }

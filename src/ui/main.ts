@@ -324,7 +324,7 @@ function buildManifestPlaceholder(moduleId: string): ModuleManifest {
     dependencies: [],
     model_packs: [],
     permissions: { network: [], filesystem: [], devices: [] },
-    signature: { algo: "SHA-256 + Ed25519", value: "" },
+    signature: { algo: "Ed25519", value: "" },
   };
 }
 

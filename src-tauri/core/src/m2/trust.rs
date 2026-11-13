@@ -313,7 +313,7 @@ mod tests {
             "ports": [8102],
             "permissions": { "network": [], "filesystem": [], "devices": [] },
             "files": {},
-            "signature": { "algo": "SHA-256 + Ed25519", "pubkey": pk,
+            "signature": { "algo": "Ed25519", "pubkey": pk,
                            "key_id": "K1", "signed_at": "2026-01-01T00:00:00Z", "value": "" }
         });
         let payload = crate::signature::canonical_payload(&value).unwrap();

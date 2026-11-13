@@ -29,8 +29,12 @@ pub enum SignatureError {
     Serialize(String),
 }
 
-/// 受支持的算法标识。
-pub const SUPPORTED_ALGO: &str = "SHA-256 + Ed25519";
+/// 受支持的签名算法标识。
+///
+/// `canonical_payload` 的字节直接交给 Ed25519（算法内部用 SHA-512）。SHA-256
+/// 只用于 `files` 逐文件哈希与公钥指纹，因此不写进这个标识。工具与运行时
+/// 共用此常量，契约里的 `algo` 取值必须与之相同。
+pub const SUPPORTED_ALGO: &str = "Ed25519";
 
 /// 从 manifest JSON 中取出待验签内容：剔除 `signature` 字段后的规范化字符串。
 ///

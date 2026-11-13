@@ -13,7 +13,7 @@ const baseManifest = {
   dependencies: [],
   model_packs: [],
   permissions: { network: [], filesystem: [], devices: [] },
-  signature: { algo: "SHA-256 + Ed25519", value: "" },
+  signature: { algo: "Ed25519", value: "" },
 };
 
 describe("admin_ui 解析", () => {

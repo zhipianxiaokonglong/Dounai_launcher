@@ -180,10 +180,15 @@ for (const { file, data } of samples) {
 report.push('== 负例必须被拒 ==');
 const base = samples[1].data;
 const clone = (patch) => JSON.parse(JSON.stringify({ ...base, ...patch }));
+const signedWith = (algo) => clone({ signature: {
+  algo, pubkey: `${'A'.repeat(43)}=`, key_id: 'K1', signed_at: TIME, value: SIG
+} });
+validates('module-v2 接受 Ed25519 算法标识', signedWith('Ed25519'), moduleSchema);
+rejects('module-v2 拒绝名实不符的旧算法标识', signedWith('SHA-256 + Ed25519'), moduleSchema);
 rejects('未知 role 硬拒，不降级为 auxiliary', clone({ role: 'planner' }), moduleSchema);
 rejects('module_id 缺少 namespace', clone({ module_id: 'omninexus' }), moduleSchema);
 rejects('变体塞进 version 串', clone({ version: '0.3.3-agent' }), moduleSchema);
-rejects('签名段缺 pubkey', clone({ signature: { algo: 'SHA-256 + Ed25519', key_id: 'k', signed_at: TIME, value: SIG } }), moduleSchema);
+rejects('签名段缺 pubkey', clone({ signature: { algo: 'Ed25519', key_id: 'k', signed_at: TIME, value: SIG } }), moduleSchema);
 rejects('files 键含路径穿越', clone({ files: { '../evil.py': `sha256:${HEX}` } }), moduleSchema);
 rejects('manifest 自述 instance_id', clone({ instance_id: 'x' }), moduleSchema);
 rejects('auxiliary 缺 auxiliary_kind', clone({ role: 'auxiliary' }), moduleSchema);
@@ -202,7 +207,7 @@ validates('catalog-v2.schema.json 接受最小合法 catalog', {
     signature_required: true, expires: TIME
   }],
   revoked: [],
-  signature: { algo: 'SHA-256 + Ed25519', key_id: 'K5', signed_at: TIME, value: SIG }
+  signature: { algo: 'Ed25519', key_id: 'K5', signed_at: TIME, value: SIG }
 }, catalogSchema);
 rejects('catalog 含未注册 role 被拒', {
   schema_version: 2, sequence: 1, generated_at: TIME, expires: TIME,
@@ -214,7 +219,7 @@ rejects('catalog 含未注册 role 被拒', {
     signature_required: true, expires: TIME
   }],
   revoked: [],
-  signature: { algo: 'SHA-256 + Ed25519', key_id: 'K5', signed_at: TIME, value: SIG }
+  signature: { algo: 'Ed25519', key_id: 'K5', signed_at: TIME, value: SIG }
 }, catalogSchema);
 
 const installed = {
@@ -359,7 +364,7 @@ for (const [name, file, schema] of [
 }
 
 // 断言数量固定。误删或跳过断言时，不能只靠 failed 判绿。
-const EXPECTED_ASSERTIONS = 107;
+const EXPECTED_ASSERTIONS = 109;
 const count = report.filter((x) => x.startsWith('通过') || x.startsWith('失败')).length;
 console.log(report.join('\n'));
 console.log('');

@@ -315,6 +315,6 @@ export function parseManifest(raw: unknown): ModuleManifest {
     },
     reserved,
     ...(adminResult.spec ? { admin_ui: adminResult.spec } : {}),
-    signature: { algo: asString(sigRaw.algo, "SHA-256 + Ed25519"), value: asString(sigRaw.value) },
+    signature: { algo: asString(sigRaw.algo, "Ed25519"), value: asString(sigRaw.value) },
   };
 }

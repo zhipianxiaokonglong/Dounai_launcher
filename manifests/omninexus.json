@@ -106,7 +106,7 @@
     }
   },
   "signature": {
-    "algo": "SHA-256 + Ed25519",
+    "algo": "Ed25519",
     "value": ""
   }
 }

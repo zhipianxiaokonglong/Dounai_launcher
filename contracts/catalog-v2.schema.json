@@ -43,7 +43,10 @@
       "additionalProperties": false,
       "required": ["algo", "key_id", "signed_at", "value"],
       "properties": {
-        "algo": { "const": "SHA-256 + Ed25519" },
+        "algo": {
+          "const": "Ed25519",
+          "description": "签名算法标识。对剔除 signature 后的规范化 JSON 字节直接做 Ed25519 签名，算法内部用 SHA-512。SHA-256 只用于 files 逐文件哈希与公钥指纹，不属于签名算法。"
+        },
         "key_id": { "const": "K5", "description": "catalog 签名钥与包签名钥 K1 分离。" },
         "signed_at": { "type": "string", "format": "date-time" },
         "value": { "type": "string", "pattern": "^[A-Za-z0-9+/]{86}==$" }

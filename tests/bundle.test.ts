@@ -26,7 +26,7 @@ function rawManifest(overrides: Record<string, unknown> = {}): Record<string, un
     dependencies: [{ name: "Python", version: ">=3.11", type: "runtime" }],
     model_packs: [],
     permissions: { network: [], filesystem: [], devices: [] },
-    signature: { algo: "SHA-256 + Ed25519", value: "" },
+    signature: { algo: "Ed25519", value: "" },
     ...overrides,
   };
 }

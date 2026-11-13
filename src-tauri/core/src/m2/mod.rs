@@ -21,7 +21,10 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub const SUPPORTED_ALGO: &str = "SHA-256 + Ed25519";
+/// 签名算法标识。Ed25519 直接对 `canonical_payload` 的字节签名；SHA-256 只用于
+/// 逐文件哈希与公钥指纹，不是签名算法的一部分。改动此值等于换签名格式，
+/// 首次对外发布后必须升 schema 版本，不能叠加兼容分支。
+pub const SUPPORTED_ALGO: &str = "Ed25519";
 pub const K5_KEY_ID: &str = "K5";
 pub const DATA_DIR_POLICY: &str = "never_auto_delete";
 pub const SOURCE_DIR_POLICY: &str = "never_delete";

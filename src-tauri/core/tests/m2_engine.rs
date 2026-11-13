@@ -71,7 +71,7 @@ fn manifest_value(files: &BTreeMap<String, String>) -> Value {
 
 fn sign_manifest(mut value: Value, sk: &SigningKey, pk: &str) -> Value {
     value["signature"] = json!({
-        "algo": "SHA-256 + Ed25519", "pubkey": pk, "key_id": "K1",
+        "algo": "Ed25519", "pubkey": pk, "key_id": "K1",
         "signed_at": "2026-01-01T00:00:00Z", "value": ""
     });
     let payload = canonical_payload(&value).unwrap();
@@ -138,7 +138,7 @@ fn catalog_json(sk: &SigningKey, sequence: u64, entry: &CatalogEntry) -> Vec<u8>
         ],
         "modules": [entry],
         "revoked": [],
-        "signature": { "algo": "SHA-256 + Ed25519", "key_id": "K5",
+        "signature": { "algo": "Ed25519", "key_id": "K5",
                        "signed_at": "2026-01-01T00:00:00Z", "value": "" }
     });
     let payload = canonical_payload(&document).unwrap();
