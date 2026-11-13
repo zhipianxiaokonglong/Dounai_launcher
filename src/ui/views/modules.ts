@@ -41,6 +41,7 @@ import {
   describeError,
   endEnvJob,
   envJobOf,
+  hasLiveProcess,
   isExternal,
   isRunning,
   moduleName,
@@ -319,6 +320,10 @@ function moduleStatusChip(views: InstanceRuntimeView[]): string {
   }
   const failedView = views.find((view) => view.snapshot?.phase === "failed");
   if (failedView) {
+    // 进程还在，只是没在启动预算内就绪：不是崩溃，别写成「启动失败」。
+    if (hasLiveProcess(failedView)) {
+      return '<span class="chip chip--warn"><i class="dot dot--warn"></i>启动超时</span>';
+    }
     const code = failedView.snapshot?.exit_code;
     const label = code === null || code === undefined ? "启动失败" : `已退出 ${code}`;
     return `<span class="chip chip--fail"><i class="dot dot--fail"></i>${esc(label)}</span>`;
@@ -465,7 +470,7 @@ function instanceDetailText(view: InstanceRuntimeView): string {
 
 function instanceButtons(view: InstanceRuntimeView): string {
   const id = esc(view.instance.instance_id);
-  const running = isRunning(view);
+  const running = isRunning(view) || hasLiveProcess(view);
   if (isExternal(view)) {
     return `<button class="btn btn--sm" type="button" data-act="detail" data-id="${id}">详情</button>`;
   }
@@ -578,16 +583,44 @@ function bindBodyActions(body: HTMLElement): void {
   });
 }
 
+/**
+ * 同一实例的操作正在进行时，忽略重复点击。
+ *
+ * 委托监听已经幂等，但按钮在异步返回前仍然可点：双击、或用户看到没反应
+ * 再点一次，都会发出第二个请求，后端只会回「实例已在启动中」。
+ */
+const inFlight = new Set<string>();
+/** 一键启停共用一个闸门：这类操作按拓扑串行，重复触发没有意义。 */
+let bulkBusy = false;
+
+async function runBulk(label: string, run: () => Promise<void>): Promise<void> {
+  if (bulkBusy) {
+    toast(`${label} 正在执行，请稍候…`);
+    return;
+  }
+  bulkBusy = true;
+  try {
+    await run();
+  } finally {
+    bulkBusy = false;
+  }
+}
+
 async function startOne(instanceId: string): Promise<void> {
   if (!instanceId) return;
-  const view = store.views.find((item) => item.instance.instance_id === instanceId);
-  // 依赖没装就点启动：先把这一步补上，而不是让后端报「环境未就绪」。
-  if (view && !view.prepared) {
-    toast(`${instanceId} 还没装依赖，先装依赖…`);
-    const ready = await prepareEnv(instanceId, true);
-    if (!ready) return;
+  if (inFlight.has(`start:${instanceId}`)) {
+    toast(`${instanceId} 正在启动中，请稍候…`);
+    return;
   }
+  inFlight.add(`start:${instanceId}`);
   try {
+    const view = store.views.find((item) => item.instance.instance_id === instanceId);
+    // 依赖没装就点启动：先把这一步补上，而不是让后端报「环境未就绪」。
+    if (view && !view.prepared) {
+      toast(`${instanceId} 还没装依赖，先装依赖…`);
+      const ready = await prepareEnv(instanceId, true);
+      if (!ready) return;
+    }
     toast(`正在启动 ${instanceId}…`);
     const result = await startModule(instanceId);
     if (result.run === "failed") {
@@ -600,23 +633,31 @@ async function startOne(instanceId: string): Promise<void> {
     }
   } catch (error) {
     toast(`启动失败：${describeError(error)}`, "error");
+  } finally {
+    inFlight.delete(`start:${instanceId}`);
   }
   await refreshModules();
 }
 
 async function stopOne(instanceId: string): Promise<void> {
   if (!instanceId) return;
+  if (inFlight.has(`stop:${instanceId}`)) return;
+  inFlight.add(`stop:${instanceId}`);
   try {
     await stopModule(instanceId);
     toast(`已停止 ${instanceId}`, "ok");
   } catch (error) {
     toast(`停止失败：${describeError(error)}`, "error");
+  } finally {
+    inFlight.delete(`stop:${instanceId}`);
   }
   await refreshModules();
 }
 
 async function restartOne(instanceId: string): Promise<void> {
   if (!instanceId) return;
+  if (inFlight.has(`restart:${instanceId}`)) return;
+  inFlight.add(`restart:${instanceId}`);
   try {
     toast(`正在重启 ${instanceId}…`);
     const view = await restartInstance(instanceId);
@@ -627,43 +668,49 @@ async function restartOne(instanceId: string): Promise<void> {
     }
   } catch (error) {
     toast(`重启失败：${describeError(error)}`, "error");
+  } finally {
+    inFlight.delete(`restart:${instanceId}`);
   }
   await refreshModules();
 }
 
 async function startEverything(): Promise<void> {
-  try {
-    toast("正在按拓扑顺序启动…");
-    const results = await startAll();
-    // 启动返回时实例通常还在 Starting，等健康检查才转 Running。
-    // 只数 running 会报「已启动 0 个」，把正在起的也算上，另说清有几个在等。
-    const started = results.filter((r) => r.run === "running" || r.run === "starting").length;
-    const waiting = results.filter((r) => r.run === "starting").length;
-    const failed = results.filter((r) => r.run === "failed");
-    if (failed.length === 0) {
-      const tail = waiting > 0 ? `，其中 ${waiting} 个正在等健康检查` : "";
-      toast(`已启动 ${started} / ${results.length} 个实例${tail}`, "ok");
-    } else {
-      toast(
-        `启动 ${started} / ${results.length}，失败：${failed
-          .map((r) => `${r.module_id}（${r.last_error ?? "未知原因"}）`)
-          .join("；")}`,
-        "error",
-      );
+  await runBulk("一键启动", async () => {
+    try {
+      toast("正在按拓扑顺序启动…");
+      const results = await startAll();
+      // 启动返回时实例通常还在 Starting，等健康检查才转 Running。
+      // 只数 running 会报「已启动 0 个」，把正在起的也算上，另说清有几个在等。
+      const started = results.filter((r) => r.run === "running" || r.run === "starting").length;
+      const waiting = results.filter((r) => r.run === "starting").length;
+      const failed = results.filter((r) => r.run === "failed");
+      if (failed.length === 0) {
+        const tail = waiting > 0 ? `，其中 ${waiting} 个正在等健康检查` : "";
+        toast(`已启动 ${started} / ${results.length} 个实例${tail}`, "ok");
+      } else {
+        toast(
+          `启动 ${started} / ${results.length}，失败：${failed
+            .map((r) => `${r.module_id}（${r.last_error ?? "未知原因"}）`)
+            .join("；")}`,
+          "error",
+        );
+      }
+    } catch (error) {
+      toast(`一键启动失败：${describeError(error)}`, "error");
     }
-  } catch (error) {
-    toast(`一键启动失败：${describeError(error)}`, "error");
-  }
+  });
   await refreshModules();
 }
 
 async function stopEverything(): Promise<void> {
-  try {
-    await stopAll();
-    toast("已停止全部托管实例", "ok");
-  } catch (error) {
-    toast(`停止失败：${describeError(error)}`, "error");
-  }
+  await runBulk("一键停止", async () => {
+    try {
+      await stopAll();
+      toast("已停止全部托管实例", "ok");
+    } catch (error) {
+      toast(`停止失败：${describeError(error)}`, "error");
+    }
+  });
   await refreshModules();
 }
 

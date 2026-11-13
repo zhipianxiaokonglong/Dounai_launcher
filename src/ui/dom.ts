@@ -208,14 +208,32 @@ export interface DelegatedAction {
  * 卡片会被整体重绘，逐个按钮绑定会随重绘漏绑；
  * 委托挂在容器上，重绘的是容器的子节点，监听器始终有效。
  */
+/**
+ * 每个容器只挂一个监听器；重复绑定只替换 action 表。
+ *
+ * 视图会在每次状态刷新时整体重绘，而容器元素（页头、正文）是常驻的。
+ * 早期实现每次渲染都 `addEventListener`，N 次刷新后一次点击会触发 N 个
+ * 处理函数——表现就是点一次「启动」发了四个启动请求，一个成功、
+ * 三个报「实例已在启动中」。
+ */
+const actionTables = new WeakMap<HTMLElement, Map<string, (node: HTMLElement) => void | Promise<void>>>();
+
 export function bindActions(root: HTMLElement, actions: DelegatedAction[]): void {
   const table = new Map(actions.map((a) => [a.act, a.run]));
+  const existing = actionTables.get(root);
+  if (existing) {
+    // 直接用最新的表覆盖，闭包读的是 WeakMap 里的当前值。
+    existing.clear();
+    for (const [act, run] of table) existing.set(act, run);
+    return;
+  }
+  actionTables.set(root, table);
   root.addEventListener("click", (event) => {
     const target = (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-act]");
     if (!target || !root.contains(target)) return;
     const act = target.dataset.act;
     if (!act) return;
-    const run = table.get(act);
+    const run = actionTables.get(root)?.get(act);
     if (!run) return;
     event.preventDefault();
     void run(target);

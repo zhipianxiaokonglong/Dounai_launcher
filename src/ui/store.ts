@@ -151,6 +151,16 @@ export function isExternal(view: InstanceRuntimeView): boolean {
   return view.snapshot?.phase === "running" && view.snapshot.pid === null;
 }
 
+/**
+ * 进程还在（哪怕状态机已经判失败）。
+ *
+ * 启动探测超时会保留 pid：进程活着但没在预算内就绪。此时不能再给「启动」，
+ * 先给「停止」，否则点下去只会收到「进程还在运行，先停止再启动」。
+ */
+export function hasLiveProcess(view: InstanceRuntimeView): boolean {
+  return typeof view.snapshot?.pid === "number";
+}
+
 /** 页头与状态栏用的计数。 */export interface RunCounts {
   running: number;
   starting: number;
