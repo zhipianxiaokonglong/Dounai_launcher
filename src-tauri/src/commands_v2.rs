@@ -192,6 +192,23 @@ pub struct InstanceLogs {
     /// 是否截掉了更早的内容。
     pub truncated: bool,
     pub note: String,
+    /// 本次读的是哪一份文件；`None` 表示「跨文件的最新尾部」。
+    pub file: Option<String>,
+    /// 子进程 stdout/stderr 是否落盘（由启动时的开关决定，页面只做展示）。
+    pub child_output: bool,
+    /// 日志目录绝对路径，供「打开目录」与说明文案使用。
+    pub dir: String,
+}
+
+/// 一份日志文件的元信息。
+#[derive(Debug, Serialize)]
+pub struct LogFileInfo {
+    pub name: String,
+    pub size: u64,
+    /// UTC 时间字符串，界面负责转本地时区。
+    pub modified_at: String,
+    /// 是否是最新（正在写）的那一份。
+    pub current: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -2290,6 +2307,8 @@ pub struct SettingsSnapshot {
     pub k5_fingerprint: String,
     /// 启动时是否由启动器补写/校正过 `install.json`；`None` 表示本来就一致。
     pub install_note: Option<String>,
+    /// 新拉起的实例是否捕获子进程 stdout/stderr。
+    pub child_output: bool,
 }
 
 #[tauri::command]
@@ -2304,7 +2323,15 @@ pub fn settings_snapshot(state: State<'_, AppStateV2>) -> SettingsSnapshot {
         k1_fingerprint: crate::state_v2::BUILTIN_K1_FINGERPRINT.to_string(),
         k5_fingerprint,
         install_note: state.install_note.clone(),
+        child_output: state.child_output(),
     }
+}
+
+/// 打开/关闭子进程输出捕获。只影响之后拉起的实例，已在跑的不动——
+/// 改管道意味着重启进程，而那会打断用户正在用的模块。
+#[tauri::command]
+pub fn set_child_output(enabled: bool, state: State<'_, AppStateV2>) -> Result<bool, String> {
+    state.set_child_output(enabled)
 }
 
 #[tauri::command]
@@ -2436,32 +2463,92 @@ pub fn purge_local_data(
     }
 }
 
+/// 读日志尾部。`file` 给定时只读那一份历史文件，否则跨文件读最新内容。
 #[tauri::command]
-pub fn read_instance_logs(instance_id: String, state: State<'_, AppStateV2>) -> InstanceLogs {
+pub fn read_instance_logs(
+    instance_id: String,
+    file: Option<String>,
+    state: State<'_, AppStateV2>,
+) -> InstanceLogs {
     let dir = state.paths.instance_logs_dir_keyed(&instance_id);
-    let tail = crate::diag_log::read_tail(&dir, crate::diag_log::MAX_TAIL_LINES);
-    let note = if tail.files == 0 {
+    let total = crate::diag_log::list_logs(&dir).len();
+    let tail = match file.as_deref() {
+        Some(name) => crate::diag_log::read_file_tail(&dir, name, crate::diag_log::MAX_TAIL_LINES)
+            .unwrap_or_else(|| crate::diag_log::LogTail {
+                lines: Vec::new(),
+                files: 0,
+                truncated: false,
+            }),
+        None => crate::diag_log::read_tail(&dir, crate::diag_log::MAX_TAIL_LINES),
+    };
+    let note = if total == 0 {
         "该实例还没有日志：启动过一次才会写入。启动器事件始终记录，子进程输出需显式打开诊断开关。"
             .to_string()
+    } else if file.is_some() && tail.lines.is_empty() {
+        "这份日志已经不在了：轮转只保留最近几份，切回「最新」看当前内容。".to_string()
     } else if tail.truncated {
         format!(
             "显示最近 {} 行，更早的内容已截断。保留 {} 个文件，每个超过 2 MiB 时轮转。",
             tail.lines.len(),
-            tail.files
+            total
         )
     } else {
         format!(
             "共 {} 个文件。启动器事件始终记录，子进程输出需显式打开诊断开关。",
-            tail.files
+            total
         )
     };
     InstanceLogs {
         instance_id,
         lines: tail.lines,
-        files: tail.files,
+        files: total,
         truncated: tail.truncated,
         note,
+        file,
+        child_output: crate::diag_log::child_output_enabled(),
+        dir: dir.display().to_string(),
     }
+}
+
+/// 列出该实例保留的日志文件，从新到旧。
+#[tauri::command]
+pub fn list_instance_logs(instance_id: String, state: State<'_, AppStateV2>) -> Vec<LogFileInfo> {
+    let dir = state.paths.instance_logs_dir_keyed(&instance_id);
+    let files = crate::diag_log::list_logs(&dir);
+    let newest = files.last().map(|f| f.path.clone());
+    files
+        .into_iter()
+        .rev()
+        .map(|file| LogFileInfo {
+            name: file
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            size: file.size,
+            modified_at: file.modified_at,
+            current: newest.as_deref() == Some(file.path.as_path()),
+        })
+        .collect()
+}
+
+/// 在文件管理器里打开该实例的日志目录。
+///
+/// 路径由后端按 instance_id 自己拼，前端传不进来任意路径——否则这个命令就成了
+/// 「打开任意目录」的通用入口。
+#[tauri::command]
+pub fn open_instance_logs_dir(
+    instance_id: String,
+    state: State<'_, AppStateV2>,
+) -> Result<String, String> {
+    let dir = state.paths.instance_logs_dir_keyed(&instance_id);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("无法创建日志目录：{e}"))?;
+    #[cfg(windows)]
+    let spawned = std::process::Command::new("explorer").arg(&dir).spawn();
+    #[cfg(not(windows))]
+    let spawned = std::process::Command::new("xdg-open").arg(&dir).spawn();
+    spawned.map_err(|e| format!("无法调起文件管理器：{e}"))?;
+    Ok(dir.display().to_string())
 }
 
 #[cfg(test)]

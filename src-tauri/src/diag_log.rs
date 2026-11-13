@@ -28,15 +28,22 @@ pub const CHILD_OUTPUT_ENV: &str = "DOUNAI_LOG_CHILD_OUTPUT";
 
 pub type SharedLog = Arc<Mutex<LogSink>>;
 
-/// 子进程 stdout/stderr 是否落盘。
-pub fn child_output_enabled() -> bool {
-    match std::env::var(CHILD_OUTPUT_ENV) {
-        Ok(value) => parse_flag(&value),
-        Err(_) => diagnostic_enabled(),
-    }
+/// 环境变量是否显式设置了子进程输出；没设返回 `None`。
+///
+/// 真值源是 `state/diagnostics.json`（界面上那个开关），环境变量只作临时覆盖，
+/// 所以这里要区分「没设」与「设成关」——否则空值会把用户的设置压掉。
+pub fn env_child_output() -> Option<bool> {
+    std::env::var(CHILD_OUTPUT_ENV)
+        .ok()
+        .map(|value| parse_flag(&value))
 }
 
-fn parse_flag(value: &str) -> bool {
+/// 子进程 stdout/stderr 是否落盘（不看界面设置，只看环境变量与内置默认）。
+pub fn child_output_enabled() -> bool {
+    env_child_output().unwrap_or_else(diagnostic_enabled)
+}
+
+pub fn parse_flag(value: &str) -> bool {
     value == "1" || value.eq_ignore_ascii_case("true")
 }
 
@@ -202,6 +209,51 @@ pub struct LogTail {
     pub truncated: bool,
 }
 
+/// 文件名是否只指向本目录内的一份日志。
+///
+/// 界面会把文件名回传给后端，所以这里必须挡住路径穿越与保留名：
+/// 只接受单段名字、只允许字母数字与 `._-`、扩展名必须是 `.log`。
+pub fn is_safe_log_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > 128 || name.starts_with('.') {
+        return false;
+    }
+    if !name
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+    {
+        return false;
+    }
+    Path::new(name).extension().and_then(|e| e.to_str()) == Some("log")
+}
+
+/// 读指定的一份日志文件的尾部；名字不合法或文件不存在都返回 `None`。
+pub fn read_file_tail(dir: &Path, name: &str, max_lines: usize) -> Option<LogTail> {
+    if !is_safe_log_name(name) {
+        return None;
+    }
+    let path = dir.join(name);
+    if !path.is_file() {
+        return None;
+    }
+    let (text, cut) = read_tail_text(&path, MAX_TAIL_BYTES);
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    if cut && !lines.is_empty() {
+        // 从中间切进来，第一行可能只剩半截。
+        lines.remove(0);
+    }
+    let mut truncated = cut;
+    if lines.len() > max_lines {
+        let drop = lines.len() - max_lines;
+        lines.drain(0..drop);
+        truncated = true;
+    }
+    Some(LogTail {
+        lines,
+        files: 1,
+        truncated,
+    })
+}
+
 /// 从最新的文件往回读，最多 `max_lines` 行。
 pub fn read_tail(dir: &Path, max_lines: usize) -> LogTail {
     let files = list_logs(dir);
@@ -317,6 +369,40 @@ mod tests {
         assert!(tail.lines.is_empty());
         assert_eq!(tail.files, 0);
         assert!(!tail.truncated);
+    }
+
+    #[test]
+    fn log_names_must_stay_inside_the_directory() {
+        assert!(is_safe_log_name("run-20261113T133852Z-000000001.log"));
+        assert!(!is_safe_log_name("../escape.log"));
+        assert!(!is_safe_log_name("..\\escape.log"));
+        assert!(!is_safe_log_name("sub/run.log"));
+        assert!(!is_safe_log_name("C:run.log"));
+        assert!(!is_safe_log_name(".hidden.log"));
+        assert!(!is_safe_log_name("run.txt"));
+        assert!(!is_safe_log_name(""));
+    }
+
+    #[test]
+    fn read_file_tail_reads_one_file_and_rejects_bad_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sink = LogSink::open_with(dir.path(), 64 * 1024, 3).unwrap();
+        for index in 0..20 {
+            sink.line("stdout", &format!("solo-{index}"));
+        }
+        let name = sink
+            .current_path()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let tail = read_file_tail(dir.path(), &name, 5).expect("应能读到指定文件");
+        assert_eq!(tail.lines.len(), 5);
+        assert!(tail.truncated);
+        assert!(tail.lines.last().unwrap().contains("solo-19"));
+        assert_eq!(read_file_tail(dir.path(), "../escape.log", 5), None);
+        assert_eq!(read_file_tail(dir.path(), "missing.log", 5), None);
     }
 
     #[test]

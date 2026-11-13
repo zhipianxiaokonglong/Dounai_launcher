@@ -172,8 +172,8 @@ pub fn build_start_request(
                 args,
                 working_dir,
                 env,
-                // 子进程输出可能含用户内容，默认丢弃；显式打开才接管管道。
-                capture_output: crate::diag_log::child_output_enabled(),
+                // 子进程输出可能含用户内容，默认丢弃；设置页或日志页打开才接管管道。
+                capture_output: state.child_output(),
             },
             health_url,
             contract_url,

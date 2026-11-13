@@ -52,6 +52,17 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// 诊断设置：目前只有「是否捕获子进程输出」。
+///
+/// 子进程的 stdout/stderr 里可能有用户的对话内容，默认丢弃；打开后新拉起的
+/// 实例会把输出写进各自的日志。设置落盘到 `state/diagnostics.json`，因为
+/// 「排障时打开、事后关掉」跨重启才有意义——只存在内存里，用户下次还得再点一次。
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct Diagnostics {
+    #[serde(default)]
+    pub child_output: bool,
+}
+
 pub struct AppStateV2 {
     pub paths: Paths,
     installed: Mutex<InstalledState>,
@@ -62,6 +73,8 @@ pub struct AppStateV2 {
     /// M3 不新增状态文件。M4 界面重做时按实例粒度重新定义。
     disabled: Mutex<BTreeSet<String>>,
     pub dev_mode: AtomicBool,
+    /// 诊断设置（是否捕获子进程输出）。新建实例读取它，改动即时落盘。
+    diagnostics: Mutex<Diagnostics>,
     k5_pubkey_b64: Mutex<String>,
     /// 启动时补写/校正 `install.json` 的说明；`None` 表示本来就是一致的。
     /// 设置页直接展示，用户能看出「安装器没跑，是启动器兜的」。
@@ -104,6 +117,13 @@ impl AppStateV2 {
         let retention = load_or(&paths.state_dir().join("retention.json"), || {
             Ok(RetentionPolicy::default())
         })?;
+        let mut diagnostics = load_or(&paths.state_dir().join("diagnostics.json"), || {
+            Ok(Diagnostics::default())
+        })?;
+        // 环境变量仍可临时强开：排障时不必先改设置再重启启动器。
+        if crate::diag_log::env_child_output() == Some(true) {
+            diagnostics.child_output = true;
+        }
         Ok(Self {
             paths,
             installed: Mutex::new(installed),
@@ -112,6 +132,7 @@ impl AppStateV2 {
             catalog: Mutex::new(None),
             disabled: Mutex::new(BTreeSet::new()),
             dev_mode: AtomicBool::new(false),
+            diagnostics: Mutex::new(diagnostics),
             k5_pubkey_b64: Mutex::new(BUILTIN_K5_PUBKEY_B64.to_string()),
             install_note,
             instance_locks: Mutex::new(BTreeMap::new()),
@@ -197,6 +218,26 @@ impl AppStateV2 {
 
     pub fn save_trust(&self, store: &TrustStore) -> Result<(), String> {
         store.save(&self.trust_path()).map_err(|e| e.to_string())
+    }
+
+    pub fn diagnostics_path(&self) -> PathBuf {
+        self.paths.state_dir().join("diagnostics.json")
+    }
+
+    /// 新拉起的实例是否捕获子进程输出。
+    pub fn child_output(&self) -> bool {
+        lock(&self.diagnostics).child_output
+    }
+
+    pub fn set_child_output(&self, enabled: bool) -> Result<bool, String> {
+        let mut guard = lock(&self.diagnostics);
+        let next = Diagnostics {
+            child_output: enabled,
+        };
+        launcher_core::state::write_json(&self.diagnostics_path(), &next)
+            .map_err(|e| format!("保存诊断设置失败：{e}"))?;
+        *guard = next;
+        Ok(enabled)
     }
 
     pub fn with_retention<R>(&self, f: impl FnOnce(&RetentionPolicy) -> R) -> R {
