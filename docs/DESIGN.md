@@ -206,9 +206,11 @@ catalog 用 K5 签名，签的是索引、版本单调性与新鲜度。K1 只�
 
 私钥离线保管，不进 CI 变量、不入库。GitHub token 只允许用户在设置里自填，绝不内置。
 
+K1 已于 2026-11-13 生成并内置指纹，规程见 [SIGNING.md](SIGNING.md)。K5 仍是占位值，远程 catalog 分发未启用。
+
 ### 7.3 包信任
 
-zip 根下放 `manifest.json` 与模块文件。签名放 manifest 的 `signature` 段，不另加 `.sig` 文件，避免签名与内容脱钩。manifest 不写 `instance_id`，否则同一个 zip 装不了第二次。
+zip 根下放 `manifest.json` 与模块文件。签名放 manifest 的 `signature` 段，不另加 `.sig` 文件，避免签名与内容脱钩。manifest 不写 `instance_id`，否则同一个 zip 装不了第二次。签名原文、密钥格式与打包命令见 [SIGNING.md](SIGNING.md)。
 
 `signature.rs::canonical_payload` 签的是剔除 `signature` 后的整份 manifest。`files` 清单在覆盖内，逐文件哈希覆盖实际字节，执行文件因此被间接签上。这修掉了 v1“只签元数据、执行文件无绑定”的问题，验签算法不改。
 

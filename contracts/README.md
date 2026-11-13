@@ -83,7 +83,7 @@ node contracts/check-upstreams.mjs
 `src-tauri/src/bin/pack.rs` 与 `sign_catalog.rs` 按本目录契约产出可安装的包与索引。在 `src-tauri/` 目录运行：
 
 ```bash
-cargo run --bin pack -- keygen --out-private k1.priv --out-public k1.pub
+cargo run --bin pack -- keygen --out-private k1.priv --out-public k1.pub --key-id K1 --meta keys/K1.json
 cargo run --bin pack -- pack --dir <源目录> --key k1.priv --out module.zip
 cargo run --bin pack -- verify --pubkey k1.pub --zip module.zip
 cargo run --bin sign_catalog -- sign --key k5.priv --catalog catalog.json --out signed.json
@@ -91,6 +91,8 @@ cargo run --bin sign_catalog -- verify --pubkey k5.pub --catalog signed.json
 ```
 
 `pack` 扫描源目录生成 `files`，把带 `pubkey` 的签名段写进 zip 内的 `manifest.json`，不改写源目录。打包后立即自检，输出 catalog 条目要用的 `sha256`、`size` 与 `publisher_fp`。`sign_catalog` 固定用 K5 签名，拒绝有效期超过 7 天的索引。
+
+`keygen` 拒绝覆盖已存在的文件。`--meta` 只写公钥、指纹与用途，不含私钥。密钥体系、保管与轮换规程见 [docs/SIGNING.md](../docs/SIGNING.md)。
 
 `canonical_payload` 剔除整个 `signature` 段，`key_id`、`signed_at` 与 `pubkey` 不在签名覆盖内。`pubkey` 不靠签名保护：能验通即证明签名者持有对应私钥，替换公钥后验签必失败。完整 schema 校验由 [contracts.yml](../.github/workflows/contracts.yml) 的 ajv 承担，工具只做结构性检查。
 

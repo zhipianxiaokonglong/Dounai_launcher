@@ -241,3 +241,15 @@ M3 代码落在四处：core 的 `lifecycle/` 纯逻辑、app 的 `process/win.r
 门禁：`cargo fmt --all -- --check`、`clippy --offline --workspace --all-targets -- -D warnings`、`cargo test --offline --workspace --all-targets` 全绿，11 组测试目标零失败，app lib 87 项，比 M3.5 记录的 86 项多 1 项盘符提取单测。`npm run typecheck` 通过，`npm test` 65 项全过，`vite build` 通过。契约 107 项断言与 ajv 六份状态 schema 编译通过。CI 工作流用临时安装的 YAML 解析器解析成功：5 个 job，frontend 8 步，含两步审计。上游 `b8ab274` 修的就是注释写坏导致工作流在解析阶段终止，这一步不省。
 
 四项都未实测。显存取值依赖真实显卡与注册表，磁盘取值依赖真实卷。外部服务识别依赖真实 HTTP 服务，注入清理依赖真实 WebView。按 [ROADMAP.md](ROADMAP.md) 开头的规则，离线断言不计通过。
+
+## K1 密钥生成与打包验签离线验收（2026-11-13）
+
+结论：K1 已生成并内置，工具签出的包在 M2 运行时判为 A 类。真机安装未实测。
+
+生成侧：`pack keygen` 加了防覆盖、用途标注与公钥登记文件。私钥写到仓库外目录，ACL 移除继承权限后只授予当前用户。登记文件 `keys/K1.json` 只含公钥、指纹与用途，单测断言不含私钥材料。`state_v2.rs` 换上真实 K1 指纹，另有单测核对指纹由内置公钥算出。
+
+运行时侧：`src-tauri/tests/signing_roundtrip.rs` 用工具打包，再送进 `verify_zip`、`PackageManifest::parse` 与 `classify`。固定种子与真实 K1 各跑一遍，2 项断言全过。真实 K1 那一遍同时核对内置指纹与私钥匹配。篡改 `entry.command` 后判 D 类硬拒。另用真实私钥把 `contracts/examples/omninexus.v2.json` 打成 zip，`pack verify` 的验签与逐文件哈希通过。
+
+未实测：真机安装、两源 catalog 拉取、K5 签名分发、私钥保管过程。私钥保管属人工操作，离线断言不覆盖。按 [ROADMAP.md](ROADMAP.md) 开头的规则，这些结果不计真机验收通过。
+
+说明：`algo` 契约为 `SHA-256 + Ed25519`，实际签名输入是 `canonical_payload` 的字节，Ed25519 内部用 SHA-512。SHA-256 用于逐文件哈希与公钥指纹。契约字符串不动，口径见 [SIGNING.md](SIGNING.md)。

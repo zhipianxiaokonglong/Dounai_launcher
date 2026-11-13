@@ -9,7 +9,7 @@ Dounai 启动器管理模块的安装、环境与进程生命周期。产品主�
 - 仅支持 Windows 10 与 Windows 11。
 - 不读取 v1 包格式，不设兼容层。v1 包格式从未打包分发。
 - `src-tauri/src/` 是 v2 命令面与进程托管，`src-tauri/core/` 是不依赖 Tauri 的独立 crate；`src/` 前端仍是 v1 界面，M4 重做。
-- 本版本不能在线安装模块。官方 catalog 与 K1、K5 两把密钥尚未生成。
+- 本版本不能在线安装模块。K1 已生成并内置指纹，K5 与官方 catalog 尚未生成。
 - 内置 K5 公钥仍是占位值，远程 catalog 验签按不可用处理，不降级放行。命令面已提供 `set_k5_pubkey`，界面入口在 M4。
 - M3 不落盘进程日志。上游 stdout 与 stderr 继续丢弃，诊断结论只进内存快照；M4 加显式诊断开关后才写文件并轮转。
 
@@ -55,6 +55,7 @@ npm install --no-save --no-package-lock --prefix .ci ajv-cli@5 ajv-formats@3
 | [contracts/README.md](contracts/README.md) | 契约入口，含角色、包格式与 M0、M1 的状态 schema |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | M1 到 M5 的里程碑与实测验收 |
 | [SECURITY.md](SECURITY.md) | 安全策略、信任模型与已知限制 |
+| [docs/SIGNING.md](docs/SIGNING.md) | 模块签名方法、密钥生成保管与轮换规程 |
 | [docs/ADMIN_UI.md](docs/ADMIN_UI.md) | 模块如何声明自己的配置界面 |
 | [docs/TESTING.md](docs/TESTING.md) | 测试方法学、M1 到 M3 的验收记录与已知限制 |
 | [docs/TAURI_UPGRADE.md](docs/TAURI_UPGRADE.md) | Tauri 固定版本、unstable 使用面与升级复核步骤 |
