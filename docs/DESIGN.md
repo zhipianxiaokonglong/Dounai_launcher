@@ -252,17 +252,17 @@ zip 根下放 `manifest.json` 与模块文件。签名放 manifest 的 `signatur
 
 目录、venv、`data_dir`、日志、端口、进程句柄与信任记录全按 `instance_id` 索引。`active[role] = instance_id` 的设计口径是停旧实例、起新实例并占规范端口、做 health 与契约自检、提交，任一步失败回滚到旧实例。
 
-M3 当前只做原子落盘：`switch_active` 调 `InstalledState::switch_active` 一次写完 `installed.json`，不停旧实例、不起新实例，也没有进程回滚。[ROADMAP.md](ROADMAP.md) M2 第 9 条仍未关闭。
+`switch_active` 现在按同一口径执行事务：先停上一个实例，再在规范端口拉起目标实例，等健康与契约两项探测都通过后提交槽位，失败按 `rollback_steps` 停掉候选实例、重新拉起旧实例并如实报告。目标服务若由外部进程提供，切换直接拒绝——启动器既验不了契约，也无法在失败时回滚。[ROADMAP.md](ROADMAP.md) M2 第 9 条关闭。
 
 第三方实例与目录实例都不能自动成为 active，用户显式切换才允许。默认各实例数据隔离，“共享会话数据用于对比”列为显式高级选项，SQLite 并发写会冲突。
 
 旧版保留以 `state/retention.json` 的 `keep_versions` 为准，默认 3，设为 0 表示不保留。清理只删包文件、venv 与日志，且只在新版成功激活后异步执行。正在运行的非 active 实例跳过。
 
-警告：`data_dir` 与用户源码目录永远不在自动清理范围内，只标记孤儿并提供手动入口。v1 的 `purge` 曾未停先删，这条边界不能放宽。
+警告：`data_dir` 与用户源码目录永远不在自动清理范围内，只标记孤儿并提供手动入口。`purge` 一律先按拓扑逆序停掉自己拉起的进程再删目录；外部实例停不掉，跳过并在结果里如实报告。
 
 ### 7.5 生命周期
 
-M3 已按 role 拓扑启动、Job Object 托管与异步探测重写生命周期。上游 stdout 与 stderr 继续丢弃，M4 加显式诊断开关后才落盘并轮转。
+M3 已按 role 拓扑启动、Job Object 托管与异步探测重写生命周期。启动器事件（拉起、退出码、探测结果）写进每实例的 `logs/` 并按 2 MiB × 3 份轮转；子进程 stdout 与 stderr 仍默认丢弃，只有显式设置 `DOUNAI_LOG_CHILD_OUTPUT=1` 才接管管道，M4 把这个开关交给界面。
 
 | v1 问题 | M3 对应的代码 |
 |---|---|
@@ -271,11 +271,11 @@ M3 已按 role 拓扑启动、Job Object 托管与异步探测重写生命周期
 | 同步 `sleep` 阻塞命令线程 | 长轮询的 health 与契约探测跑后台任务；启动前另有一次 600 ms 上限的短探，用来识别外部已运行的服务 |
 | 启动无互斥 | `Supervisor` 的 `start_lock` 包住 `begin_start` 到进程登记 |
 | 无 Job Object，靠 `taskkill` 兜底 | Job Object 的 kill-on-close 加 `CREATE_NO_WINDOW`，优雅退出超时再 kill |
-| 不记子进程 stdout | 诊断模式开启时才落盘并轮转；M3 不写任何日志文件 |
+| 不记子进程 stdout | 启动器事件默认落盘并按大小轮转；子进程输出由 `DOUNAI_LOG_CHILD_OUTPUT=1` 显式打开 |
 
-第三方模块、目录实例与官方模块走同一状态机。卸载先检查实例是否运行，运行中直接拒绝；只删 zip 实例的包目录，dir 实例的源码目录永不删除，`data_dir` 不自动清理。venv 清理与 purge 前自动停进程尚未接线。目录实例启动前调 `observe_source` 与 `require_confirmed`，源码变更未确认时不自启。
+第三方模块、目录实例与官方模块走同一状态机。卸载先检查实例是否运行，运行中直接拒绝；`remove_files` 时清掉 zip 实例的包目录、venv 与日志，dir 实例的源码目录永不删除，`data_dir` 不自动清理。凡写 venv 与删目录的路径共用同一把实例级互斥锁，同一实例的并发准备不会互相删除 `.staging`。目录实例启动前调 `observe_source` 与 `require_confirmed`，源码变更未确认时不自启。
 
-M3 不落盘日志，启动器重启后没有历史崩溃记录。轮转策略已写成纯函数，M4 接开关前不碰文件句柄与目录权限。
+日志按实例落在 `<数据根>/instances/<key>/logs/`，文件名带 UTC 时间戳。单个文件超过 2 MiB 轮转，保留最新 3 份，更旧的按文件删除。`read_instance_logs` 只回读最近 300 行、最多 256 KiB，并明说是否发生过截断。
 
 启动前短探按 roles 的 health 路径对分配到的端口发一次请求，不通就走正常启动。探通时把实例记进 `Supervisor.external`，快照合成 `Running` 加 `Healthy`、`pid` 为 null，不拉起第二个进程。`running()` 只数自己托管的进程；停止、重启、卸载、解除登记与清包目录对外部实例一律明确拒绝，管理页允许打开。标记只在内存里，下次启动前重探，探不通即清除。
 

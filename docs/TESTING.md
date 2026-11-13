@@ -196,7 +196,7 @@ M2 主体逻辑落在 `src-tauri/core/src/m2/`，含 10 个模块。网络只经
 ## 待真机或后续里程碑复核
 
 - `uv pip compile --generate-hashes` 对同一输入两次输出是否逐字节一致。generation 哈希依赖这份输出；不一致会让每轮都新建 generation。
-- `.staging` 路径按哈希固定，同一实例并发 prepare 会互相删除。M3 的 `prepare_instance_env` 未按实例串行化，该项仍未关闭。
+- `.staging` 路径按哈希固定，同一实例并发 prepare 会互相删除。`prepare_instance_env` 已按实例串行化，卸载与 purge 共用同一把锁，风险关闭；并发真机未测。
 - CI 的数据级校验只覆盖 `examples/state/` 两份手写样例，挡不住 Rust 写端字段漂移。可在 Rust 侧把序列化结果喂给 schema，或由 CI 重新生成样例。
 - `write_json_once` 写 install.json 仍直接写目标文件，中途崩溃会留下半截 JSON。下次启动读失败后重装即可，不像 generation 文件那样永久卡住，暂不改动。
 
@@ -219,13 +219,25 @@ M3 代码落在四处：core 的 `lifecycle/` 纯逻辑、app 的 `process/win.r
 
 ### 已知限制
 
-1. M3 不写日志文件，重启后没有历史崩溃记录。`read_instance_logs` 恒返回空行与说明文字。
+1. 日志只记录启动器事件（拉起、退出码、探测结果），子进程的 stdout/stderr 默认丢弃，需显式设置 `DOUNAI_LOG_CHILD_OUTPUT=1` 才接管管道；开关交给界面属 M4。日志目录没有显式 ACL，随数据根继承权限。
 2. 内置 K5 公钥是真实值，但还没有已签发的 catalog，`refresh_catalog` 按 `unavailable` 返回，不降级放行。`set_k5_pubkey` 可在本次会话内替换公钥，界面入口在 M4。
-3. `switch_active` 只做 `installed.json` 原子写，没有停旧起新与进程回滚。ROADMAP M2 第 9 条仍未关闭。
-4. `prepare_instance_env` 未按实例串行化，同一实例并发 prepare 的 `.staging` 互删风险仍在。
-5. 卸载只删 zip 实例的包目录，不删 venv；purge 跳过运行中实例，没有先停全部进程。
-6. `purge_local_data` 的 `state` 只重置 catalog 水位，保留实例表，与 v1 的清状态语义不同。
-7. `list_module_states` 仍按 `module_id` 返回单行，多实例细节走 `list_instances`。
+3. `switch_active` 已按 `activation_steps` 执行停旧、起新、探测、提交与回滚。限制有两条：目标实例由外部进程提供时直接拒绝（验不了契约、也无法回滚）；目标已是 active 且在跑时只重新探测，不重启进程。
+4. 卸载的 `remove_files` 会清包目录、venv 与日志，`data_dir` 按契约保留；`purge_local_data` 先停托管实例再删目录，外部实例停不掉，跳过并记进 `errors`。
+5. `purge_local_data` 的 `state` 只重置 catalog 水位，保留实例表，与 v1 的清状态语义不同。
+6. `list_module_states` 仍按 `module_id` 返回单行，多实例细节走 `list_instances`。
+
+## M3 收尾四项（2026-11-13）
+
+结论：四项都只有离线断言，真机行为未实测。
+
+1. 每实例诊断日志。新增 `src/diag_log.rs`：`LogSink` 按 2 MiB 轮转、保留 3 份，复用 core 的 `rotation_plan` 决定删哪些文件；`read_tail` 从最新文件往回读，最多 300 行与 256 KiB，越过窗口即标记 `truncated`。`Supervisor` 在拉起、spawn 失败、退出码、探测结果、停止请求与停止结果六处写日志。`read_instance_logs` 改为回读真实文件，并新增 `files`、`truncated` 两个字段说明窗口。子进程 stdout/stderr 默认丢弃，只有 `DOUNAI_LOG_CHILD_OUTPUT=1` 才走管道，管道按字节读到换行再按 UTF-8 有损解码，非 UTF-8 输出不会打断日志。单测 6 项：行格式、超长行截断、轮转保留份数、尾部读取与截断标记、目录不存在、开关字面量。
+2. `switch_active` 事务化。按 `activation_steps` 执行停旧、在规范端口起新、健康与契约探测、提交槽位、清理；失败按 `rollback_steps` 停候选、重拉旧实例并报告。探测是同步等待，上限 8 秒，失败或崩溃立即返回。外部实例、规范端口被外部服务占用、同一实例已跑但契约探测超时都有明确报错。单测 2 项：四种输入形状的步骤序列、提交必须排在探测之后且后面只剩清理。
+3. 实例级互斥。`AppStateV2::instance_slot` 按 `instance_id` 返回同一个 `Arc<Mutex<()>>`，`prepare_instance_env`、`uninstall_module` 与 `purge_local_data` 共用。单测 1 项：同实例槽位同一、不同实例互不阻塞。
+4. 卸载与清理收尾。卸载的 `remove_files` 现在清包目录、`venvs`、`logs` 三处，`data/` 按 `never_auto_delete` 保留；`purge_local_data` 先调 `stop_all` 按拓扑逆序停掉托管实例再删，外部实例跳过并写明原因。
+
+门禁：`cargo fmt --all -- --check`、`clippy --offline --workspace --all-targets -- -D warnings`、`cargo test --offline --workspace --all-targets` 全绿，app lib 从 87 项增至 96 项，11 组测试目标零失败。`npm run typecheck` 通过。
+
+未实测：日志轮转在真实长跑实例上的表现、管道泵在子进程输出量极大时的背压、`switch_active` 在真实模块上的停旧起新与回滚、卸载正在被外部进程占用 venv 时的失败路径。
 
 ## 上游 main 修复移植（2026-11-13）
 
