@@ -553,10 +553,10 @@ export async function confirmLocalSource(instanceId: string): Promise<string> {
   return call<string>("confirm_local_source", { instanceId });
 }
 
-/** 准备实例依赖环境；`allowOnline` 缺省为 false，离线优先。 */
+/** 准备实例依赖环境；`allowOnline` 缺省为 true，首次装依赖必须能拉包。 */
 export async function prepareInstanceEnv(
   instanceId: string,
-  allowOnline = false,
+  allowOnline = true,
 ): Promise<string> {
   return call<string>("prepare_instance_env", { instanceId, allowOnline });
 }
@@ -617,6 +617,8 @@ export interface SettingsSnapshot {
   retention: RetentionPolicy;
   k1_fingerprint: string;
   k5_fingerprint: string;
+  /** 启动时补写/校正 install.json 的说明；null 表示本来就一致。 */
+  install_note: string | null;
 }
 
 export async function settingsSnapshot(): Promise<SettingsSnapshot> {

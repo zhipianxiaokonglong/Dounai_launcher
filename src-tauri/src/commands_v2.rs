@@ -1317,11 +1317,18 @@ fn prepare_instance_env_impl(
     let dir = state.module_dir(&instance);
     let raw = read_manifest_value(&dir)?;
     let manifest = runtime_manifest(&raw)?;
-    let install = launcher_core::install::InstallState::load(&state.paths)
-        .map_err(|e| format!("读取 install.json 失败：{e}"))?;
+    let install = launcher_core::install::InstallState::load(&state.paths).map_err(|e| {
+        format!(
+            "读取 install.json 失败：{e}。启动时会自动补写，若这个报错持续出现，\
+             删掉 {} 后重启即可重建。",
+            state.paths.install_state_path().display()
+        )
+    })?;
     let runner = launcher_core::env::SystemUvRunner::new(state.paths.install_root.clone());
     let fetcher = launcher_core::env::CurlUvFetcher;
-    let online = allow_online.unwrap_or(false);
+    // 首次装依赖必然要拉包与解释器，离线默认等于按钮天生不可用。
+    // 想强制离线时由界面显式传 false（模块菜单里的「安装依赖（离线）」）。
+    let online = allow_online.unwrap_or(true);
     let ctx = launcher_core::env::EnvContext {
         install: &install,
         options: launcher_core::env::EnvOptions {
@@ -2098,6 +2105,8 @@ pub struct SettingsSnapshot {
     pub retention: launcher_core::m2::retention::RetentionPolicy,
     pub k1_fingerprint: String,
     pub k5_fingerprint: String,
+    /// 启动时是否由启动器补写/校正过 `install.json`；`None` 表示本来就一致。
+    pub install_note: Option<String>,
 }
 
 #[tauri::command]
@@ -2111,6 +2120,7 @@ pub fn settings_snapshot(state: State<'_, AppStateV2>) -> SettingsSnapshot {
         retention,
         k1_fingerprint: crate::state_v2::BUILTIN_K1_FINGERPRINT.to_string(),
         k5_fingerprint,
+        install_note: state.install_note.clone(),
     }
 }
 

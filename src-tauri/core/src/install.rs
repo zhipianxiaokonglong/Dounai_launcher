@@ -2,6 +2,10 @@
 //!
 //! 便携版先做写探针，程序根目录不可写时回退到用户目录。回退结果同样写进 install.json，
 //! 下次启动不重新探测，避免同一台机器换了一次权限就换一套路径。
+//!
+//! 2026-11-13 起语义扩展成「安装器优先写，启动器兜底补」：M5 的安装器还没做，
+//! 没有这个兜底 `prepare_instance_env` 一读就 `os error 2`，整条环境链路跑不起来。
+//! 兜底规则见 [`InstallState::ensure`]，它只会写 uv 三件事与两个根，不猜其他字段。
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -67,6 +71,78 @@ impl InstallState {
         Ok(value)
     }
 
+    /// 启动器兜底：确保 `install.json` 存在且与本次运行的路径、内置 uv 一致。
+    ///
+    /// 四种情况：
+    /// - 不存在 → 按传入值新建；
+    /// - 存在且四个字段都对得上 → 原样返回，不写盘（保持「写一次」的常态）；
+    /// - 存在但 uv 三件事与本次内置值不同（升级了随包 uv）→ 只改 uv 三件事；
+    /// - 存在但读不出来、版本不对或两个根与当前不一致 → 先把旧文件备份成
+    ///   `install.json.bak` 再重写，避免应用一开始就起不来。
+    ///
+    /// 返回 `(状态, 说明)`；说明为 `None` 表示未写盘。调用方据此记日志，
+    /// 不必自己判断该不该写。
+    pub fn ensure(
+        paths: &Paths,
+        uv_path: PathBuf,
+        uv_sha256: String,
+        uv_version: String,
+    ) -> Result<(Self, Option<String>), InstallStateError> {
+        let path = paths.install_state_path();
+        let fresh = Self {
+            schema_version: 1,
+            paths: paths.clone(),
+            uv_path,
+            uv_sha256,
+            uv_version,
+            written_at: crate::time::utc_now(),
+        };
+        fresh.validate()?;
+
+        if !path.exists() {
+            let value = Self::initialize(
+                paths,
+                fresh.uv_path.clone(),
+                fresh.uv_sha256.clone(),
+                fresh.uv_version.clone(),
+            )?;
+            return Ok((value, Some(format!("install.json 缺失，已补写：{}", path.display()))));
+        }
+
+        match Self::load(paths) {
+            Ok(existing) => {
+                let uv_same = existing.uv_path == fresh.uv_path
+                    && existing.uv_sha256 == fresh.uv_sha256
+                    && existing.uv_version == fresh.uv_version;
+                if uv_same {
+                    return Ok((existing, None));
+                }
+                fresh.write()?;
+                let note = format!(
+                    "随包 uv 从 {}（{}）换成 {}（{}），已更新 install.json",
+                    existing.uv_version,
+                    existing.uv_sha256,
+                    fresh.uv_version,
+                    fresh.uv_sha256
+                );
+                Ok((fresh, Some(note)))
+            }
+            Err(error) => {
+                let backup = path.with_extension("json.bak");
+                std::fs::copy(&path, &backup)
+                    .map_err(|e| InstallStateError::State(StateError::io(&backup, e)))?;
+                fresh.write()?;
+                Ok((
+                    fresh,
+                    Some(format!(
+                        "install.json 不可用（{error}），已备份到 {} 并重写",
+                        backup.display()
+                    )),
+                ))
+            }
+        }
+    }
+
     /// 只从传入的数据根读取，不重新推断安装模式与两个根。
     pub fn load(paths: &Paths) -> Result<Self, InstallStateError> {
         let value: Self = state::read_json(&paths.install_state_path())?;
@@ -75,8 +151,8 @@ impl InstallState {
         Ok(value)
     }
 
-    /// 仅供测试与迁移显式覆盖已存在的 install.json。生产入口只走 `initialize` 与 `load`。
-    pub fn overwrite_for_tests(&self) -> Result<(), InstallStateError> {
+    /// 显式写入。生产路径只有 [`InstallState::ensure`] 会调；其余是测试与迁移。
+    pub fn write(&self) -> Result<(), InstallStateError> {
         Ok(state::write_json(&self.paths.install_state_path(), self)?)
     }
 
@@ -237,10 +313,86 @@ mod tests {
     }
 
     #[test]
+    fn ensure_creates_missing_state_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = paths(&dir.path().join("app"), &dir.path().join("data"));
+        let uv = p.bundled_uv_path();
+        let hash = format!("sha256:{}", "a".repeat(64));
+
+        let (first, note) =
+            InstallState::ensure(&p, uv.clone(), hash.clone(), "0.13.7".into()).unwrap();
+        assert!(note.is_some(), "首次补写必须给出说明");
+        assert_eq!(InstallState::load(&p).unwrap(), first);
+
+        let (second, note) = InstallState::ensure(&p, uv, hash, "0.13.7".into()).unwrap();
+        assert!(note.is_none(), "已经一致时不该再写盘");
+        assert_eq!(second, first);
+    }
+
+    #[test]
+    fn ensure_updates_only_the_uv_facts_when_the_bundled_uv_moves() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = paths(&dir.path().join("app"), &dir.path().join("data"));
+        let old = state(&p);
+        old.write().unwrap();
+
+        let new_hash = format!("sha256:{}", "b".repeat(64));
+        let (updated, note) = InstallState::ensure(
+            &p,
+            p.downloaded_uv_path(),
+            new_hash.clone(),
+            "0.13.8".into(),
+        )
+        .unwrap();
+        assert!(note.is_some());
+        assert_eq!(updated.uv_sha256, new_hash);
+        assert_eq!(updated.uv_path, p.downloaded_uv_path());
+        // 两个根与 schema 版本原样保留。
+        assert_eq!(updated.paths, old.paths);
+        assert_eq!(updated.schema_version, 1);
+    }
+
+    #[test]
+    fn ensure_backs_up_and_repairs_a_state_from_other_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = paths(&dir.path().join("app"), &dir.path().join("data"));
+        let stale = Paths::new(
+            InstallMode::Portable,
+            dir.path().join("elsewhere"),
+            dir.path().join("data"),
+        )
+        .unwrap();
+        state(&stale).write().unwrap();
+        assert!(InstallState::load(&p).is_err(), "前提：当前根的 load 必须失败");
+
+        let (repaired, note) = InstallState::ensure(
+            &p,
+            p.bundled_uv_path(),
+            format!("sha256:{}", "a".repeat(64)),
+            "0.13.7".into(),
+        )
+        .unwrap();
+        assert!(note.is_some());
+        assert_eq!(repaired.paths, p);
+        assert_eq!(InstallState::load(&p).unwrap(), repaired);
+        assert!(p.install_state_path().with_extension("json.bak").exists());
+    }
+
+    #[test]
+    fn ensure_rejects_invalid_uv_hash_before_touching_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = paths(&dir.path().join("app"), &dir.path().join("data"));
+        let err = InstallState::ensure(&p, p.bundled_uv_path(), "a".repeat(64), "0.13.7".into())
+            .unwrap_err();
+        assert!(matches!(err, InstallStateError::BadUvHash(_)));
+        assert!(!p.install_state_path().exists());
+    }
+
+    #[test]
     fn load_rejects_changed_roots() {
         let dir = tempfile::tempdir().unwrap();
         let p = paths(&dir.path().join("app"), &dir.path().join("data"));
-        state(&p).overwrite_for_tests().unwrap();
+        state(&p).write().unwrap();
         let other = Paths::new(
             InstallMode::Portable,
             dir.path().join("other-app"),

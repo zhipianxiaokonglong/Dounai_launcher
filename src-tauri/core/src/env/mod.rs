@@ -23,7 +23,8 @@ use crate::paths::{InstallMode, Paths};
 use crate::state;
 
 pub use bootstrap::{
-    locate_uv, CurlUvFetcher, UvBinary, UvFetcher, UV_DOWNLOAD_URL, UV_MIN_VERSION, UV_VERSION,
+    locate_uv, CurlUvFetcher, UvBinary, UvFetcher, UV_BYTES, UV_DOWNLOAD_URL, UV_DOWNLOAD_URLS,
+    UV_MIN_VERSION, UV_MIRROR_URL, UV_SHA256, UV_VERSION,
 };
 pub use deps::{commit, verify_metadata, verify_snapshot, DepsMetadata, ResolvedDeps};
 pub use error::{EnvError, EnvErrorKind, FailureContext};
@@ -625,7 +626,7 @@ mod tests {
                 uv_version: UV_VERSION.into(),
                 written_at: "2026-11-10T00:00:00Z".into(),
             };
-            install.overwrite_for_tests().unwrap();
+            install.write().unwrap();
             Fixture {
                 _dir: dir,
                 paths,

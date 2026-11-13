@@ -63,6 +63,9 @@ pub struct AppStateV2 {
     disabled: Mutex<BTreeSet<String>>,
     pub dev_mode: AtomicBool,
     k5_pubkey_b64: Mutex<String>,
+    /// 启动时补写/校正 `install.json` 的说明；`None` 表示本来就是一致的。
+    /// 设置页直接展示，用户能看出「安装器没跑，是启动器兜的」。
+    pub install_note: Option<String>,
     /// 每实例一把互斥锁：依赖准备、卸载与清理共用，避免 `.staging` 并发互删。
     instance_locks: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
 }
@@ -82,6 +85,18 @@ impl AppStateV2 {
         let installed = load_or(&paths.state_dir().join("installed.json"), || {
             Ok(InstalledState::new())
         })?;
+        // M5 的安装器还没做，`install.json` 从来没人写；不在这里兜底，
+        // `prepare_instance_env` 一读就是 os error 2，整条环境链路跑不起来。
+        let (_, install_note) = launcher_core::install::InstallState::ensure(
+            &paths,
+            paths.bundled_uv_path(),
+            launcher_core::env::bootstrap::UV_SHA256.to_string(),
+            launcher_core::env::bootstrap::UV_VERSION.to_string(),
+        )
+        .map_err(|e| format!("初始化 install.json 失败：{e}"))?;
+        if let Some(note) = &install_note {
+            eprintln!("[install] {note}");
+        }
         let trust = load_or(&paths.state_dir().join("trust.json"), || {
             TrustStore::new(BUILTIN_K1_FINGERPRINT, BUILTIN_K5_FINGERPRINT)
                 .map_err(|e| e.to_string())
@@ -98,6 +113,7 @@ impl AppStateV2 {
             disabled: Mutex::new(BTreeSet::new()),
             dev_mode: AtomicBool::new(false),
             k5_pubkey_b64: Mutex::new(BUILTIN_K5_PUBKEY_B64.to_string()),
+            install_note,
             instance_locks: Mutex::new(BTreeMap::new()),
         })
     }
@@ -374,6 +390,49 @@ mod tests {
         assert!(state.retention_path().exists());
         let reopened = AppStateV2::new(dir.path().join("app"), data).unwrap();
         assert!(reopened.with_installed(|s| s.instances.is_empty()));
+    }
+
+    #[test]
+    fn install_state_is_bootstrapped_and_self_heals() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("app");
+        let data = dir.path().join("data");
+
+        let first = AppStateV2::new(root.clone(), data.clone()).unwrap();
+        let note = first
+            .install_note
+            .clone()
+            .expect("首次启动必须补写 install.json");
+        assert!(note.contains("缺失"), "说明应指出是缺失而非升级：{note}");
+        let path = first.paths.install_state_path();
+        let loaded = launcher_core::install::InstallState::load(&first.paths).unwrap();
+        assert_eq!(loaded.uv_sha256, launcher_core::env::bootstrap::UV_SHA256);
+        assert_eq!(loaded.uv_version, launcher_core::env::bootstrap::UV_VERSION);
+        assert_eq!(loaded.uv_path, first.paths.bundled_uv_path());
+
+        // 删掉再启动：自愈。这是 M1 验收第 7 条。
+        std::fs::remove_file(&path).unwrap();
+        let second = AppStateV2::new(root, data).unwrap();
+        assert!(second.install_note.is_some());
+        assert!(path.exists());
+    }
+
+    /// 内置哈希必须与 `bin/uv.exe` 这个实际产物对得上，否则启动器会自己把
+    /// 「随包 uv 被篡改」判成真的。仓库里没有该文件时（未跑过下载步骤）跳过。
+    #[test]
+    fn pinned_uv_hash_matches_the_staged_binary() {
+        let bundled = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("bin")
+            .join("uv.exe");
+        if !bundled.exists() {
+            return;
+        }
+        let meta = std::fs::metadata(&bundled).unwrap();
+        assert_eq!(meta.len(), launcher_core::env::bootstrap::UV_BYTES);
+        assert_eq!(
+            launcher_core::file_sha256_prefixed(&bundled).unwrap(),
+            launcher_core::env::bootstrap::UV_SHA256
+        );
     }
 
     #[test]

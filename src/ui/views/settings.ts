@@ -303,6 +303,15 @@ function diagnosticsHtml(): string {
       `<p class="cap" style="margin:0">安装根是只读的程序目录，数据根放下载、实例与日志，两者必须在不同位置。</p>`
     ) +
     row(
+      "install.json",
+      store.settings?.install_note ? "已由启动器补写" : "与本次运行一致",
+      `<p class="cap" style="margin:0">${
+        store.settings?.install_note
+          ? esc(store.settings.install_note)
+          : "双根路径与随包 uv 的版本、哈希都记录在数据根的 state/install.json 里，启动时核对，不一致才会改写。"
+      }</p>`
+    ) +
+    row(
       "开发者模式",
       "只进不退",
       `<p class="cap" style="margin:0">开启后可在「导入本地」登记任意目录为模块，重启启动器即失效。未开启时相关命令一律拒绝。</p>`

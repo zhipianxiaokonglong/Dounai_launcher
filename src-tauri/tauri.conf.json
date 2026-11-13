@@ -37,6 +37,9 @@
     "icon": [
       "icons/icon.png"
     ],
+    "resources": {
+      "bin/uv.exe": "bin/uv.exe"
+    },
     "shortDescription": "Dounai 启动器",
     "longDescription": "Dounai 的安装、环境与模块管理中心。",
     "copyright": "GPL-3.0-or-later"

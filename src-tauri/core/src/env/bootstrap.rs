@@ -17,9 +17,31 @@ use crate::state;
 
 pub const UV_VERSION: &str = "0.13.7";
 pub const UV_MIN_VERSION: &str = "0.11.8";
+
+/// 随包自带的 `bin/uv.exe` 的锚。`install.json` 的 `uv_sha256` 由它初始化，
+/// 启动器每次启动都按这个值校正，所以升 uv 必须同时改这三行。
+///
+/// 取值来源：阿里云 PyPI 的 `uv-0.13.7-py3-none-win_amd64.whl`（wheel 本身
+/// `sha256:2835e2ab397d0db86323b9975dce75ecd76aa9cfa0d6a2aea84734aae7f8c9b3`）
+/// 内 `uv-0.13.7.data/scripts/uv.exe`，31 803 184 字节。
+pub const UV_SHA256: &str = "sha256:1791d7a9ed5b6df13ccf80f102e025c333010d96326b4ff0262aa3b578835c5a";
+pub const UV_BYTES: u64 = 31_803_184;
+
+/// 首选：GitHub release 资产（官方、zip 里直接是 `uv.exe`）。
 pub const UV_DOWNLOAD_URL: &str =
     "https://github.com/astral-sh/uv/releases/download/0.13.7/uv-x86_64-pc-windows-msvc.zip";
+
+/// 备选：PyPI 镜像上的同名 wheel。
+///
+/// 目标机器上 github.com 不可达（实测超时），随包又缺 `bin/uv.exe` 时这条是唯一
+/// 的补齐路径。wheel 里 `uv.exe` 在 `uv-<版本>.data/scripts/` 下，`extract_uv_exe`
+/// 按「任意层级下的 uv.exe」匹配，两种布局共用一套解包。
+pub const UV_MIRROR_URL: &str = "https://mirrors.aliyun.com/pypi/packages/8e/4f/041b59d2a38807a3e31ef41064cf3e45d2752fe0409d89040d52778049ae/uv-0.13.7-py3-none-win_amd64.whl";
+
 const MAX_UV_EXE_BYTES: u64 = 100 * 1024 * 1024;
+
+/// 补齐 uv 时的取数顺序：官方资产优先，镜像兜底。任一源成功即停。
+pub const UV_DOWNLOAD_URLS: [&str; 2] = [UV_DOWNLOAD_URL, UV_MIRROR_URL];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UvBinary {
@@ -140,10 +162,35 @@ pub fn locate_uv(
                 return Err(state_error(
                     EnvErrorKind::UvMissing,
                     instance_id,
-                    "程序根缺少 bin/uv.exe，当前配置不允许联网补齐",
+                    format!(
+                        "程序根缺少 bin/uv.exe（期望 {expected}），当前配置不允许联网补齐"
+                    ),
                 ));
             }
-            let bytes = fetcher.fetch(UV_DOWNLOAD_URL)?;
+            let mut last_error: Option<EnvError> = None;
+            let mut fetched: Option<Vec<u8>> = None;
+            for url in UV_DOWNLOAD_URLS {
+                match fetcher.fetch(url) {
+                    Ok(bytes) => {
+                        fetched = Some(bytes);
+                        break;
+                    }
+                    // 逐个源重试：GitHub 在部分网络下完全不可达，不能因为第一源失败就放弃。
+                    Err(error) => last_error = Some(error),
+                }
+            }
+            let bytes = match fetched {
+                Some(bytes) => bytes,
+                None => {
+                    return Err(last_error.unwrap_or_else(|| {
+                        state_error(
+                            EnvErrorKind::UvMissing,
+                            instance_id,
+                            "程序根缺少 bin/uv.exe，且没有可用的下载源",
+                        )
+                    }))
+                }
+            };
             let downloaded_bytes = bytes.len() as u64;
             let exe = extract_uv_exe(&bytes, instance_id)?;
             let target = paths.downloaded_uv_path();

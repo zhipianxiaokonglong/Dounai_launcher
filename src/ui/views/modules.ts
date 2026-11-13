@@ -437,10 +437,10 @@ function cardFootHtml(moduleId: string, views: InstanceRuntimeView[]): string {
     }
     if (primary.instance.role !== "shell") {
       menuItems.push(
-        `<button type="button" data-act="prepare" data-id="${esc(primary.instance.instance_id)}">安装依赖（离线）</button>`,
+        `<button type="button" data-act="prepare" data-id="${esc(primary.instance.instance_id)}">安装依赖</button>`,
       );
       menuItems.push(
-        `<button type="button" data-act="prepare-online" data-id="${esc(primary.instance.instance_id)}">安装依赖（允许联网）</button>`,
+        `<button type="button" data-act="prepare-offline" data-id="${esc(primary.instance.instance_id)}">安装依赖（离线）</button>`,
       );
     }
   }
@@ -474,8 +474,8 @@ function bindBodyActions(body: HTMLElement): void {
     { act: "logs", run: (node) => openLogsFor(node.dataset.id ?? "") },
     { act: "switch-active", run: (node) => makeActive(node.dataset.id ?? "") },
     { act: "confirm-source", run: (node) => confirmSource(node.dataset.id ?? "") },
-    { act: "prepare", run: (node) => prepareEnv(node.dataset.id ?? "") },
-    { act: "prepare-online", run: (node) => prepareEnv(node.dataset.id ?? "", true) },
+    { act: "prepare", run: (node) => prepareEnv(node.dataset.id ?? "", true) },
+    { act: "prepare-offline", run: (node) => prepareEnv(node.dataset.id ?? "", false) },
     { act: "admin", run: (node) => openAdmin(node.dataset.id ?? "") },
     { act: "toggle", run: (node) => toggleModule(node.dataset.id ?? "") },
     { act: "uninstall", run: (node) => askUninstall(node.dataset.id ?? "") },
@@ -506,7 +506,7 @@ async function startOne(instanceId: string): Promise<void> {
   if (view && !view.prepared) {
     toast(`${instanceId} 还没装依赖，先装依赖…`);
     try {
-      await prepareInstanceEnv(instanceId);
+      await prepareInstanceEnv(instanceId, true);
     } catch (error) {
       toast(`安装依赖失败：${describeError(error)}`, "error");
       await refreshModules();
@@ -635,12 +635,12 @@ HEAD　${esc(git?.head ?? "（不是 git 仓库或读取失败）")}
   });
 }
 
-async function prepareEnv(instanceId: string, allowOnline = false): Promise<void> {
+async function prepareEnv(instanceId: string, allowOnline = true): Promise<void> {
   try {
     toast(
       allowOnline
         ? `正在安装依赖（允许联网）：${instanceId}…这一步可能要几分钟`
-        : `正在安装依赖（离线）：${instanceId}…`,
+        : `正在安装依赖（离线，只用本机缓存）：${instanceId}…`,
     );
     const python = await prepareInstanceEnv(instanceId, allowOnline);
     toast(`依赖装好了：${python}`, "ok");

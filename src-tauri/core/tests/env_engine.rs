@@ -220,7 +220,7 @@ fn real_uv_prepares_venv_without_touching_source() {
     fs::copy(&uv, f.paths.bundled_uv_path()).unwrap();
     let mut install = f.install.clone();
     install.uv_sha256 = file_sha256_prefixed(&f.paths.bundled_uv_path()).unwrap();
-    install.overwrite_for_tests().unwrap();
+    install.write().unwrap();
     init_git_repo(&f.module);
     let before = git_status(&f.module);
     let manifest: ModuleManifestV2 = serde_json::from_str(MANIFEST).unwrap();
