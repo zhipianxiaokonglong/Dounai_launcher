@@ -7,7 +7,9 @@
 
 import {
   isDesktop,
+  installFromCatalog,
   openAdminWindow,
+  refreshCatalog,
   removeLocalModule,
   restartInstance,
   setModuleEnabled,
@@ -19,12 +21,15 @@ import {
   uninstallModule,
   confirmLocalSource,
   prepareInstanceEnv,
+  type CatalogEntry,
+  type CatalogResponse,
   type InstanceRuntimeView,
   type Role,
 } from "../../bridge.js";
 import {
   bindActions,
   clear,
+  closeModal,
   confirmModal,
   esc,
   openModal,
@@ -33,11 +38,9 @@ import {
 import { icon } from "../icons.js";
 import {
   describeError,
-  installedModuleIds,
   isExternal,
   isRunning,
-  manifestOf,
-  moduleLabel,
+  moduleName,
   refreshViews,
   runCounts,
   store,
@@ -104,12 +107,14 @@ function renderHead(head: HTMLElement): void {
       <div class="sub">${esc(bits.join(" · "))}</div>
     </div>
     <div class="sp">
+      <button class="btn btn--sm" type="button" data-act="catalog">模块目录</button>
       <button class="btn btn--sm" type="button" data-act="stop-all">停止全部</button>
       <button class="btn btn--primary btn--sm" type="button" data-act="start-all">一键启动</button>
     </div>
   `;
 
   bindActions(head, [
+    { act: "catalog", run: () => showCatalog() },
     { act: "start-all", run: () => startEverything() },
     { act: "stop-all", run: () => stopEverything() },
   ]);
@@ -127,7 +132,7 @@ function renderBody(body: HTMLElement): void {
   if (!isDesktop()) {
     body.innerHTML = `
       <div class="placeholder">
-        <span class="ph-ico">${icon("bundles", 18)}</span>
+        <span class="ph-ico">${icon("modules", 18)}</span>
         <b>浏览器模式只能预览界面</b>
         <p>实例状态、启停与安装都需要桌面端。请用 <code>npm run tauri dev</code> 或安装包打开。</p>
       </div>
@@ -155,10 +160,17 @@ function renderBody(body: HTMLElement): void {
         <b>${store.views.length === 0 ? "还没有登记任何模块" : "没有匹配的实例"}</b>
         <p>${
           store.views.length === 0
-            ? "到「导入本地」装一个 .zip 离线包，或登记一个已有的源码目录。登记目录不会复制也不会删除你的文件。"
+            ? "从「模块目录」在线装一个签名包，或到「导入本地」装一个 .zip 离线包。登记源码目录不会复制也不会删除你的文件。"
             : "清空搜索词或取消「只看有问题的」再试。"
         }</p>
-        ${store.views.length === 0 ? '<button class="btn btn--primary btn--sm" type="button" data-act="goto-import">去导入模块包</button>' : ""}
+        ${
+          store.views.length === 0
+            ? `<div class="sp" style="gap:8px">
+                 <button class="btn btn--primary btn--sm" type="button" data-act="catalog">打开模块目录</button>
+                 <button class="btn btn--sm" type="button" data-act="goto-import">导入本地包</button>
+               </div>`
+            : ""
+        }
       </div>`,
     );
   }
@@ -191,7 +203,6 @@ function renderBody(body: HTMLElement): void {
     body.appendChild(group);
   }
 
-  body.appendChild(buildNotInstalled());
   bindBodyActions(body);
   body.scrollTop = scrollTop;
 }
@@ -226,7 +237,7 @@ function filteredViews(): InstanceRuntimeView[] {
   return store.views.filter((view) => {
     if (q) {
       const haystack =
-        `${view.instance.module_id} ${view.instance.instance_id} ${moduleLabel(view.instance.module_id)}`.toLowerCase();
+        `${view.instance.module_id} ${view.instance.instance_id} ${moduleName(view.instance.module_id)}`.toLowerCase();
       if (!haystack.includes(q)) return false;
     }
     if (filter.onlyProblems) {
@@ -251,7 +262,6 @@ function buildCard(moduleId: string, views: InstanceRuntimeView[]): HTMLElement 
   if (unverified) card.classList.add("card--warn");
 
   const role = views[0]?.instance.role ?? "auxiliary";
-  const manifest = manifestOf(moduleId);
   const counter = views.find((view) => view.active) ?? views[0];
 
   const statusChip = moduleStatusChip(views);
@@ -263,16 +273,13 @@ function buildCard(moduleId: string, views: InstanceRuntimeView[]): HTMLElement 
   if (hasDir) meta.push('<span class="warn">本地源码 · 未验证</span>');
   else if (unverified) meta.push('<span class="warn">未验证</span>');
 
-  const desc =
-    manifest !== null
-      ? `授权 ${manifest.permissions.network.length} 个网络目标、${manifest.permissions.filesystem.length} 个文件路径，仅供参考，当前版本不强制。`
-      : viewDescription(views[0], role);
+  const desc = viewDescription(views[0], role);
 
   card.innerHTML = `
     <div class="card-top">
       <span class="role-ico" aria-hidden="true">${esc(ROLE_SHORT[role])}</span>
       <div style="min-width:0">
-        <span class="card-name" title="${esc(moduleLabel(moduleId))}">${esc(moduleLabel(moduleId))}</span>
+        <span class="card-name" title="${esc(moduleName(moduleId))}">${esc(moduleName(moduleId))}</span>
         <span class="card-id" title="${esc(moduleId)}">${esc(moduleId)}</span>
       </div>
       <span style="margin-left:auto">${statusChip}</span>
@@ -399,8 +406,10 @@ function cardFootHtml(moduleId: string, views: InstanceRuntimeView[]): string {
   const id = esc(moduleId);
   const primary = views.find((view) => !isExternal(view)) ?? views[0];
   const canManage = views.some((view) => isRunning(view));
-  const manifest = manifestOf(moduleId);
-  const webUi = manifest?.admin_ui?.web_ui;
+  const adminUi = primary?.admin_ui ?? null;
+  // 声明了 requires_running 的界面，实例没跑起来时不给按钮——
+  // 点了只会打开一个连不上的页面。
+  const adminReady = adminUi !== null && (!adminUi.requires_running || canManage);
   const dirInstance = views.find((view) => view.instance.source_kind === "dir");
   const needsConfirm = dirInstance && !dirInstance.instance.head_confirmed;
   const disabled = views[0]?.disabled ?? false;
@@ -410,8 +419,8 @@ function cardFootHtml(moduleId: string, views: InstanceRuntimeView[]): string {
     parts.push(
       `<button class="btn btn--sm btn--primary" type="button" data-act="confirm-source" data-id="${esc(dirInstance.instance.instance_id)}">确认变更并启动</button>`,
     );
-  } else if (webUi && canManage) {
-    parts.push(`<button class="btn btn--sm" type="button" data-act="admin" data-id="${id}">${esc(webUi.label)}</button>`);
+  } else if (adminReady && adminUi) {
+    parts.push(`<button class="btn btn--sm" type="button" data-act="admin" data-id="${id}">${esc(adminUi.label)}</button>`);
   } else if (primary) {
     parts.push(
       `<button class="btn btn--sm" type="button" data-act="detail" data-id="${esc(primary.instance.instance_id)}">详情</button>`,
@@ -456,61 +465,6 @@ function cardFootHtml(moduleId: string, views: InstanceRuntimeView[]): string {
   return parts.join("");
 }
 
-/* ------------------------------------------------------------------ */
-/* 未安装清单                                                          */
-/* ------------------------------------------------------------------ */
-
-function buildNotInstalled(): HTMLElement {
-  const installed = new Set(installedModuleIds());
-  const pending = [...store.manifests.values()].filter((m) => !installed.has(m.module_id));
-
-  const box = document.createElement("section");
-  const group = document.createElement("div");
-  group.className = "grp";
-  group.innerHTML = `
-    <span class="grp-name">清单里的其他模块</span>
-    <span class="grp-line"></span>
-    <span class="grp-stat">${pending.length === 0 ? "全部已登记" : `${pending.length} 个未安装`}</span>
-  `;
-  box.appendChild(group);
-
-  const cards = document.createElement("div");
-  cards.className = "cards";
-  for (const manifest of pending) {
-    const card = document.createElement("article");
-    card.className = "card";
-    const healthUrl = manifest.entry.health.url;
-    card.innerHTML = `
-      <div class="card-top">
-        <span class="role-ico" aria-hidden="true">${esc(manifest.category.slice(0, 3))}</span>
-        <div style="min-width:0">
-          <span class="card-name" title="${esc(manifest.name)}">${esc(manifest.name)}</span>
-          <span class="card-id">${esc(manifest.module_id)}</span>
-        </div>
-        <span class="chip chip--stop" style="margin-left:auto">未安装</span>
-      </div>
-      <p class="card-desc">${esc(
-        healthUrl
-          ? `服务入口 ${healthUrl}`
-          : `本地程序入口 ${manifest.entry.command || "（清单未声明）"}`,
-      )}</p>
-      <div class="meta"><span>${esc(manifest.category)}</span><span>v${esc(manifest.version)}</span><span>依赖 ${manifest.dependencies.length} 项</span></div>
-      <div class="card-foot">
-        <button class="btn btn--sm" type="button" data-act="goto-import">登记本地目录</button>
-        <span class="sp"></span>
-        <button class="btn btn--quiet btn--sm" type="button" data-act="manifest" data-id="${esc(manifest.module_id)}">清单</button>
-      </div>
-    `;
-    cards.appendChild(card);
-  }
-  box.appendChild(cards);
-  return box;
-}
-
-/* ------------------------------------------------------------------ */
-/* 动作                                                                */
-/* ------------------------------------------------------------------ */
-
 function bindBodyActions(body: HTMLElement): void {
   bindActions(body, [
     { act: "start", run: (node) => startOne(node.dataset.id ?? "") },
@@ -526,7 +480,7 @@ function bindBodyActions(body: HTMLElement): void {
     { act: "toggle", run: (node) => toggleModule(node.dataset.id ?? "") },
     { act: "uninstall", run: (node) => askUninstall(node.dataset.id ?? "") },
     { act: "unlink", run: (node) => askUnlink(node.dataset.id ?? "") },
-    { act: "manifest", run: (node) => showManifest(node.dataset.id ?? "") },
+    { act: "catalog", run: () => showCatalog() },
     {
       act: "goto-import",
       run: () => {
@@ -727,7 +681,7 @@ async function toggleModule(moduleId: string): Promise<void> {
 function askUninstall(instanceId: string): void {
   const view = store.views.find((v) => v.instance.instance_id === instanceId);
   if (!view) return;
-  const name = moduleLabel(view.instance.module_id);
+  const name = moduleName(view.instance.module_id);
   confirmModal({
     title: `卸载 ${name}？`,
     subtitle: instanceId,
@@ -814,27 +768,123 @@ function showInstanceDetail(instanceId: string): void {
   });
 }
 
-function showManifest(moduleId: string): void {
-  const manifest = manifestOf(moduleId);
-  if (!manifest) return;
-  const lines = [
-    `入口命令：${manifest.entry.command || "—"}`,
-    `工作目录：${manifest.entry.working_dir || "—"}`,
-    `健康检查：${manifest.entry.health.url ?? "无"}`,
-    `网络权限：${manifest.permissions.network.join("、") || "无"}`,
-    `文件权限：${manifest.permissions.filesystem.join("、") || "无"}`,
-    `设备权限：${manifest.permissions.devices.join("、") || "无"}`,
-    `运行依赖：${manifest.dependencies.map((d) => `${d.name} ${d.version}`).join("、") || "无"}`,
-    `模型包：${manifest.model_packs.map((p) => p.name).join("、") || "无"}`,
-  ];
+/* ------------------------------------------------------------------ */
+/* 模块目录（在线安装）                                                */
+/* ------------------------------------------------------------------ */
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)} KiB`;
+  return `${bytes} B`;
+}
+
+/**
+ * 目录条目 → 一行。
+ *
+ * 已安装的也给按钮：重装（同版本覆盖）是排障最常用的一步，
+ * 但按钮文案要写清楚是「重装」而不是「安装」。
+ */
+function catalogRow(entry: CatalogEntry): string {
+  const installed = store.views.some((v) => v.instance.module_id === entry.module_id);
+  const label = installed ? "重装" : "安装";
+  return `
+    <div class="cat-row" data-module="${esc(entry.module_id)}" data-variant="${esc(entry.variant)}">
+      <div class="cat-main">
+        <b>${esc(entry.name || entry.module_id)}</b>
+        <span class="cap">${esc(entry.module_id)}@${esc(entry.variant)} · v${esc(entry.version)} · ${esc(ROLE_TITLE[entry.role] ?? entry.role)} · ${esc(formatBytes(entry.size))}</span>
+        <code class="fp">${esc(entry.sha256)}</code>
+      </div>
+      <div class="cat-side">
+        ${installed ? '<span class="chip chip--run">已安装</span>' : ""}
+        <button class="btn btn--sm${installed ? "" : " btn--primary"}" type="button" data-act="cat-install">${label}</button>
+      </div>
+    </div>
+  `;
+}
+
+/** 拉目录并摊开给用户看。目录取不到时明确说原因，不给「空列表」。 */
+async function showCatalog(): Promise<void> {
+  let res: CatalogResponse;
+  try {
+    res = await refreshCatalog("");
+  } catch (error) {
+    toast(`读取模块目录失败：${describeError(error)}`, "error");
+    return;
+  }
+
+  if (res.source === "unavailable") {
+    openModal({
+      title: "模块目录",
+      subtitle: "取不到目录",
+      bodyHtml: `
+        <p style="margin:0 0 8px">${esc(res.reason ?? "未知原因")}</p>
+        <p class="cap" style="margin:0">允许访问的域名：${esc(res.allowlist.join("、"))}</p>
+        <p class="cap" style="margin:8px 0 0">网络不通时也可以到「导入本地」装一个 .zip 离线包。</p>
+      `,
+      actions: [{ label: "关闭", tone: "quiet", autofocus: true }],
+    });
+    return;
+  }
+
+  const body = res.entries.length
+    ? res.entries.map(catalogRow).join("")
+    : `<p class="cap" style="margin:0">目录是空的：还没有模块上架。</p>`;
+  const note =
+    res.source === "cache"
+      ? `<p class="cap" style="margin:0 0 8px">在线目录不可用，以下是本次会话内已验签的目录。原因：${esc(res.reason ?? "")}</p>`
+      : "";
+
   openModal({
-    title: manifest.name,
-    subtitle: `${manifest.module_id} · ${manifest.category} · v${manifest.version}`,
+    title: "模块目录",
+    subtitle: `${res.entries.length} 个可安装模块`,
     wide: true,
-    bodyHtml: `<pre class="fp" style="white-space:pre-wrap">${esc(lines.join("\n"))}</pre>
-      <p class="cap" style="margin:0">权限声明仅供参考，当前版本不强制。是否可信以包内的清单文件为准。</p>`,
+    bodyHtml: `${note}<div class="cat-list">${body}</div>`,
+    footNote: "包按目录声明的 sha256 校验后再安装",
     actions: [{ label: "关闭", tone: "quiet", autofocus: true }],
+    onMount: (root) => {
+      bindActions(root, [
+        { act: "cat-install", run: (el) => runCatalogInstall(el, false) },
+        { act: "cat-force", run: (el) => runCatalogInstall(el, true) },
+      ]);
+    },
   });
+}
+
+/**
+ * 安装一行。
+ *
+ * `confirm=false` 先试一次：B/C 类包 Rust 会拒绝并说明原因，
+ * 这里把同一个按钮改成「确认并安装」，用户看到原因再决定。
+ * 确认这个判断不放进前端——前端只负责把用户的决定回传。
+ */
+async function runCatalogInstall(button: HTMLElement, confirm: boolean): Promise<void> {
+  const row = button.closest<HTMLElement>(".cat-row");
+  if (!row) return;
+  const moduleId = row.dataset.module ?? "";
+  const variant = row.dataset.variant ?? "";
+  if (!moduleId) return;
+
+  const idleLabel = button.textContent ?? "安装";
+  button.setAttribute("disabled", "disabled");
+  button.textContent = confirm ? "安装中…" : "下载中…";
+  try {
+    const res = await installFromCatalog(moduleId, variant || null, confirm);
+    closeModal();
+    toast(`已安装 ${res.module_id}：${res.files} 个文件，${formatBytes(res.bytes)}`, "ok");
+    await refreshModules();
+  } catch (error) {
+    const message = describeError(error);
+    button.removeAttribute("disabled");
+    if (!confirm && message.includes("需要用户显式确认")) {
+      button.textContent = "确认并安装";
+      button.dataset.act = "cat-force";
+      row.querySelector(".cat-note")?.remove();
+      row.insertAdjacentHTML("beforeend", `<p class="cat-note">${esc(message)}</p>`);
+      return;
+    }
+    button.textContent = idleLabel;
+    toast(`安装 ${moduleId} 失败：${message}`, "error");
+  }
 }
 
 /* ------------------------------------------------------------------ */

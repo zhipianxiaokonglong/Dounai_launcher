@@ -101,10 +101,16 @@ pub enum TrustVerdictView {
 #[derive(Debug, Serialize)]
 pub struct CatalogEntryView {
     pub module_id: String,
+    pub variant: String,
     pub name: String,
     pub version: String,
-    pub download_url: String,
+    pub role: Role,
+    /// 目录声明的整包哈希（`sha256:` 前缀），界面原样展示。
     pub sha256: String,
+    pub size: u64,
+    /// 第一条 source 的地址，仅供排障阅读；安装时由 Rust 重新逐源校验。
+    pub download_url: String,
+    pub signature_required: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -148,15 +154,6 @@ pub struct PurgeResponse {
     pub state_cleared: bool,
     pub removed_module_dirs: Vec<String>,
     pub errors: Vec<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct DownloadResponse {
-    pub path: String,
-    pub bytes: u64,
-    pub source: String,
-    pub resumed_from: u64,
-    pub attempts: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -243,19 +240,6 @@ pub struct PurgeRequest {
     pub state: bool,
     #[serde(default)]
     pub module_files: bool,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct DownloadRequest {
-    pub module_id: String,
-    pub sources: Vec<String>,
-    pub expected_sha256: String,
-    #[serde(default = "default_retries")]
-    pub retries: usize,
-}
-
-fn default_retries() -> usize {
-    2
 }
 
 #[derive(Debug, Deserialize)]
@@ -514,12 +498,31 @@ fn restart_instance_impl(
 
 /// 界面一次拿齐渲染一张卡片所需的全部事实。
 ///
+/// 模块自带管理界面的入口声明（来自模块根 manifest 的 `admin_ui.web_ui`）。
+#[derive(Debug, Clone, Serialize)]
+pub struct AdminUiView {
+    pub label: String,
+    /// 必须以 `/` 开头；完整 URL 由 `open_admin_window` 按端口拼。
+    pub path: String,
+    pub requires_running: bool,
+}
+
+/// 界面一次拿齐渲染一张卡片所需的全部事实。
+///
 /// 光有 `Instance` 不够：端口由 `assign_ports` 按 active / 备用端口段分配，
 /// 前端自己推算必然与真实启动值分叉（M4 的卡片要显示端口）。
 /// 所以端口只从这里出，前端不复制分配规则。
 #[derive(Debug, Serialize)]
 pub struct InstanceRuntimeView {
     pub instance: Instance,
+    /// 模块清单里的展示名；读不到退回 module_id。
+    ///
+    /// 为什么由 Rust 提供而不是前端另读一份内置清单：内置 manifest 的
+    /// module_id 是 v1 的 `dounai-input`，实例是 v2 的 `dounai/dounai-input`，
+    /// 前端用内置清单查表永远落空，管理页按钮也就永远不出现。
+    pub name: String,
+    /// 没有声明管理界面的模块为 None，界面据此不渲染按钮。
+    pub admin_ui: Option<AdminUiView>,
     /// 该实例真正会在用的端口；`shell` 与未分配备用端口时为 None。
     pub port: Option<u16>,
     /// 是否为所在 role 的 active 槽实例。
@@ -557,6 +560,10 @@ pub fn list_instance_views(
         })
         .map(|i| i.instance_id.clone())
         .collect();
+    let briefs: std::collections::BTreeMap<String, ManifestBrief> = instances
+        .iter()
+        .map(|i| (i.instance_id.clone(), manifest_brief(&state, i)))
+        .collect();
     compose_instance_views(
         instances,
         &ports,
@@ -564,7 +571,60 @@ pub fn list_instance_views(
         &disabled,
         &supervisor.snapshot(),
         &prepared,
+        &briefs,
     )
+}
+
+/// 卡片展示用的清单摘要。
+#[derive(Debug, Clone)]
+struct ManifestBrief {
+    name: String,
+    admin_ui: Option<AdminUiView>,
+}
+
+/// 读模块根 manifest 取展示字段。
+///
+/// 读不到不算错误：卡片退回 module_id 展示，管理页按钮不出现——
+/// 这与「声明了才给入口」是同一件事，不编造一个不存在的界面。
+fn manifest_brief(state: &AppStateV2, instance: &Instance) -> ManifestBrief {
+    let raw = match read_manifest_value(&state.module_dir(instance)) {
+        Ok(value) => value,
+        Err(_) => {
+            return ManifestBrief {
+                name: instance.module_id.clone(),
+                admin_ui: None,
+            }
+        }
+    };
+    let name = raw
+        .get("name")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(&instance.module_id)
+        .to_string();
+    // shell 角色的管理界面不依赖实例运行，其余默认要求已在运行。
+    let default_requires_running = instance.role.needs_runtime();
+    let admin_ui = raw
+        .pointer("/admin_ui/web_ui")
+        .and_then(|web| {
+            let path = web.get("path")?.as_str()?;
+            if !path.starts_with('/') {
+                return None;
+            }
+            Some(AdminUiView {
+                label: web
+                    .get("label")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("打开管理界面")
+                    .to_string(),
+                path: path.to_string(),
+                requires_running: web
+                    .get("requires_running")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(default_requires_running),
+            })
+        });
+    ManifestBrief { name, admin_ui }
 }
 
 /// 组合逻辑单独成函数：命令层只取数据，排序、端口回填与 active 判定都在这里，
@@ -576,16 +636,24 @@ fn compose_instance_views(
     disabled: &BTreeSet<String>,
     snapshots: &std::collections::BTreeMap<String, Snapshot>,
     prepared: &BTreeSet<String>,
+    briefs: &std::collections::BTreeMap<String, ManifestBrief>,
 ) -> Vec<InstanceRuntimeView> {
     instances
         .into_iter()
-        .map(|instance| InstanceRuntimeView {
-            port: ports.get(&instance.instance_id).copied().flatten(),
-            active: active.values().any(|id| id == &instance.instance_id),
-            disabled: disabled.contains(&instance.module_id),
-            prepared: prepared.contains(&instance.instance_id),
-            snapshot: snapshots.get(&instance.instance_id).cloned(),
-            instance,
+        .map(|instance| {
+            let brief = briefs.get(&instance.instance_id);
+            InstanceRuntimeView {
+                name: brief
+                    .map(|b| b.name.clone())
+                    .unwrap_or_else(|| instance.module_id.clone()),
+                admin_ui: brief.and_then(|b| b.admin_ui.clone()),
+                port: ports.get(&instance.instance_id).copied().flatten(),
+                active: active.values().any(|id| id == &instance.instance_id),
+                disabled: disabled.contains(&instance.module_id),
+                prepared: prepared.contains(&instance.instance_id),
+                snapshot: snapshots.get(&instance.instance_id).cloned(),
+                instance,
+            }
         })
         .collect()
 }
@@ -1282,6 +1350,40 @@ fn prepare_instance_env_impl(
 /* 双源 catalog                                                        */
 /* ------------------------------------------------------------------ */
 
+/// 内置分发根：SourceForge 项目 `dounai-releases` 的下载目录。
+///
+/// 目录与包都从这里取。SF 的下载域一律 302 到镜像主机，跟随与逐跳域名校验
+/// 在 `m2_http::ReqwestCatalogFetcher` 里完成。
+pub const BUILTIN_CATALOG_BASE: &str =
+    "https://downloads.sourceforge.net/project/dounai-releases";
+
+/// 第二个源：GitHub 仓库的 raw 目录。没有配就是不参与，不算故障。
+const BUILTIN_CATALOG_MIRROR: &str =
+    "https://raw.githubusercontent.com/Tonyjh07/dounai-releases/main";
+
+/// 按 URL 主机挑白名单：同一套适配器代码要同时服务两个源。
+fn catalog_adapter<'a>(
+    id: &str,
+    base_url: &str,
+    priority: u32,
+    k5: &str,
+    http: &'a dyn launcher_core::m2::adapters::HttpFetcher,
+) -> RemoteCatalogAdapter<'a> {
+    let host = launcher_core::m2::source::url_host(base_url).unwrap_or_default();
+    if launcher_core::m2::source::host_allowed(
+        host,
+        launcher_core::m2::source::SOURCEFORGE_HOST_SUFFIXES,
+    ) {
+        RemoteCatalogAdapter::sourceforge(id, base_url, priority, k5, http)
+    } else {
+        RemoteCatalogAdapter::github(id, base_url, priority, k5, http)
+    }
+}
+
+/// 刷新模块目录。
+///
+/// `catalog_url` 留空即用内置源；设置页想临时换源时才传地址。
+/// 第二源只在显式配置（内置镜像默认参与）时加入，单源裁决照样成立。
 #[tauri::command]
 pub fn refresh_catalog(state: State<'_, AppStateV2>, catalog_url: String) -> CatalogResponse {
     let allowlist = crate::state_v2::allowed_hosts();
@@ -1290,20 +1392,31 @@ pub fn refresh_catalog(state: State<'_, AppStateV2>, catalog_url: String) -> Cat
         Err(error) => return unavailable(&allowlist, error),
     };
     let k5 = state.k5_pubkey();
-    let github = RemoteCatalogAdapter::github("github", &catalog_url, 1, &k5, &fetcher);
-    let github_result = github.fetch_catalog();
 
-    // 第二源只有显式配置时才参与；没有配置不算故障，单源裁决照样成立。
-    let sf_url = std::env::var("DOUNAI_SF_CATALOG_URL").unwrap_or_default();
-    let sf = RemoteCatalogAdapter::sourceforge("sourceforge", &sf_url, 2, &k5, &fetcher);
+    let primary = {
+        let typed = catalog_url.trim();
+        if typed.is_empty() {
+            std::env::var("DOUNAI_CATALOG_URL")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| BUILTIN_CATALOG_BASE.to_string())
+        } else {
+            typed.to_string()
+        }
+    };
+    let mirror = std::env::var("DOUNAI_CATALOG_MIRROR")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| BUILTIN_CATALOG_MIRROR.to_string());
+
     let mut candidates: Vec<(u32, Result<_, _>)> = Vec::new();
-    match github_result {
+    match catalog_adapter("primary", &primary, 1, &k5, &fetcher).fetch_catalog() {
         Ok(Some(doc)) => candidates.push((1, Ok(doc))),
         Ok(None) => {}
         Err(error) => candidates.push((1, Err(error))),
     }
-    if !sf_url.is_empty() {
-        match sf.fetch_catalog() {
+    if !mirror.is_empty() && mirror != primary {
+        match catalog_adapter("mirror", &mirror, 2, &k5, &fetcher).fetch_catalog() {
             Ok(Some(doc)) => candidates.push((2, Ok(doc))),
             Ok(None) => {}
             Err(error) => candidates.push((2, Err(error))),
@@ -1347,14 +1460,18 @@ fn catalog_entries(doc: &launcher_core::m2::catalog::CatalogDocument) -> Vec<Cat
         .iter()
         .map(|entry| CatalogEntryView {
             module_id: entry.module_id.clone(),
+            variant: entry.variant.clone(),
             name: entry.name.clone(),
             version: entry.version.clone(),
+            role: entry.role,
+            sha256: entry.sha256.clone(),
+            size: entry.size,
             download_url: entry
                 .sources
                 .first()
                 .map(|s| s.url.clone())
                 .unwrap_or_default(),
-            sha256: bare_sha256(&entry.sha256),
+            signature_required: entry.signature_required,
         })
         .collect()
 }
@@ -1886,44 +2003,89 @@ pub async fn open_admin_window(
         .unwrap_or_else(|_| Err("打开管理窗口超时".into()))
 }
 
-#[tauri::command]
-pub fn download_package(
-    state: State<'_, AppStateV2>,
-    request: DownloadRequest,
-) -> Result<DownloadResponse, String> {
-    if request.sources.is_empty() {
-        return Err("没有提供下载源".into());
+/// 下载目录中缓存包的文件名。模块 id 用 `_` 替掉 `/`，`is_safe_filename` 兜底。
+fn download_file_name(module_id: &str, variant: &str) -> String {
+    format!("{}@{variant}.zip", module_id.replace('/', "_"))
+}
+
+/// 在线安装：从本次会话验签过的 catalog 里挑一个条目，下载后走同一条安装链路。
+///
+/// 为什么不给前端「先下载再安装」两步：两步之间包可能被换掉，而安装侧的
+/// `expected_sha256` 是前端从列表里读的字符串，等于把一个信任决定交给界面。
+/// 这里目录条目、下载校验、安装校验三处用的是**同一个** sha256 与 size。
+fn install_from_catalog_impl(
+    state: &AppStateV2,
+    module_id: &str,
+    variant: Option<&str>,
+    confirm: bool,
+) -> Result<InstallResponse, String> {
+    let doc = state
+        .cached_catalog()
+        .ok_or_else(|| "模块目录还没刷新，请先刷新目录".to_string())?;
+    let entry = match variant {
+        Some(v) => doc.entry(module_id, v).cloned(),
+        None => doc
+            .modules
+            .iter()
+            .find(|e| e.module_id == module_id)
+            .cloned(),
     }
-    if request.expected_sha256.trim().is_empty() {
-        return Err("拒绝下载：缺少 expected_sha256".into());
+    .ok_or_else(|| format!("模块目录里没有 {module_id}"))?;
+
+    let sources: Vec<String> = entry.sources.iter().map(|s| s.url.clone()).collect();
+    if sources.is_empty() {
+        return Err(format!("{module_id} 在目录里没有下载地址"));
     }
-    for source in &request.sources {
+    for source in &sources {
         validate_download_url(source, ALL_HOST_SUFFIXES)
             .map_err(|e| format!("下载源 {source} 被拒绝：{e}"))?;
     }
-    if !launcher_core::security::is_safe_filename(&request.module_id) {
-        return Err(format!("非法的模块 id：{}", request.module_id));
+    let file_name = download_file_name(&entry.module_id, &entry.variant);
+    if !launcher_core::security::is_safe_filename(&file_name) {
+        return Err(format!("非法的下载文件名：{file_name}"));
     }
-    let dest = state
-        .paths
-        .data_root
-        .join("downloads")
-        .join(format!("{}.zip", request.module_id));
+    let dest = state.paths.data_root.join("downloads").join(&file_name);
     let client = crate::http_client::ReqwestClient::default_client()?;
     let options = crate::download::DownloadOptions {
-        retries: request.retries,
+        retries: 2,
         backoff_ms: 150,
-        expected_sha256: Some(bare_sha256(request.expected_sha256.trim())),
+        expected_sha256: Some(bare_sha256(&entry.sha256)),
     };
-    let report = crate::download::download(&client, &request.sources, &dest, &options)
-        .map_err(|e| format!("下载失败：{e}"))?;
-    Ok(DownloadResponse {
-        path: report.path.to_string_lossy().into_owned(),
-        bytes: report.bytes,
-        source: report.source,
-        resumed_from: report.resumed_from,
-        attempts: report.attempts,
+    let report = crate::download::download(&client, &sources, &dest, &options)
+        .map_err(|e| format!("下载 {module_id} 失败：{e}"))?;
+    let bytes = std::fs::read(&report.path).map_err(|e| format!("读取下载文件失败：{e}"))?;
+    if bytes.len() as u64 != entry.size {
+        return Err(format!(
+            "{module_id} 包大小与目录声明不一致：目录 {} 字节，实际 {} 字节",
+            entry.size,
+            bytes.len()
+        ));
+    }
+    commit_install(
+        state,
+        &bytes,
+        &entry.sha256,
+        Some(&entry.module_id),
+        Some(&entry.version),
+        confirm,
+    )
+}
+
+/// 在线安装入口。参数与 `install_local_package` 保持同一返回形状。
+#[tauri::command]
+pub async fn install_from_catalog(
+    module_id: String,
+    variant: Option<String>,
+    confirm: bool,
+    app: tauri::AppHandle,
+) -> Result<InstallResponse, String> {
+    // 下载会阻塞几秒到几十秒，放主线程会冻住窗口。
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppStateV2>();
+        install_from_catalog_impl(&state, &module_id, variant.as_deref(), confirm)
     })
+    .await
+    .map_err(|e| format!("安装任务失败：{e}"))?
 }
 
 /// 设置页一次读完：信任表、保留策略与两枚内置公钥的指纹。
@@ -2281,6 +2443,7 @@ mod tests {
             &disabled,
             &snapshots,
             &prepared,
+            &std::collections::BTreeMap::new(),
         );
         assert_eq!(views.len(), 2);
         assert_eq!(views[0].port, Some(8102));

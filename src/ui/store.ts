@@ -15,39 +15,29 @@ import {
   trustInfo,
   devModeStatus,
   BridgeUnavailableError,
-  type CatalogResponse,
   type InstanceRuntimeView,
   type RustEnvReport,
   type SettingsSnapshot,
   type TrustInfo,
 } from "../bridge.js";
-import { type BundleDefinition, parseBundle } from "../bundle.js";
-import { type ModuleManifest, parseManifest } from "../manifest.js";
 
 export interface Store {
   /** 已登记实例的合并视图（含端口、active、快照）。 */
   views: InstanceRuntimeView[];
-  /** 打包进 dist 的内置清单：未安装模块的展示名与描述来自这里。 */
-  manifests: Map<string, ModuleManifest>;
-  bundles: BundleDefinition[];
   env: RustEnvReport | null;
   /** 上次环境检测时间（本地时钟，只用于「上次检测 …」这一行文案）。 */
   envCheckedAt: Date | null;
   settings: SettingsSnapshot | null;
   trust: TrustInfo | null;
-  catalog: CatalogResponse | null;
   devMode: boolean;
 }
 
 export const store: Store = {
   views: [],
-  manifests: new Map(),
-  bundles: [],
   env: null,
   envCheckedAt: null,
   settings: null,
   trust: null,
-  catalog: null,
   devMode: false,
 };
 
@@ -56,39 +46,6 @@ export function describeError(error: unknown): string {
   if (error instanceof BridgeUnavailableError) return error.message;
   if (error instanceof Error) return error.message;
   return String(error);
-}
-
-/* ------------------------------------------------------------------ */
-/* 内置元数据（构建期内联，永远可读）                                  */
-/* ------------------------------------------------------------------ */
-
-export async function loadMeta(): Promise<void> {
-  const manifestFiles = import.meta.glob("/manifests/*.json", {
-    eager: true,
-    import: "default",
-  });
-  for (const raw of Object.values(manifestFiles)) {
-    try {
-      const manifest = parseManifest(raw);
-      store.manifests.set(manifest.module_id, manifest);
-    } catch (error) {
-      console.warn("跳过非法内置清单", error);
-    }
-  }
-
-  const bundleFiles = import.meta.glob("/bundles/*.json", { eager: true, import: "default" });
-  const order = ["minimal", "lite", "full", "offline"];
-  store.bundles = Object.values(bundleFiles)
-    .map((raw) => {
-      try {
-        return parseBundle(raw);
-      } catch (error) {
-        console.warn("跳过非法套装", error);
-        return null;
-      }
-    })
-    .filter((bundle): bundle is BundleDefinition => bundle !== null)
-    .sort((a, b) => order.indexOf(a.bundle_id) - order.indexOf(b.bundle_id));
 }
 
 /* ------------------------------------------------------------------ */
@@ -136,16 +93,17 @@ export async function refreshDevMode(): Promise<void> {
 /* 派生查询（只读，不缓存）                                            */
 /* ------------------------------------------------------------------ */
 
-/** 模块展示名：优先内置清单，其次模块根 manifest 读回的名字，最后退回 id。 */
-export function moduleLabel(moduleId: string): string {
-  const manifest = store.manifests.get(moduleId);
-  if (manifest) return manifest.name;
+/**
+ * 模块展示名。
+ *
+ * 名字只有两个来源：实例视图里 Rust 读回的清单名，或 module_id 本身。
+ * 以前这里还查一份打包进 dist 的内置清单，那份清单是 v1 的 module_id
+ * （`dounai-input` vs `dounai/dounai-input`），查表恒落空，等于白写。
+ */
+export function moduleName(moduleId: string): string {
   const first = store.views.find((view) => view.instance.module_id === moduleId);
-  return first?.instance.module_id ?? moduleId;
-}
-
-export function manifestOf(moduleId: string): ModuleManifest | null {
-  return store.manifests.get(moduleId) ?? null;
+  if (first && first.name) return first.name;
+  return moduleId;
 }
 
 /** 已登记的模块 id（去重、稳定顺序）。 */

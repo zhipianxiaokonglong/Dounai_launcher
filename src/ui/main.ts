@@ -11,7 +11,6 @@ import { esc, must, toast } from "./dom.js";
 import { initTheme } from "./theme.js";
 import {
   describeError,
-  loadMeta,
   refreshDevMode,
   refreshEnv,
   refreshSettings,
@@ -19,16 +18,15 @@ import {
   runCounts,
   store,
 } from "./store.js";
-import { renderBundles } from "./views/bundles.js";
 import { renderEnv } from "./views/env.js";
 import { renderImport } from "./views/import.js";
 import { focusInstance, renderLogs } from "./views/logs.js";
 import { refreshModules, renderModules } from "./views/modules.js";
 import { renderSettings } from "./views/settings.js";
 
-type ViewId = "modules" | "bundles" | "env" | "logs" | "settings" | "import";
+type ViewId = "modules" | "env" | "logs" | "settings" | "import";
 
-const VIEWS: ViewId[] = ["modules", "bundles", "env", "logs", "settings", "import"];
+const VIEWS: ViewId[] = ["modules", "env", "logs", "settings", "import"];
 
 let current: ViewId = "modules";
 
@@ -52,9 +50,6 @@ async function renderView(view: ViewId, arg?: string): Promise<void> {
     switch (view) {
       case "modules":
         renderModules(slots);
-        break;
-      case "bundles":
-        renderBundles(slots);
         break;
       case "env":
         await renderEnv(slots);
@@ -94,7 +89,6 @@ function markNav(view: ViewId): void {
 function updateChrome(): void {
   const counts = runCounts();
   setCount("nav-count-modules", String(counts.total), counts.failed > 0);
-  setCount("nav-count-bundles", store.bundles.length > 0 ? String(store.bundles.length) : "", false);
   const problems = store.env ? store.env.problems.length : 0;
   setCount("nav-count-env", problems > 0 ? String(problems) : "", problems > 0);
   setCount("nav-count-logs", counts.running > 0 ? String(counts.running) : "", false);
@@ -167,7 +161,6 @@ async function boot(): Promise<void> {
   const version = document.getElementById("brand-version");
   if (version) version.textContent = `launcher ${__APP_VERSION__}`;
 
-  await loadMeta();
   updateChrome();
   // 先把外壳接好再拉数据：环境检测要跑子进程，几百毫秒到几秒不等，
   // 期间界面必须已经能点、能切页，否则等数据回来之前就是一块死界面。

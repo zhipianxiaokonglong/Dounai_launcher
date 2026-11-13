@@ -51,10 +51,15 @@ export interface RunView {
 
 export interface CatalogEntry {
   module_id: string;
+  variant: string;
   name: string;
   version: string;
-  download_url: string;
+  role: Role;
+  /** 目录声明的整包哈希，安装时 Rust 用它校验下载结果。 */
   sha256: string;
+  size: number;
+  download_url: string;
+  signature_required: boolean;
 }
 
 export interface CatalogResponse {
@@ -72,14 +77,6 @@ export interface InstallResponse {
   install_dir: string;
   /** 信任判定：signed（已验签）或 unsigned_allowed（调试放行） */
   trust: { kind: "signed"; key_index: number } | { kind: "unsigned_allowed" };
-}
-
-export interface DownloadResponse {
-  path: string;
-  bytes: number;
-  source: string;
-  resumed_from: number;
-  attempts: number;
 }
 
 export interface TrustInfo {
@@ -316,23 +313,25 @@ export async function installLocalPackage(
 }
 
 /* ------------------------------------------------------------------ */
-/* 在线安装：catalog 选源 → 下载到本地 → 走同一条本地包安装链路          */
+/* 在线安装：catalog 选条目 → 下载并校验 → 同一条安装链路                */
 /* ------------------------------------------------------------------ */
 
-/** 下载模块包（重试 / 断点续传 / 镜像加速 / 哈希校验）。 */
-export async function downloadPackage(req: {
-  moduleId: string;
-  sources: string[];
-  expectedSha256: string;
-  retries?: number;
-}): Promise<DownloadResponse> {
-  return call<DownloadResponse>("download_package", {
-    request: {
-      module_id: req.moduleId,
-      sources: req.sources,
-      expected_sha256: req.expectedSha256,
-      retries: req.retries ?? 2,
-    },
+/**
+ * 从已验签的模块目录安装。
+ *
+ * 目录条目里的 sha256 与 size 一份三用：下载校验、安装校验、界面展示。
+ * `confirm` 用于 B/C 类包：为 false 时 Rust 直接拒绝并说明原因，
+ * 界面据此弹确认框后带 true 重试——确认这一步不交给界面自己判断。
+ */
+export async function installFromCatalog(
+  moduleId: string,
+  variant: string | null,
+  confirm: boolean,
+): Promise<InstallResponse> {
+  return call<InstallResponse>("install_from_catalog", {
+    moduleId,
+    variant,
+    confirm,
   });
 }
 
@@ -514,8 +513,20 @@ export interface InstanceSnapshot {
  * `port` 只从 Rust 的 `assign_ports` 来：前端自己推算规范端口/备用端口
  * 一定会与实际启动值分叉，那正是「显示什么 ≠ 跑什么」。
  */
+/** 模块自带管理界面的入口声明（读自模块根 manifest）。 */
+export interface AdminUiView {
+  label: string;
+  /** 以 `/` 开头；完整地址由 Rust 按端口拼，前端不拼。 */
+  path: string;
+  requires_running: boolean;
+}
+
 export interface InstanceRuntimeView {
   instance: Instance;
+  /** 清单里的展示名；读不到即 module_id。 */
+  name: string;
+  /** 未声明管理界面时为 null，界面据此不渲染按钮。 */
+  admin_ui: AdminUiView | null;
   port: number | null;
   active: boolean;
   disabled: boolean;

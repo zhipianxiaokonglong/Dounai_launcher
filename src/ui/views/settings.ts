@@ -6,6 +6,7 @@
  */
 
 import {
+  enableDevMode,
   isDesktop,
   refreshCatalog,
   revokeTrustedKey,
@@ -245,15 +246,15 @@ function networkHtml(): string {
   return (
     row(
       "Catalog 源",
-      "主源失败才回落",
-      `<div class="inputbox" style="margin-bottom:6px"><span>sourceforge.net/projects/dounai-releases/files/catalog-v2.json</span><span class="hint">主</span></div>
-       <p class="cap" style="margin:6px 0 0">内置源尚未发布，当前为空。可以手动填一个地址试拉取，结果只用于验证通道。</p>`
+      "主源失败才回落镜像",
+      `<div class="inputbox" style="margin-bottom:6px"><span>downloads.sourceforge.net/project/dounai-releases</span><span class="hint">主</span></div>
+       <p class="cap" style="margin:6px 0 0">目录与包都从这个源取，catalog 由 K5 签名、有效期 7 天。SourceForge 的下载域会 302 到镜像主机，启动器逐跳校验域名后再跟随。</p>`
     ) +
     row(
       "手动拉取",
-      "需在出网白名单内",
+      "留空即用内置源",
       `<div style="display:flex;gap:8px;align-items:center">
-        <input id="catalog-url" class="input" style="flex:1" placeholder="https://…/catalog-v2.json" />
+        <input id="catalog-url" class="input" style="flex:1" placeholder="留空用内置源，或填 https://…/catalog.json" />
         <button class="btn btn--sm" type="button" data-act="fetch-catalog">拉取</button>
         ${status}
       </div>
@@ -291,8 +292,8 @@ function diagnosticsHtml(): string {
       "本次会话有效",
       `<div style="display:flex;gap:8px;align-items:center">
         <span class="chip ${store.devMode ? "chip--run" : "chip--stop"}">${store.devMode ? "已开启" : "未开启"}</span>
-        <button class="btn btn--sm" type="button" data-act="goto-import">${
-          store.devMode ? "登记本地目录" : "开启后登记目录"
+        <button class="btn btn--sm" type="button" data-act="dev-mode">${
+          store.devMode ? "登记本地目录" : "开启本地目录登记"
         }</button>
       </div>`
     ) +
@@ -417,9 +418,35 @@ function bindSection(form: Element): void {
     window.dispatchEvent(new CustomEvent("dounai:navigate", { detail: "env" }));
   });
 
+  form.querySelector('[data-act="dev-mode"]')?.addEventListener("click", () => {
+    void openDevMode();
+  });
+
   form.querySelector('[data-act="goto-import"]')?.addEventListener("click", () => {
     window.dispatchEvent(new CustomEvent("dounai:navigate", { detail: "import" }));
   });
+}
+
+/**
+ * 本地目录登记开关。
+ *
+ * 已开启就直接去导入页；没开启先真的调用 `enable_dev_mode`——
+ * 以前这个按钮只是跳转，四个本地模块命令都要求 dev mode，
+ * 于是「登记本地目录」这条路点到底也走不通。
+ */
+async function openDevMode(): Promise<void> {
+  if (!store.devMode) {
+    try {
+      const info = await enableDevMode();
+      store.devMode = info.enabled;
+      toast("本地目录登记已开启，本次会话有效", "ok");
+      await reload();
+    } catch (error) {
+      toast(`开启失败：${describeError(error)}`, "error");
+      return;
+    }
+  }
+  window.dispatchEvent(new CustomEvent("dounai:navigate", { detail: "import" }));
 }
 
 async function saveKeepVersions(value: number): Promise<void> {
@@ -433,10 +460,6 @@ async function saveKeepVersions(value: number): Promise<void> {
 }
 
 async function fetchCatalog(url: string): Promise<void> {
-  if (!url) {
-    toast("请先填写 catalog 地址", "error");
-    return;
-  }
   try {
     const result = await refreshCatalog(url);
     catalogResult = result;

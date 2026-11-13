@@ -2,11 +2,17 @@
 //!
 //! core 只定义取数接口，不发起请求；这里负责超时、重定向与域名后缀校验。
 //! 下载器（断点续传/重试）继续复用 `download.rs`，见 DESIGN.md:126。
+//!
+//! **重定向**：SourceForge 的下载域一律 302 到镜像主机（`xxx.dl.sourceforge.net`），
+//! 直接拒绝会让整个分发源不可用。这里改成"逐跳跟随但每跳都校验域名"：
+//! 每一跳的 host 必须仍在白名单后缀内，超过 `MAX_HOPS` 即放弃。
+//! 这与 `core::m2::source::validate_download_url` 的意图一致——它本来就是按
+//! "重定向逐跳校验"设计的，只是此前没人真的跟随。
 
 use std::time::Duration;
 
 use launcher_core::m2::adapters::HttpFetcher;
-use launcher_core::m2::source::SourceError;
+use launcher_core::m2::source::{host_allowed, url_host, SourceError};
 
 /// 允许的 catalog/包下载域名后缀。与双源契约一致。
 pub const ALL_HOST_SUFFIXES: &[&str] = &[
@@ -15,6 +21,9 @@ pub const ALL_HOST_SUFFIXES: &[&str] = &[
     "sourceforge.net",
     "sourceforge.io",
 ];
+
+/// 跟随重定向的跳数上限。SF 实测是 master.dl → downloads → 镜像，共 2 跳。
+const MAX_HOPS: usize = 5;
 
 pub struct ReqwestCatalogFetcher {
     client: reqwest::blocking::Client,
@@ -25,6 +34,7 @@ impl ReqwestCatalogFetcher {
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(10))
             .connect_timeout(Duration::from_secs(5))
+            // 跳转由本文件手动跟随：自动跟随看不到中间跳，等于绕过白名单。
             .redirect(reqwest::redirect::Policy::none())
             .user_agent("dounai-launcher/0.3.1")
             .build()
@@ -35,40 +45,57 @@ impl ReqwestCatalogFetcher {
 
 impl HttpFetcher for ReqwestCatalogFetcher {
     fn get(&self, url: &str) -> Result<Vec<u8>, SourceError> {
-        if !url.starts_with("https://") {
-            return Err(SourceError::Unavailable {
-                source_id: "http".into(),
-                reason: format!("只允许 https 地址：{url}"),
-            });
-        }
-        let response = self
-            .client
-            .get(url)
-            .send()
-            .map_err(|e| SourceError::Unavailable {
-                source_id: url.into(),
-                reason: e.to_string(),
+        let unavailable = |target: &str, reason: String| SourceError::Unavailable {
+            source_id: target.into(),
+            reason,
+        };
+        let mut current = url.to_string();
+        for _hop in 0..=MAX_HOPS {
+            if !current.starts_with("https://") {
+                return Err(unavailable(&current, format!("只允许 https 地址：{current}")));
+            }
+            let host = url_host(&current).ok_or_else(|| {
+                unavailable(&current, format!("无法解析主机名：{current}"))
             })?;
-        let status = response.status().as_u16();
-        if (300..400).contains(&status) {
-            return Err(SourceError::Unavailable {
-                source_id: url.into(),
-                reason: format!("服务端返回重定向 {status}，不自动跟随"),
-            });
+            if !host_allowed(host, ALL_HOST_SUFFIXES) {
+                return Err(unavailable(
+                    &current,
+                    format!("域名不在白名单内：{host}"),
+                ));
+            }
+
+            let response = self
+                .client
+                .get(&current)
+                .send()
+                .map_err(|e| unavailable(&current, e.to_string()))?;
+            let status = response.status().as_u16();
+            if (300..400).contains(&status) {
+                let next = response
+                    .headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|v| v.to_str().ok())
+                    .ok_or_else(|| {
+                        unavailable(&current, format!("重定向 {status} 缺少 Location"))
+                    })?;
+                current = next.to_string();
+                continue;
+            }
+            if !(200..300).contains(&status) {
+                return Err(unavailable(
+                    &current,
+                    format!("服务端返回状态 {status}"),
+                ));
+            }
+            return response
+                .bytes()
+                .map(|b| b.to_vec())
+                .map_err(|e| unavailable(&current, e.to_string()));
         }
-        if !(200..300).contains(&status) {
-            return Err(SourceError::Unavailable {
-                source_id: url.into(),
-                reason: format!("服务端返回状态 {status}"),
-            });
-        }
-        response
-            .bytes()
-            .map(|b| b.to_vec())
-            .map_err(|e| SourceError::Unavailable {
-                source_id: url.into(),
-                reason: e.to_string(),
-            })
+        Err(unavailable(
+            url,
+            format!("重定向超过 {MAX_HOPS} 跳仍未取到内容"),
+        ))
     }
 }
 

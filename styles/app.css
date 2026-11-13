@@ -1156,6 +1156,70 @@ select.input:focus-visible {
   min-width: 0;
 }
 
+/* ---------------- 模块目录（在线安装） ---------------- */
+
+.cat-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cat-row {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 10px 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
+  background: var(--panel-2);
+}
+
+.cat-main {
+  display: flex;
+  flex: 1 1 320px;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.cat-main b {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.cat-main .cap {
+  margin: 0;
+  font-size: 11px;
+  color: var(--fg-3);
+}
+
+.cat-main .fp {
+  padding: 3px 6px;
+  border-color: var(--line-2);
+  background: transparent;
+  font-size: 10px;
+}
+
+.cat-side {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.cat-note {
+  flex: 1 1 100%;
+  margin: 0;
+  padding: 6px 8px;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: var(--r-s);
+  background: rgba(245, 158, 11, 0.12);
+  color: var(--warn-fg);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 /* ---------------- 空态 / 提示 ---------------- */
 
 .empty {

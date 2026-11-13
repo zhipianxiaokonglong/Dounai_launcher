@@ -2,27 +2,31 @@
 //!
 //! 运行：cargo test --test sign_real_manifests -- --nocapture
 //!
-//! 这个测试用仓库里**真实的 manifest 文件**走完整签名链路，
-//! 证明签名机制对接真实数据可用，而不是只在构造的 JSON 上成立。
+//! 数据来源是 `contracts/examples/*.v2.json`——契约里的 v2 样例清单。
+//! 用它而不是自造的 JSON：样例是打包、安装、验签三处共用的形状，
+//! 样例改坏了这里会立刻红。
+//!
+//! v1 的 `manifests/` 目录已随前端内置清单一起删除：那份清单是 v1 schema
+//! （module_id 没有 namespace、entry.command 是裸命令），与实际安装的包对不上。
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use dounai_launcher::signature::{canonical_payload, verify_manifest, SUPPORTED_ALGO};
 use ed25519_dalek::{Signer, SigningKey};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-fn manifests_dir() -> PathBuf {
-    // 从 src-tauri 往上两级到仓库根，再进 manifests
+fn examples_dir() -> PathBuf {
+    // 从 src-tauri 往上两级到仓库根，再进 contracts/examples
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.pop();
-    p.join("manifests")
+    p.join("contracts").join("examples")
 }
 
 fn load_manifests() -> Vec<(PathBuf, serde_json::Value)> {
-    let dir = manifests_dir();
-    assert!(dir.exists(), "manifests 目录不存在：{}", dir.display());
+    let dir = examples_dir();
+    assert!(dir.exists(), "契约样例目录不存在：{}", dir.display());
     let mut out = Vec::new();
-    for entry in std::fs::read_dir(&dir).expect("读取 manifests 失败") {
+    for entry in std::fs::read_dir(&dir).expect("读取 contracts/examples 失败") {
         let entry = entry.expect("目录项");
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
@@ -50,16 +54,15 @@ fn signs_and_verifies_every_real_manifest() {
     for (path, mut json) in manifests {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
 
-        // 1) 原始 manifest 的 signature.value 应为空占位
-        let empty_sig = json
+        // 1) 样例里的 signature 是 null 或空占位：发布时才填。
+        let signed_already = json
             .get("signature")
             .and_then(|s| s.get("value"))
             .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .is_empty();
-        assert!(empty_sig, "{name} 的签名占位应为空（发布时才填入）");
+            .is_some_and(|v| !v.is_empty());
+        assert!(!signed_already, "{name} 的签名占位应为空（发布时才填入）");
 
-        // 2) 签前应验签失败（空值）
+        // 2) 签前应验签失败
         assert!(
             verify_manifest(&json, &pk_b64).is_err(),
             "{name} 未签名时不应通过验签"
@@ -68,8 +71,13 @@ fn signs_and_verifies_every_real_manifest() {
         // 3) 真实签名
         let payload = canonical_payload(&json).expect("规范化失败");
         let sig = sk.sign(&payload);
-        json["signature"]["value"] = serde_json::json!(B64.encode(sig.to_bytes()));
-        json["signature"]["algo"] = serde_json::json!(SUPPORTED_ALGO);
+        json["signature"] = serde_json::json!({
+            "algo": SUPPORTED_ALGO,
+            "pubkey": pk_b64,
+            "key_id": "K1",
+            "signed_at": "2026-01-01T00:00:00Z",
+            "value": B64.encode(sig.to_bytes()),
+        });
 
         // 4) 签后应验签通过
         assert!(
@@ -77,7 +85,7 @@ fn signs_and_verifies_every_real_manifest() {
             "{name} 签名后应通过验签"
         );
 
-        // 5) 篡改命令后必须失败
+        // 5) 篡改入口命令后必须失败
         let mut tampered = json.clone();
         tampered["entry"]["command"] = serde_json::json!("evil.exe --payload");
         assert!(
@@ -94,45 +102,47 @@ fn manifest_files_are_valid_json_with_required_fields() {
     for (path, json) in load_manifests() {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         for field in [
+            "schema_version",
             "module_id",
             "name",
             "version",
+            "variant",
+            "role",
             "category",
+            "publisher",
+            "requires",
             "entry",
-            "dependencies",
-            "model_packs",
+            "ports",
+            "permissions",
+            "files",
         ] {
             assert!(json.get(field).is_some(), "{name} 缺少必填字段 {field}");
         }
-        // 依赖与模型包必须是数组且分开声明
+        assert_eq!(json["schema_version"], serde_json::json!(2), "{name} 必须是 v2 清单");
+        // module_id 必须是 namespace/name，否则实例 id 拼不出来。
+        let module_id = json["module_id"].as_str().unwrap_or_default();
         assert!(
-            json["dependencies"].is_array(),
-            "{name} dependencies 必须是数组"
+            module_id.matches('/').count() == 1 && !module_id.starts_with('/'),
+            "{name} 的 module_id 不是 namespace/name：{module_id}"
         );
-        assert!(
-            json["model_packs"].is_array(),
-            "{name} model_packs 必须是数组"
-        );
-
-        // reserved 类必须有 reserved 段且不可卸载
-        if json["category"] == "reserved" {
+        // 数据面模块的入口必须走 venv，shell 必须指安装根。
+        let command = json["entry"]["command"].as_str().unwrap_or_default();
+        if json["role"] == "shell" {
             assert!(
-                json.get("reserved").is_some(),
-                "{name} reserved 模块必须有 reserved 段"
+                command.contains("{install_root}"),
+                "{name} shell 入口必须含 {{install_root}}"
             );
-            assert_eq!(
-                json["reserved"]["removable"], false,
-                "{name} reserved 模块不可卸载"
+        } else {
+            assert!(
+                command.contains("{venv_python}"),
+                "{name} 数据面入口必须含 {{venv_python}}"
             );
-            assert_eq!(
-                json["reserved"]["default_enabled"], false,
-                "{name} reserved 模块默认禁用"
+            assert!(
+                json.get("runtime").is_some(),
+                "{name} 非 shell 必须有 runtime"
             );
         }
 
         println!("{name}: 字段完整");
     }
 }
-
-#[allow(dead_code)]
-fn _unused(_: &Path) {}

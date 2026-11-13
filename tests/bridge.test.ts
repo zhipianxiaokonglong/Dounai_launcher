@@ -14,7 +14,7 @@ import {
   setModuleEnabled,
   uninstallModule,
   refreshCatalog,
-  downloadPackage,
+  installFromCatalog,
   trustInfo,
   probeEnvironmentCmd,
   purgeLocalData,
@@ -110,25 +110,24 @@ describe("命令调用参数格式", () => {
     });
   });
 
-  it("download_package 带默认重试次数", async () => {
+  it("install_from_catalog 传 moduleId、variant 与 confirm", async () => {
     const calls: Call[] = [];
     installTauri("core", calls, {
-      path: "/x.zip",
-      bytes: 10,
-      source: "https://dl.example.com/x.zip",
-      resumed_from: 0,
-      attempts: 1,
+      module_id: "dounai/demo",
+      files: 2,
+      bytes: 100,
+      replaced: false,
+      install_dir: "/x",
+      trust: { kind: "signed", key_index: 0 },
     });
-    await downloadPackage({
-      moduleId: "m",
-      sources: ["https://dl.example.com/x.zip"],
-      expectedSha256: "abc",
+    const res = await installFromCatalog("dounai/demo", "stable", true);
+    expect(calls[0]?.cmd).toBe("install_from_catalog");
+    expect(calls[0]?.args).toEqual({
+      moduleId: "dounai/demo",
+      variant: "stable",
+      confirm: true,
     });
-    const req = (calls[0]?.args as { request: Record<string, unknown> }).request;
-    expect(req.module_id).toBe("m");
-    expect(req.sources).toEqual(["https://dl.example.com/x.zip"]);
-    expect(req.expected_sha256).toBe("abc");
-    expect(req.retries).toBe(2);
+    expect(res.module_id).toBe("dounai/demo");
   });
 
   it("trust_info 不带参数", async () => {

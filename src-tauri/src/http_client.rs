@@ -1,14 +1,22 @@
 //! 基于 `reqwest` 的真实 HTTP 实现，对接 `download` 的 trait。
 //!
 //! 设计要点：
-//! - **不跟随重定向**：跟随重定向可能把请求带到白名单外的域名，
-//!   等于绕过白名单。需要跳转时由上层显式处理；
+//! - **逐跳校验重定向**：SourceForge 的下载域一律 302 到镜像主机
+//!   （`xxx.dl.sourceforge.net`），一律拒绝会让整个分发源不可用；
+//!   所以这里跟随跳转，但每一跳的 host 都必须仍在白名单后缀内，
+//!   超过 `MAX_HOPS` 即放弃。自动跟随看不到中间跳，等于绕过白名单；
 //! - **超时必设**：无超时的请求在弱网下会永久挂起，用户看到的是"卡住不动"；
 //! - **Range 支持**：断点续传依赖 `Range` 头，服务端不支持时返回 200 由上层回退。
 
 use std::time::Duration;
 
+use launcher_core::m2::source::{host_allowed, url_host};
+
 use crate::download::{FetchResponse, HttpFetcher};
+use crate::m2_http::ALL_HOST_SUFFIXES;
+
+/// 跟随重定向的跳数上限。SF 实测是 downloads → 镜像，共 1 到 2 跳。
+const MAX_HOPS: usize = 5;
 
 /// 真实 HTTP 客户端。
 pub struct ReqwestClient {
@@ -17,7 +25,7 @@ pub struct ReqwestClient {
 
 impl ReqwestClient {
     pub fn new(timeout: Duration) -> Result<Self, String> {
-        // 不跟随重定向：重定向目标可能不在白名单内
+        // 跳转由本文件手动跟随：自动跟随时中间跳不可见，无法逐跳校验。
         let client = reqwest::blocking::Client::builder()
             .timeout(timeout)
             .connect_timeout(Duration::from_secs(10))
@@ -31,29 +39,50 @@ impl ReqwestClient {
     pub fn default_client() -> Result<Self, String> {
         Self::new(Duration::from_secs(60))
     }
+
+    /// 校验一个待请求地址：必须 https，且主机在白名单后缀内。
+    fn check_url(url: &str) -> Result<(), String> {
+        if !url.starts_with("https://") {
+            return Err(format!("只允许 https 地址：{url}"));
+        }
+        let host = url_host(url).ok_or_else(|| format!("无法解析主机名：{url}"))?;
+        if !host_allowed(host, ALL_HOST_SUFFIXES) {
+            return Err(format!("域名不在白名单内：{host}"));
+        }
+        Ok(())
+    }
 }
 
 impl HttpFetcher for ReqwestClient {
     fn fetch(&self, url: &str, range_from: Option<u64>) -> Result<FetchResponse, String> {
-        let mut req = self.client.get(url);
-        if let Some(from) = range_from {
-            req = req.header("Range", format!("bytes={from}-"));
-        }
-        let resp = req.send().map_err(|e| format!("请求失败：{e}"))?;
-        let status = resp.status().as_u16();
+        let mut current = url.to_string();
+        for _ in 0..=MAX_HOPS {
+            Self::check_url(&current)?;
+            let mut req = self.client.get(&current);
+            if let Some(from) = range_from {
+                req = req.header("Range", format!("bytes={from}-"));
+            }
+            let resp = req.send().map_err(|e| format!("请求失败：{e}"))?;
+            let status = resp.status().as_u16();
 
-        // 3xx 视为错误：不跟随重定向，避免被带去白名单外
-        if (300..400).contains(&status) {
-            return Err(format!(
-                "服务端返回重定向 {status}，为安全起见不自动跟随（目标可能不在白名单内）"
-            ));
-        }
+            // 3xx 不交给 reqwest 自动跟随：这里逐跳校验域名后再跟。
+            if (300..400).contains(&status) {
+                let next = resp
+                    .headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|v| v.to_str().ok())
+                    .ok_or_else(|| format!("重定向 {status} 缺少 Location：{current}"))?;
+                current = next.to_string();
+                continue;
+            }
 
-        let body = resp
-            .bytes()
-            .map_err(|e| format!("读取响应体失败：{e}"))?
-            .to_vec();
-        Ok(FetchResponse { status, body })
+            let body = resp
+                .bytes()
+                .map_err(|e| format!("读取响应体失败：{e}"))?
+                .to_vec();
+            return Ok(FetchResponse { status, body });
+        }
+        Err(format!("重定向超过 {MAX_HOPS} 跳仍未取到内容：{url}"))
     }
 }
 
