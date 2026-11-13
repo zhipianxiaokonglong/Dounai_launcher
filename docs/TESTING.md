@@ -300,3 +300,21 @@ SourceForge 上传通道已实测。2026-11-13 用本机 SSH 公钥通过 `tonyj
 门禁：`cargo fmt --all -- --check`、`clippy --all-targets -- -D warnings` 通过，`cargo test --lib` 100 项全过，`cargo test -p launcher-core` 全绿，`npm run typecheck`、`npm test` 65 项、`vite build` 通过，`cargo tauri build` 产出 2.90 MiB NSIS 安装包。
 
 未实测：闪窗消失与卡顿解除需要在真机 GUI 会话里点一次「重新检测」确认；并发多次检测的行为未压测。
+
+## 本地包导入入口（2026-11-13）
+
+现象：界面只有「扫描目录 / 登记目录」，找不到装本地 .zip 的地方；模块页空状态却写着「或用离线包安装」。
+
+根因是这条链路从来没接上过：`install_module` 命令与 `bridge.ts` 的封装都在，但新界面里没有任何调用点——`install_module` 要的是 `zip_base64`，前端得先把文件读成 base64，而桌面端既没有文件选择器也没有读文件的权限，所以那半个入口一直悬空。
+
+修法：
+
+- 新增 `inspect_local_package` / `install_local_package` 两条命令，直接收**路径**，由 Rust 自己读文件、算哈希、解包、判级，不走 base64 过桥。两者共用一个 `inspect_bytes`，判级只有一份。
+- 检查与安装分离：先看清单、角色、签名状态与整包哈希，再决定装不装。安装时带上检查得到的哈希，文件在中途被替换会以「整包哈希不符」失败。
+- B/C 类走确认框并展示完整公钥指纹，D 类不给确认按钮。
+- 原本 `install_module` 的收尾逻辑抽成 `commit_install`，离线包与本地包共用，避免两套判级各自漂移。
+- 文件选择器接 `tauri-plugin-dialog`，能力只加 `dialog:allow-open`；不放开 `fs` 插件，路径拿到后由命令自己读。
+
+单测：`local_package_needs_confirmation_then_installs`（C 类拒绝未确认、确认后装成功、重复安装返回 replaced）、`local_package_hash_mismatch_is_rejected`（检查后文件被换掉必须失败）。app lib 102 项。
+
+未实测：真机点「选择文件…」弹出的系统对话框、装完后的启动与依赖准备。命令层测试覆盖了判级与落盘，覆盖不了系统对话框。
