@@ -84,7 +84,19 @@ pub struct RoleSpec {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoleHealth {
     pub path: String,
+    /// 单次 HTTP 请求的超时。只管一次 GET，不代表进程起来了。
     pub timeout_ms: u64,
+    /// 从 spawn 到「健康检查必须通过」的总预算。
+    ///
+    /// 冷启动要加载解释器与全部 import，Python 服务常常十几秒才有第一个
+    /// 监听；用单次请求的 `timeout_ms` 当启动预算，会在服务真正起来之前
+    /// 就判失败。缺省 60 秒，各角色可按实测调整。
+    #[serde(default = "default_startup_timeout_ms")]
+    pub startup_timeout_ms: u64,
+}
+
+pub fn default_startup_timeout_ms() -> u64 {
+    60_000
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

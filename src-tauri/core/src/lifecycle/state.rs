@@ -162,6 +162,51 @@ impl LifecycleState {
         Ok(())
     }
 
+    /// 启动预算用尽，但进程还活着：判 Failed，**保留 pid**。
+    ///
+    /// 不复用 `mark_failed`：它会把 pid 清成 None，界面于是以为进程没了，
+    /// 用户再点一次「启动」就会去探端口、把服务标成「外部启动」，
+    /// 启动器因此丢掉停止自己拉起的进程的权利。
+    pub fn mark_probe_timeout(
+        &mut self,
+        id: &str,
+        ticket: u64,
+        reason: &str,
+    ) -> Result<(), StartError> {
+        self.check_ticket(id, ticket)?;
+        let entry = self
+            .entries
+            .get_mut(id)
+            .ok_or(StartError::UnknownInstance)?;
+        if entry.phase != Phase::Starting {
+            return Err(StartError::UnexpectedPhase("mark_probe_timeout".into()));
+        }
+        entry.phase = Phase::Failed;
+        entry.health = ProbeState::Unhealthy;
+        entry.contract = ProbeState::NotChecked;
+        entry.last_error = Some(reason.to_string());
+        Ok(())
+    }
+
+    /// 上一轮判了超时，但进程一直健康：把 Failed 收回 Running。
+    ///
+    /// 只认「Failed 且 pid 还在」的条目；其他阶段不动，避免把真失败洗白。
+    pub fn mark_recovered(&mut self, id: &str) -> Result<(), StartError> {
+        let entry = self
+            .entries
+            .get_mut(id)
+            .ok_or(StartError::UnknownInstance)?;
+        if entry.phase != Phase::Failed || entry.pid.is_none() {
+            return Err(StartError::UnexpectedPhase("mark_recovered".into()));
+        }
+        entry.phase = Phase::Running;
+        entry.health = ProbeState::Healthy;
+        // 只确认了 health，契约一致性没探过，不冒充 Healthy。
+        entry.contract = ProbeState::NotChecked;
+        entry.last_error = None;
+        Ok(())
+    }
+
     pub fn mark_failed(&mut self, id: &str, ticket: u64, reason: &str) -> Result<(), StartError> {
         self.check_ticket(id, ticket)?;
         let entry = self
@@ -262,6 +307,60 @@ impl LifecycleState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn probe_timeout_keeps_pid_so_stop_still_owns_the_process() {
+        let mut state = LifecycleState::default();
+        let ticket = state.allocate_ticket();
+        state.begin_start("a", ticket).unwrap();
+        state.attach_process("a", ticket, 40112).unwrap();
+
+        state.mark_probe_timeout("a", ticket, "60 秒内未通过").unwrap();
+        let snap = state.get("a").unwrap();
+        assert_eq!(snap.phase, Phase::Failed);
+        // pid 必须留着：进程还在跑，界面与停止路径都要能看见它。
+        assert_eq!(snap.pid, Some(40112));
+        assert_eq!(snap.health, ProbeState::Unhealthy);
+        assert!(snap.last_error.as_deref().unwrap_or("").contains("60 秒"));
+
+        // 已经 Failed 之后，晚到的探测结果不能把错误改写成别的样子。
+        assert_eq!(
+            state.mark_probe("a", ticket, ProbeState::Healthy, ProbeState::Healthy),
+            Err(StartError::UnexpectedPhase("mark_probe".into()))
+        );
+    }
+
+    #[test]
+    fn recovered_instance_goes_back_to_running() {
+        let mut state = LifecycleState::default();
+        let ticket = state.allocate_ticket();
+        state.begin_start("a", ticket).unwrap();
+        state.attach_process("a", ticket, 40112).unwrap();
+        state.mark_probe_timeout("a", ticket, "超时").unwrap();
+
+        state.mark_recovered("a").unwrap();
+        let snap = state.get("a").unwrap();
+        assert_eq!(snap.phase, Phase::Running);
+        assert_eq!(snap.pid, Some(40112));
+        assert_eq!(snap.health, ProbeState::Healthy);
+        // health 通了不等于契约兼容，不能顺手写成 Healthy。
+        assert_eq!(snap.contract, ProbeState::NotChecked);
+        assert!(snap.last_error.is_none());
+    }
+
+    #[test]
+    fn recover_refuses_a_dead_process() {
+        let mut state = LifecycleState::default();
+        let ticket = state.allocate_ticket();
+        state.begin_start("a", ticket).unwrap();
+        // 没有 pid：进程早就没了，不能靠「健康探测通了」洗白。
+        state.mark_failed("a", ticket, "退出码 3").unwrap();
+        assert_eq!(
+            state.mark_recovered("a"),
+            Err(StartError::UnexpectedPhase("mark_recovered".into()))
+        );
+        assert_eq!(state.get("a").unwrap().phase, Phase::Failed);
+    }
 
     #[test]
     fn begin_start_is_exclusive() {

@@ -22,7 +22,6 @@ use crate::process::win::{SpawnSpec, WinProcess};
 
 pub const EVENT_NAME: &str = "lifecycle-changed";
 pub const GRACEFUL_TIMEOUT: Duration = Duration::from_secs(3);
-pub const PROBE_BUDGET: Duration = Duration::from_secs(4);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone, Serialize)]
@@ -44,7 +43,10 @@ pub struct StartRequest {
     /// shell 与 auxiliary 为 None，不设健康门禁。
     pub health_url: Option<String>,
     pub contract_url: Option<String>,
+    /// 单次 HTTP 请求的超时。
     pub timeout_ms: u64,
+    /// 从 spawn 到「health 必须通过」的总预算；超了只判「没起来」，不杀进程。
+    pub startup_budget_ms: u64,
     /// 实例日志目录；为 None 时不落盘。
     pub log_dir: Option<PathBuf>,
 }
@@ -140,7 +142,37 @@ impl Supervisor {
         lock(&self.external).contains(id)
     }
 
+    /// 这个实例的进程是不是由启动器拉起、且仍登记在册。
+    ///
+    /// 与 `running()` 的区别：状态机可能已经把它判成 Failed（探测超时），
+    /// 进程却还活着。停止与「别再拉起一个」都要按这个口径判断。
+    pub fn owns(&self, id: &str) -> bool {
+        lock(&self.processes).contains_key(id)
+    }
+
+    /// 探测超时之后进程其实一直健康：把状态收回到 Running。
+    ///
+    /// 不这样做的话，界面会一直显示失败，用户再点「启动」又会被判成
+    /// 「外部启动」，于是既不能停也不能重启。
+    pub fn recover(&self, id: &str) -> Option<Snapshot> {
+        if !self.owns(id) {
+            return None;
+        }
+        let snap = {
+            let mut state = lock(&self.lifecycle);
+            state.mark_recovered(id).ok()?;
+            state.get(id).cloned()
+        };
+        emit_snapshot(&self.app, id, snap.as_ref());
+        snap
+    }
+
     pub fn mark_external(&self, id: &str) {
+        // 自己持有进程时绝不标外部：那会连带丢掉停止权，
+        // 出现「启动器拉起的进程被当成别人的进程」这种自相矛盾的状态。
+        if self.owns(id) {
+            return;
+        }
         lock(&self.external).insert(id.to_string());
         let snap = external_snapshot(id);
         emit_snapshot(&self.app, id, Some(&snap));
@@ -177,6 +209,15 @@ impl Supervisor {
         let _critical = lock(&self.start_lock);
         let id = request.instance_id.clone();
         let log = self.open_log(&id, request.log_dir.as_deref());
+
+        let ticket = {
+            let mut state = lock(&self.lifecycle);
+            let ticket = state.allocate_ticket();
+            state.begin_start(&id, ticket).map_err(|e| e.to_string())?;
+            ticket
+        };
+        // 状态机接受之后才记「start」：并发点击被 AlreadyStarting 挡掉的那些
+        // 请求不该在日志里留下看似真的启动记录。
         if let Some(log) = &log {
             diag_log::write(
                 log,
@@ -189,13 +230,6 @@ impl Supervisor {
                 ),
             );
         }
-
-        let ticket = {
-            let mut state = lock(&self.lifecycle);
-            let ticket = state.allocate_ticket();
-            state.begin_start(&id, ticket).map_err(|e| e.to_string())?;
-            ticket
-        };
 
         let mut process = match WinProcess::spawn(&request.spec) {
             Ok(process) => process,
@@ -388,34 +422,51 @@ impl Supervisor {
         let contract_url = request.contract_url.clone();
         let role = request.role;
         let single = Duration::from_millis(request.timeout_ms.clamp(100, 3000));
+        // 启动预算来自 roles 契约，不再用固定的 4 秒：Python 冷启动常常更久，
+        // 提前判死会让用户看到「启动失败」，而服务几秒后其实就通了。
+        let budget = Duration::from_millis(request.startup_budget_ms.clamp(1_000, 600_000));
 
         std::thread::spawn(move || {
-            let deadline = Instant::now() + PROBE_BUDGET;
+            let started = Instant::now();
+            let deadline = started + budget;
             let client = reqwest::blocking::Client::builder()
                 .timeout(single)
                 .build()
                 .ok();
 
+            // 先只等 health：没起来就探契约，每次都要白等一个请求超时。
             let health = match (&client, &health_url) {
                 (Some(client), Some(url)) => probe_health(client, url, deadline),
                 _ => ProbeState::Healthy,
             };
             let contract = match (&client, &contract_url) {
-                (Some(client), Some(url)) => probe_contract(client, url, role, deadline),
-                _ => ProbeState::Healthy,
+                (Some(client), Some(url)) if health == ProbeState::Healthy => {
+                    probe_contract(client, url, role, deadline)
+                }
+                _ => health,
             };
 
             if let Some(log) = &log {
                 diag_log::write(
                     log,
                     "probe",
-                    &format!("health={health:?} contract={contract:?}"),
+                    &format!(
+                        "health={health:?} contract={contract:?} after={}ms",
+                        started.elapsed().as_millis()
+                    ),
                 );
             }
 
             let snap = {
                 let mut guard = lock(&state);
-                if guard.mark_probe(&id, ticket, health, contract).is_ok() {
+                if health == ProbeState::Unhealthy {
+                    // 进程可能还活着，只是没在预算内就绪：保留 pid，交给用户决定等待还是停止。
+                    let reason = format!(
+                        "启动超时：{} 秒内健康检查未通过，进程仍在运行，可稍后重试或先停止",
+                        budget.as_secs()
+                    );
+                    let _ = guard.mark_probe_timeout(&id, ticket, &reason);
+                } else if guard.mark_probe(&id, ticket, health, contract).is_ok() {
                     let _ = guard.mark_healthy(&id, ticket);
                 }
                 guard.get(&id).cloned()
@@ -446,6 +497,7 @@ fn spawn_pump(log: SharedLog, scope: &'static str, reader: impl Read + Send + 's
 }
 
 fn probe_health(client: &reqwest::blocking::Client, url: &str, deadline: Instant) -> ProbeState {
+    let started = Instant::now();
     loop {
         if let Ok(response) = client.get(url).send() {
             if response.status().is_success() {
@@ -455,7 +507,19 @@ fn probe_health(client: &reqwest::blocking::Client, url: &str, deadline: Instant
         if Instant::now() >= deadline {
             return ProbeState::Unhealthy;
         }
-        std::thread::sleep(POLL_INTERVAL);
+        std::thread::sleep(probe_gap(started.elapsed()));
+    }
+}
+
+/// 探测间隔：前几秒抓得紧，之后放开。
+///
+/// 冷启动窗口里服务随时可能起来，50ms 一轮能少等；一分钟的预算若一直
+/// 50ms 一轮就是一千多个请求，进程刚起来时反而在跟自己的 init 抢 CPU。
+fn probe_gap(elapsed: Duration) -> Duration {
+    if elapsed < Duration::from_secs(5) {
+        POLL_INTERVAL
+    } else {
+        Duration::from_millis(400)
     }
 }
 
@@ -465,6 +529,7 @@ fn probe_contract(
     role: Role,
     deadline: Instant,
 ) -> ProbeState {
+    let started = Instant::now();
     loop {
         if let Ok(response) = client.get(url).send() {
             if response.status().is_success() {
@@ -479,6 +544,6 @@ fn probe_contract(
         if Instant::now() >= deadline {
             return ProbeState::Unhealthy;
         }
-        std::thread::sleep(POLL_INTERVAL);
+        std::thread::sleep(probe_gap(started.elapsed()));
     }
 }

@@ -361,6 +361,27 @@ fn start_instance(
     instance: &Instance,
     port: Option<u16>,
 ) -> Result<StartOutcome, String> {
+    // 进程表里还留着它：上一轮探测超时最常见。先看它是不是已经自己好了，
+    // 好了就把状态收回 Running，而不是再 spawn 一个抢同一个端口。
+    if supervisor.owns(&instance.instance_id) {
+        let healthy = prestart_health_url(supervisor.roles(), instance, port)
+            .map(|url| Supervisor::probe_external_once(&url, PRESTART_TIMEOUT_MS))
+            .unwrap_or(false);
+        if healthy {
+            if let Some(snap) = supervisor.recover(&instance.instance_id) {
+                return Ok(StartOutcome::Managed(snap));
+            }
+            // 状态机没处在「已判失败」的位置（已经 Running 或仍在 Starting）：
+            // 进程健康就够了，原样返回快照，让界面刷新到最新状态。
+            if let Some(snap) = supervisor.snapshot().get(&instance.instance_id).cloned() {
+                return Ok(StartOutcome::Managed(snap));
+            }
+        }
+        return Err(format!(
+            "{} 的进程还在运行，但健康检查没通过。先点「停止」，再启动，避免同时跑两个实例。",
+            instance.module_id
+        ));
+    }
     // 上游 D-4：进程表里没有，但服务可能由用户自己拉起，或是启动器重启后
     // 留下的孤儿。直接 spawn 会因端口占用立刻退出（退出码 3），界面误报
     // 「启动失败」，而服务其实一直健康。先按 roles 的 health 路径短探一次。

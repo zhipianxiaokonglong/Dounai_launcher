@@ -156,6 +156,11 @@ pub fn build_start_request(
         .map(|h| h.timeout_ms)
         .or_else(|| roles.contract_probe(instance.role).map(|p| p.timeout_ms))
         .unwrap_or(3000);
+    // 单次请求超时管不了冷启动：Python 要先把解释器和 import 全加载完才监听端口。
+    let startup_budget_ms = roles
+        .health(instance.role)
+        .map(|h| h.startup_timeout_ms)
+        .unwrap_or_else(launcher_core::lifecycle::default_startup_timeout_ms);
 
     Ok(LaunchPlan {
         request: StartRequest {
@@ -172,6 +177,7 @@ pub fn build_start_request(
             health_url,
             contract_url,
             timeout_ms,
+            startup_budget_ms,
             log_dir: Some(state.paths.instance_logs_dir_keyed(&instance.instance_id)),
         },
         manifest: runtime_manifest,
