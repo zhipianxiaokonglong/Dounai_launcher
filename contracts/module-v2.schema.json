@@ -103,7 +103,7 @@
         "snapshot_sha256": {
           "type": "string",
           "pattern": "^sha256:[0-9a-f]{64}$",
-          "description": "发布者预置的 pinned snapshot 哈希，包签名后不可变。运行时生成的快照哈希另记在 state/runtime.json。"
+          "description": "发布者预置的 pinned snapshot 哈希，包签名后不可变。可选：缺省表示不锚定，运行时哈希记进 state/runtime.json 的 snapshot_sha256，并标记 snapshot_pinned = false。"
         }
       }
     },

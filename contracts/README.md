@@ -148,7 +148,7 @@ M1 新增两份状态 schema，不改 M0 已冻结的约束。
 | `state/deps/<instance_key>/<sha256>.lock` | 无 schema，内容是 uv 的 pinned snapshot | 环境引擎 |
 | `state/runtime.json` | 无 schema，引擎内部状态 | 环境引擎 |
 
-说明：`state/runtime.json` 记 `install_mode`、`python_install_dir`、`python_build_id`、`uv_version` 与每个实例的 `snapshot_sha256`，不进跨仓契约。锁文件的哈希放在这里，是为了让篡改锁文件时有一个独立比对点。这只防意外改动，不防本地恶意改写。
+说明：`state/runtime.json` 记 `install_mode`、`python_install_dir`、`python_build_id`、`uv_version` 与每个实例的 `snapshot_sha256`、`source_kind`、`snapshot_pinned`，不进跨仓契约。`snapshot_pinned` 为 false 表示包内没声明 pinned 哈希，这份快照是运行时算出来的。锁文件的哈希放在这里，是为了让篡改锁文件时有一个独立比对点。这只防意外改动，不防本地恶意改写。
 
 注意：`source-v1.schema.json` 的 `instance_id` 允许含 `/`，例如 `dounai/omninexus@stable@main`。引擎拼状态路径前先把标识编码成不含斜杠的 key。`install-v1` 的两个根不得相同，这条由 `Paths::new` 校验，schema 表达不了跨字段比较。
 
@@ -166,7 +166,7 @@ M1 新增两份状态 schema，不改 M0 已冻结的约束。
 
 `runtime.json` 引用的 generation 必须先落盘，写入后永不改写。同一 generation 重复提交是幂等的，元数据保留首次生成时间。残留 generation 的清理由 M2 旧版保留策略统一处理，不在环境引擎里删。
 
-`prepare_instance` 按实例的 `source_kind` 决定快照语义。zip 包必须比对签名 manifest 的 `runtime.snapshot_sha256`，缺字段或不符都硬拒；dir 允许重解析，哈希变化时把 `previous_sha256`、`current_sha256` 与观察时间记进 `runtime.json`，交 M4 提示重新确认。
+`prepare_instance` 按实例的 `source_kind` 决定快照语义。zip 包的签名 manifest 声明了 `runtime.snapshot_sha256` 时必须与解析结果一致，不符硬拒；**没声明则放行**，记成 `runtime.json` 里的 `snapshot_pinned = false`，界面标注「快照未锚定」。`kind = uv_lock` 的包本来就有签名包内 `uv.lock` 作锚点，缺这个字段不算问题。dir 允许重解析，哈希变化时把 `previous_sha256`、`current_sha256` 与观察时间记进 `runtime.json`，交 M4 提示重新确认。
 
 ## M2 契约收紧
 

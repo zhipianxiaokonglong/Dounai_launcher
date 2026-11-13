@@ -205,7 +205,11 @@ uv python install 3.12 --install-dir <data_root>/runtime/python --no-registry --
 
 venv 也按 generation 分目录，路径是 `instances/<instance_key>/venvs/<sha 前 16 位>/`。新建时先落在同级 `.staging` 目录。`uv venv`、依赖同步与离线 dry-run 全部通过后，才 rename 成正式目录。失败只删 `.staging`，旧 generation 的 venv 保持原样。`runtime.json` 切换前，没有任何正式目录会被改写。
 
-`prepare_instance` 按 `source_kind` 处理快照。zip 包必须比对签名 manifest 的 `runtime.snapshot_sha256`，缺字段或不符都报 `SnapshotMismatch`。dir 允许重解析，哈希变化写进 `runtime.json` 的 `snapshot_change`，由 M4 提示重新确认。运行时生成的哈希不写回包内。
+`prepare_instance` 按 `source_kind` 处理快照。zip 包的签名 manifest 若声明了 `runtime.snapshot_sha256`，就必须与解析结果一致，不符报 `SnapshotMismatch` 并硬拒。**没声明则放行**，把这次的快照记成「未锚定」（`runtime.json` 的 `snapshot_pinned = false`），界面在实例行上标一枚「快照未锚定」。
+
+为什么缺字段不再硬拒：`kind = uv_lock` 的包，锚点就是签名包内那份 `uv.lock`——zip 的 sha256 在装包时验过，同步前引擎还会再比对一次项目根 `uv.lock` 与解析结果。发布者再写一个 `snapshot_sha256` 只是重复。真实发布的三包都不写这个字段，按旧口径硬拒等于所有在线安装都装不了依赖。`requirements` / `pyproject` 的 zip 包仍在本地解析，没有 pinned 时同理降级为未锚定，并在卡片上提示「重装可恢复锚定」。
+
+dir 允许重解析，哈希变化写进 `runtime.json` 的 `snapshot_change`，由 M4 提示重新确认。运行时生成的哈希不写回包内。
 
 装包路径必须调用 `prepare_instance_with`，由 M2 从 installed.json 填 `source_kind`。默认入口 `prepare_instance` 用 `EnvOptions::default()`，按 dir 处理；zip 实例走默认入口不会锚定 pinned 哈希。
 

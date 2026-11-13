@@ -482,3 +482,35 @@ app lib 67 项、core 6 项、其余集成 20 项（`live_source` 2 项按设计
 core 159 项 lib + 23 项集成、app lib 69 项、`bundled_uv` 3 项、契约 109 项、`tsc`、`npm test` 20 项、`vite build`、`clippy --workspace --all-targets -D warnings` 全绿。
 
 **未实测**：真机上从「安装依赖」到三个模块 health 200 的完整一条（需要用户机器上跑，且要真的联网拉包）；NSIS 安装包体积增量待构建结果填入 ROADMAP。
+
+## M1 返修：zip 包缺 pinned 快照 + 依赖安装进度（2026-11-13）
+
+真机复现的第一句是 `安装依赖失败：依赖准备失败：SnapshotMismatch: zip 实例缺少 manifest.runtime.snapshot_sha256，无法锚定依赖快照`。三个已装实例全部命中：SourceForge 上发布的三包 `manifest.runtime` 只有 `deps`、`python`、`venv`，没有 `snapshot_sha256`。
+
+**一、口径为什么改，而不是给包补字段**
+
+`kind = uv_lock` 的包，锚点本来就是签名包内那份 `uv.lock`：装包时验过 zip 的 sha256，同步前 `prepare_venv` 还会再比对一次「项目根 uv.lock」与解析出的快照哈希。发布者再写一个 `snapshot_sha256` 只是把同一个哈希抄两遍。旧口径（缺字段即硬拒）等于让所有 `uv_lock` 的在线包都装不了依赖，而字段本身是可选的。
+
+改成：声明了就必须一致，不一致照旧硬拒（那才是篡改信号）；没声明则放行，把这次快照记成 `snapshot_pinned = false`，界面在实例行标「快照未锚定」，详情里说明「重装可恢复锚定」。`requirements` / `pyproject` 的 zip 包没有天然锚点，缺字段同样降级记录，不静默假装锚定。
+
+`InstanceRuntime` 新增 `snapshot_pinned`，读旧 `runtime.json` 时缺省为 `true`——能写进去的 zip 实例当时都过了 pinned 比对。`list_instance_views` 只读一次 `runtime.json` 填 `env_pinned`，不参与任何判定。
+
+**二、进度为什么要走旁路**
+
+`EnvContext` 是 8 处结构体字面量的公开构造点，往里加回调字段会把「怎么显示进度」扩散到每个测试夹具。改用线程本接收器：`prepare_instance_with` 在同一个线程同步跑完，组装层用 `with_sink` 挂回调（带 Drop guard，panic 也不泄漏），没有接收器时全部空操作，单测与 `env_smoke` 行为不变。
+
+阶段固定六步：`uv` → `python` → `resolve` → `sync` → `verify` → `done`，每步一节标题加一行细节。**不做百分比**：uv 不提供「已装 N 个」的稳定接口，按输出行猜出来的数字是假的，宁可只按阶段推进。
+
+「正在装哪个包」靠流式读 stderr：有接收器时 `SystemUvRunner` 改成 spawn + 读线程，`sync_request` 追加 `-v`（没有接收器不加，测试参数不变）。行过滤只认「带 `==` 的 installing/downloading/prepared 行」，认不出就丢；同一行去重，整条准备最多 400 行。组装层再按 150ms 合并细节变化——阶段或标题变了立刻发。
+
+前端只做两个端点加一条渲染：`beginEnvJob` 在点下去时先落「准备开始」，invoke 返回或抛错就是结束；失败原因留在卡片上（toast 会消失），成功整行抹掉。进度事件只改对应卡片那一行 DOM，不整页重绘——装包时这个事件每 150ms 就可能来一次，整页重绘会把滚动位置和展开的菜单都打回原样。
+
+**三、验证**
+
+core 新增 5 项：缺 pinned 放行且记 `snapshot_pinned = false`（用 `instance_snapshot_pinned` 复核）、pinned 不符仍 Hard reject 且不写 `runtime.json`、六阶段全部上报且最后一阶段是 `Done`、`lock_packages` 读 uv.lock 与 requirements 两种格式、`LineReporter` 只留包名行且去重。原 `zip_instance_requires_pinned_snapshot_and_rejects_mismatch` 拆成两条，旧的「缺字段 → 硬拒」断言按新口径改写。
+
+前端新增 `tests/env-job.test.ts` 3 项：begin 立刻可显示、新事件保留开始时间并清掉旧错误、成功抹掉/失败留原因。
+
+**门禁**：core 166 lib + 23 集成、app lib 69、`bundled_uv` 3、契约 109、`tsc`、`npm test` 23、`clippy --workspace --all-targets -D warnings` 全绿。
+
+**未实测**：真机上「安装依赖」全程跑完并让三个模块 health 200——需要用户在安装包上跑一次，且要真的联网拉 wheel。`-v` 的包名行格式按 uv 0.13.7 的 stderr 写的，若上游改格式，表现为卡片只显示阶段不显示包名，不影响安装本身。
