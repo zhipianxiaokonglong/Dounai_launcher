@@ -87,7 +87,7 @@ cargo run --bin pack -- verify --pubkey <K1 公钥文件> --zip <zip>
 4. 用 K5 签 catalog，`expires` 不超过 7 天，再用 K5 公钥自检一次。
 5. 上传 `catalog.json`，回读一次核对 `sha256`。
 
-上传通道有 Web 表单与 `rsync`/`scp` 两种。自动化上传需要 SourceForge 账号与 SSH key，当前尚未配置，上传仍是人工步骤。K1 私钥、K5 私钥与上传凭据分开保管，任一泄露都按密钥泄露流程处理。
+上传通道是 SFTP 与 `rsync`/`scp`。2026-11-13 已把本机 SSH 公钥登记到 SourceForge，实测 `tonyjh07@frs.sourceforge.net` 认证通过，`/home/frs/project/dounai-releases/` 可上传、列出与删除。上传仍未脚本化，发布时逐次执行。K1 私钥、K5 私钥与上传凭据分开保管，任一泄露都按密钥泄露流程处理。
 
 启动器侧的顺序固定，见 [DESIGN.md](DESIGN.md) 7.3。
 
@@ -133,6 +133,7 @@ K1 与 K5 都已生成并内置。模块包托管在 SourceForge 的 `dounai-rel
 | K5 公钥与指纹 | 已登记在 `keys/K5.json` 与 `state_v2.rs` |
 | K5 签出的 catalog | 离线验签通过，篡改条目被硬拒 |
 | SourceForge 项目 | 已创建，包尚未上传 |
+| SourceForge 上传通道 | 已实测，SSH 认证与目录写入通过 |
 | 远程 catalog 分发 | 未启用，尚无签名 catalog |
 | 真机安装 | 未实测 |
 

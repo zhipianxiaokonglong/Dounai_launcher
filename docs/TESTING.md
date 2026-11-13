@@ -250,6 +250,8 @@ M3 代码落在四处：core 的 `lifecycle/` 纯逻辑、app 的 `process/win.r
 
 运行时侧：`src-tauri/tests/signing_roundtrip.rs` 用发布工具打包与签索引，再送进 `verify_zip`、`CatalogDocument::parse` 与 `classify`。固定种子与真实密钥各跑一遍，3 项断言全过。真实密钥那一遍同时核对内置指纹与私钥匹配。篡改 `entry.command` 后判 D 类硬拒，篡改 catalog 条目后 `parse` 报验签失败。另用真实 K1 把 `contracts/examples/omninexus.v2.json` 打成 zip，`pack verify` 的验签与逐文件哈希通过；用真实 K5 签一份指向 SourceForge 的 catalog，`sign_catalog verify` 通过。
 
+SourceForge 上传通道已实测。2026-11-13 用本机 SSH 公钥通过 `tonyjh07@frs.sourceforge.net` 认证。在该项目的 `/home/frs/project/dounai-releases/` 目录上传、列出并删除一个临时文件，三步都成功。目录已恢复为空。正式包与 catalog 尚未上传。
+
 未实测：真机安装、从 SourceForge 拉取 catalog 与包、上传后的回读校验、私钥与上传凭据的保管过程。后两项属人工操作，离线断言不覆盖。按 [ROADMAP.md](ROADMAP.md) 开头的规则，这些结果不计真机验收通过。
 
 说明：`algo` 的契约值已改为 `Ed25519`。签名输入是 `canonical_payload` 的字节，Ed25519 内部用 SHA-512。SHA-256 只用于逐文件哈希与公钥指纹。旧字面量 `SHA-256 + Ed25519` 由 `validate.mjs` 的负例断言拒收，断言总数从 107 增至 109。口径见 [SIGNING.md](SIGNING.md)。
