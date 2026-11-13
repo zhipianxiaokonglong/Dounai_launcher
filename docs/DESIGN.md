@@ -1,6 +1,6 @@
 # 重构设计
 
-启动器 v2 的设计决策与行为约束。角色枚举、manifest 字段、状态 schema、端口与契约探测路径以 [contracts/README.md](../contracts/README.md) 为单一真源。本文件不重复字段表，只写定下这些字段的理由，以及代码要遵守的规则。面向用户的信任披露见 [SECURITY.md](../SECURITY.md)。
+启动器 v2 的设计决策与行为约束。角色枚举、manifest 字段、状态 schema、端口与契约探测路径以 [contracts/README.md](../contracts/README.md) 为单一真源。本文件不重复字段表，只写定下这些字段的理由，以及代码要遵守的规则。面向用户的信任披露见 [SECURITY.md](SECURITY.md)。
 
 ## 1. 结论
 
@@ -29,7 +29,7 @@
 | 仅 Windows 10 / 11 | Job Object、`CREATE_NO_WINDOW`、NSIS 钩子、WebView2 引导器与注册表元数据都是 Windows 专属。只抽进程 trait 覆盖不了这些差异，还会让文档看起来已支持跨平台。 |
 | 不读取 v1 包格式 | v1 包从未打包分发。`schema_version: 2` 直接定死，不设读取层与过渡期。 |
 | 离线只做单包导入，并支持本地目录 | 目录实例的源码随时可变，完整性语义与 zip 不同，按源码工作区处理。 |
-| 第三方 `shell` 可以填槽 | 核查依据见 [contracts/README.md](../contracts/README.md) 的“第三方界面”一节。披露要求见 [SECURITY.md](../SECURITY.md)。 |
+| 第三方 `shell` 可以填槽 | 核查依据见 [contracts/README.md](../contracts/README.md) 的“第三方界面”一节。披露要求见 [SECURITY.md](SECURITY.md)。 |
 | 环境引擎只用随包自带的 uv，固定 0.13.7 | 系统 uv 版本不可控。0.11.7 实测忽略 `UV_PYTHON_NO_REGISTRY`，0.13.7 实测生效。 |
 | uv 缺失时按固定 URL 下载并校验 sha256 | 单一固定 URL 不引入 catalog，M2 的双源不受影响。M5 把同一个 uv.exe 放进安装包。 |
 | Python 只钉 3.12，补丁版本交给 uv | 钉具体补丁版会让预置的 uv 与下载清单一起过期。实际版本记在 `python_build_id`。 |
@@ -222,7 +222,7 @@ zip 根下放 `manifest.json` 与模块文件。签名放 manifest 的 `signatur
 2. 算该公钥的 SHA-256 指纹，查信任列表。
 3. `signature.pubkey` 自己验不通时硬拒，不给确认入口。
 
-`key_id` 与 `publisher.name` 只作展示。指纹一律从签名公钥字节推出，不让包自述。`trust.rs` 因此从“遍历已配公钥验签”改成“包内公钥验签加指纹白名单”。四级结果的分流见 [SECURITY.md](../SECURITY.md) 的安全边界。
+`key_id` 与 `publisher.name` 只作展示。指纹一律从签名公钥字节推出，不让包自述。`trust.rs` 因此从“遍历已配公钥验签”改成“包内公钥验签加指纹白名单”。四级结果的分流见 [SECURITY.md](SECURITY.md) 的安全边界。
 
 安装顺序如下：
 
@@ -240,7 +240,7 @@ zip 根下放 `manifest.json` 与模块文件。签名放 manifest 的 `signatur
 - **签名剥离**。攻击者删掉 `signature.value` 就能把“已信任”降成“未验证”。三道防线：catalog 对该版本声明 `signature_required` 与 `expected_signer_fp`；`installed.json` 记住每个实例的判定结果与发布者指纹，更新时“曾签名 → 现无签名”或指纹变化都硬拒；首次本地导入允许粘贴期望签名者指纹，填写后不符或无签名直接硬拒。
 - **新鲜度**。包内签名不证明这是最新版，旧版合法签名包可以重放。TUF 规范把这类攻击叫 rollback 与 freeze，靠单调版本号加元数据过期时间防御。catalog 保留 `version` 单调、`expires`、`min_version` 与 `revoked`，本地记 `last_seen_version`。
 
-注意：首次本地导入时，前两道防线都还不生效。删掉签名段的官方包可能被确认安装，用户不知道期望指纹时无法根除。UI 必须明示这个窗口，披露见 [SECURITY.md](../SECURITY.md)。
+注意：首次本地导入时，前两道防线都还不生效。删掉签名段的官方包可能被确认安装，用户不知道期望指纹时无法根除。UI 必须明示这个窗口，披露见 [SECURITY.md](SECURITY.md)。
 
 公钥管理写在 `state/trust.json`。用户粘贴 base64 公钥或导入文件，确认前展示完整 SHA-256 指纹。撤销立即生效：已装实例不卸载，但标记“发布者已不再受信任”并禁止自动更新。
 
@@ -350,7 +350,7 @@ M3 已按 role 拓扑启动、Job Object 托管与异步探测重写生命周期
 
 ## 8. 与 SECURITY.md 的分工
 
-[SECURITY.md](../SECURITY.md) 写面向用户的披露：四级验签结果、已知限制、密钥归属与漏洞报告流程。本文件写给开发者的行为约束。
+[SECURITY.md](SECURITY.md) 写面向用户的披露：四级验签结果、已知限制、密钥归属与漏洞报告流程。本文件写给开发者的行为约束。
 
 安装确认框、模块卡片与 README 三处都要写明同一件事。
 

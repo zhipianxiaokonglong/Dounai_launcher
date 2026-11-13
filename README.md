@@ -54,7 +54,7 @@ npm install --no-save --no-package-lock --prefix .ci ajv-cli@5 ajv-formats@3
 | [docs/DESIGN.md](docs/DESIGN.md) | 设计决策、架构与子系统行为约束 |
 | [contracts/README.md](contracts/README.md) | 契约入口，含角色、包格式与 M0、M1 的状态 schema |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | M1 到 M5 的里程碑与实测验收 |
-| [SECURITY.md](SECURITY.md) | 安全策略、信任模型与已知限制 |
+| [SECURITY.md](docs/SECURITY.md) | 安全策略、信任模型与已知限制 |
 | [docs/SIGNING.md](docs/SIGNING.md) | 模块签名方法、密钥生成保管与轮换规程 |
 | [docs/ADMIN_UI.md](docs/ADMIN_UI.md) | 模块如何声明自己的配置界面 |
 | [docs/TESTING.md](docs/TESTING.md) | 测试方法学、M1 到 M3 的验收记录与已知限制 |
