@@ -121,7 +121,7 @@ M1 不做向导文案，只提供两个数。`env::cache_usage(paths)` 返回 `U
 2. 没有 Python 的干净 Windows，以及 `perMachine` 的管理员会话与 UAC 时机。两项属于 M5 的真机项。
 3. NSIS 安装包与便携 exe。M1 不产安装包。
 4. `uv_lock` 分支的真机命令。三个上游都没有 `uv.lock`，单测用 `MockUvRunner` 断言 `--frozen`、`UV_PROJECT_ENVIRONMENT` 与 cwd，真机未跑。M2 打包出现 uv_lock 包时，按第 5 条复跑一次。
-5. 本机主 workspace 的 Rust 构建。本机阿里云镜像缺 `async-executor 1.14.1`，`src-tauri/` 下的 `cargo test -p launcher-core` 连 `--offline` 都解析失败。Rust 验证改用 `.internal/core-check` 镜像 crate；CI 用 crates.io，不受影响。
+5. 本机主 workspace 的 Rust 构建。M3.0 已把 `async-executor` 钉到本机缓存的 1.14.0，只改 `Cargo.lock` 一处，`src-tauri/` 下的 workspace 现可离线编译。该项已关闭，CI 走 crates.io 不受影响。
 
 警告：不要把 `registry_unchanged: null` 读成“注册表没有变化”。这个字段为 `null` 时只表示本次没有检查。
 
@@ -179,9 +179,9 @@ B2 新增 2 项单测。一项断言新建失败后不留正式 generation 目�
 
 ## M2 主体离线验收（2026-11-12）
 
-M2 主体逻辑落在 `src-tauri/core/src/m2/`，含 10 个模块。网络只经 `HttpFetcher` trait 进入，测试用 FakeHttp 注入。Tauri 命令面未接线。
+M2 主体逻辑落在 `src-tauri/core/src/m2/`，含 10 个模块。网络只经 `HttpFetcher` trait 进入，测试用 FakeHttp 注入。M2 收尾时 Tauri 命令面未接线，M3 已全量接线。
 
-`tests/m2_engine.rs` 的 9 个端到端测试串起双源、验签、安装、信任、状态与导入：
+`core/tests/m2_engine.rs` 的 9 个端到端测试串起双源、验签、安装、信任、状态与导入：
 
 - 一源不可用时从另一源拉 catalog 并装完；catalog 版本回退、签名被改、两源都不可用都被拒。
 - zip 改一个字节被拒；`files` 清单多一个、少一个、哈希不符都整体拒绝，安装目录不落盘。
@@ -196,6 +196,33 @@ M2 主体逻辑落在 `src-tauri/core/src/m2/`，含 10 个模块。网络只经
 ## 待真机或后续里程碑复核
 
 - `uv pip compile --generate-hashes` 对同一输入两次输出是否逐字节一致。generation 哈希依赖这份输出；不一致会让每轮都新建 generation。
-- `.staging` 路径按哈希固定，同一实例并发 prepare 会互相删除。M3 命令面需串行化，或给 staging 加唯一后缀。
+- `.staging` 路径按哈希固定，同一实例并发 prepare 会互相删除。M3 的 `prepare_instance_env` 未按实例串行化，该项仍未关闭。
 - CI 的数据级校验只覆盖 `examples/state/` 两份手写样例，挡不住 Rust 写端字段漂移。可在 Rust 侧把序列化结果喂给 schema，或由 CI 重新生成样例。
 - `write_json_once` 写 install.json 仍直接写目标文件，中途崩溃会留下半截 JSON。下次启动读失败后重装即可，不像 generation 文件那样永久卡住，暂不改动。
+
+## M3 生命周期与命令面离线验收（2026-11-13）
+
+结论：M3 的静态门禁全绿，六条真机验收均未实测。按 [ROADMAP.md](ROADMAP.md) 的规则，离线断言不计通过。
+
+静态门禁在 `src-tauri/` 下跑：`cargo fmt --all -- --check`、`cargo clippy --offline --workspace --all-targets -- -D warnings`、`cargo test --offline --workspace --all-targets`。M3.4 删掉 v1 后共 11 组测试目标零失败，其中 app lib 86 项、core lib 152 项、M2 端到端 9 项、生命周期 11 项。`cargo test --test fuzz_invariants` 8 项与 `--test sign_real_manifests` 2 项单独跑过，`ci.yml` 的 fuzz 前置依赖没有因删 v1 模块失效。前端 `npm run typecheck` 与 `vite build` 通过。契约 107 项断言、ajv 的六份状态 schema 编译与两份状态样例数据级校验通过。
+
+M3 代码落在四处：core 的 `lifecycle/` 纯逻辑、app 的 `process/win.rs` 与 `lifecycle_runtime.rs`、`commands_v2.rs` 与 `state_v2.rs`。命令面保留 v1 的 21 个命令名与返回形状，另加 11 个 v2 命令，`src/bridge.ts` 零改动。
+
+| ROADMAP M3 条目 | 状态 | 离线断言覆盖 |
+|---|---|---|
+| 1 强杀启动器无残留子进程 | 未实测 | Job Object 的 kill-on-close 有单测，没有强杀实测 |
+| 2 并发两次启动只起一个 | 未实测 | `begin_start` 的 `AlreadyStarting` 有单测，`start_lock` 无并发真机断言 |
+| 3 崩溃 5 秒内 UI 变红 | 未实测 | watcher 与事件推送有单测，没有计时实测 |
+| 4 health 期间命令不阻塞 | 未实测 | 后台任务与内存快照有单测 |
+| 5 第三方崩溃不影响官方 | 未实测 | 按实例 Job 与拓扑排序有单测 |
+| 6 目录变更确认前不自启 | 未实测 | `require_confirmed` 有单测，启动编排调用路径未经真机 |
+
+### 已知限制
+
+1. M3 不写日志文件，重启后没有历史崩溃记录。`read_instance_logs` 恒返回空行与说明文字。
+2. 内置 K5 公钥是占位值，远程 catalog 验签一律失败并按 `unavailable` 返回，不降级放行。`set_k5_pubkey` 可登记真实公钥，界面入口在 M4。
+3. `switch_active` 只做 `installed.json` 原子写，没有停旧起新与进程回滚。ROADMAP M2 第 9 条仍未关闭。
+4. `prepare_instance_env` 未按实例串行化，同一实例并发 prepare 的 `.staging` 互删风险仍在。
+5. 卸载只删 zip 实例的包目录，不删 venv；purge 跳过运行中实例，没有先停全部进程。
+6. `purge_local_data` 的 `state` 只重置 catalog 水位，保留实例表，与 v1 的清状态语义不同。
+7. `list_module_states` 仍按 `module_id` 返回单行，多实例细节走 `list_instances`。

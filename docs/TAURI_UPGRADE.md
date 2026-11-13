@@ -14,7 +14,7 @@
 
 ## unstable 的使用面
 
-M0 只启用 feature，并冻结 `AdminHost` 接口。`launcher-core` 不依赖 Tauri，接口见 `core/src/admin_host.rs`。M4 才在桌面壳里写 `WebviewBuilder` 与 `add_child` 调用，独立窗口保留为运行时 fallback，现有入口是 `commands.rs::open_admin_window`。
+M0 只启用 feature，并冻结 `AdminHost` 接口。`launcher-core` 不依赖 Tauri，接口见 `core/src/admin_host.rs`。M4 才在桌面壳里写 `WebviewBuilder` 与 `add_child` 调用，独立窗口保留为运行时 fallback，现有入口是 `commands_v2::open_admin_window`。
 
 警告：把 `unstable` API 调用写进 `launcher-core` 会让 core 依赖 Tauri，CI 里的无窗口单测会失效。
 

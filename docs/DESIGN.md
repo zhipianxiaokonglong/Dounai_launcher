@@ -57,7 +57,7 @@ iframe 与独立窗口的取舍见 [ADMIN_UI.md](ADMIN_UI.md)。子 WebView 是�
 分层规则有四条：
 
 1. `launcher-core` 不依赖 Tauri。纯 Rust，CI 里能跑真实单测与端到端测试，不启动窗口。
-2. Tauri 命令面只校验参数、转换结果，不写业务逻辑。现有 `commands.rs` 有 1836 行，业务逻辑混在命令里。
+2. Tauri 命令面只校验参数、转换结果，不写业务逻辑。v1 的 `commands.rs` 已删除，M3 的 `commands_v2.rs` 按同一边界重写。
 3. UI 只通过命令面访问 core，不直接读写文件系统。
 4. `admin-host` 对外只暴露 `trait AdminHost { mount / unmount / reload }`，隔离 unstable API 的升级面。独立窗口保留为运行时 fallback。
 
@@ -115,29 +115,26 @@ Windows 专属代码圈进 `process/win` 单一模块边界。`launcher-core` �
 
 Python、venv、wheels 与模块包不计入交付物体积，但要在向导里写清楚。三个产物都过体积门禁，便携版不得跳过。
 
-## 6. 现有代码处置
+## 6. v1 代码处置结果
 
-下表的行号会随 M1 改写失效，只记处置结论。
-
-M2 主体的纯逻辑落在 `launcher-core` 的 `m2` 模块组，便于离线编译验证。下表针对 v1 应用代码的复用与改造，在 M3 命令面重写时执行。
+M3 结束时 v1 的进程管理、状态库与命令面已全部删除。下表记最终处置，保留的模块只服务现有 CI 测试与只读体检，不参与 v2 的命令处理与进程启动。
 
 | 资产 | 处置 | 理由 |
 |---|---|---|
-| `download.rs` 多源下载器 | 复用 | 已有点试、断点续传、镜像回退、sha256 校验与失败切源 |
-| `install.rs` 安装事务 | 复用并扩展 | 已有 staging、commit、rollback 与两遍路径检查；需补逐文件哈希清单与解压总大小上限 |
-| `signature.rs` 验签 | 直接复用 | 签的是剔除 `signature` 后的整份规范化 manifest，`files` 清单天然在覆盖内，加逐文件哈希不用改算法 |
-| `commands.rs::peek_manifest_from_zip` | 直接复用 | 只读 zip 内真 manifest，不信任请求里传的对象 |
-| `commands.rs::precheck_install` | 复用并收紧 | 已有“哈希必填 → zip 哈希 → 包内 manifest → 验签 → module_id 一致性”顺序 |
-| `commands.rs::admin_url_for` | 直接复用 | 已做回环校验、`/settings` 路径校验与按运行状态判断 |
-| `commands.rs::open_admin_window` | 直接复用 | 已记录 Windows 同步命令建窗死锁的规避方式 |
-| `trust.rs` | 改造语义 | 已有“有签名必须验通”的单测，但只看 `value` 非空，且分不开“未信任”与“被篡改” |
-| `catalog.rs` | 改造 | `CatalogEntry` 只有 5 个字段；精确 host 白名单挡不住 SourceForge 的动态镜像域名 |
-| `env_probe.rs` | 保留只读体检 | 系统 uv 版本不可控，环境引擎只用随包自带的 uv |
-| `runtime.rs` | 重写进程管理 | 惰性 `try_wait`、同步 `sleep`、无 Job Object、无启动互斥。多实例会放大竞态 |
-| `commands.rs` 命令面 | 拆分削薄 | `ORDER` 常量写死启动顺序，发布版信任策略写死 `strict(Vec::new())` |
-| `src/ui/main.ts` | 重做 | 原生 TS 加手写 CSS，无组件化 |
+| `runtime.rs` | 已删除 | 由 `process/win.rs` 的 Job Object 与 `lifecycle_runtime.rs` 的 watcher 取代 |
+| `state.rs` 的 `StateStore` | 已删除 | 由 `state_v2.rs` 的 `AppStateV2` 与 `state/installed.json` 取代 |
+| `commands.rs` 旧命令体 | 已删除 | 由 `commands_v2.rs` 的 21 个同名命令取代，另加 11 个 v2 命令 |
+| `tests/` 六份 v1 集成测试 | 已删除 | 断言绑死 v1 状态格式，不再适用 |
+| `install.rs` 安装事务 | 保留 | `fuzz_invariants` 依赖 `extract_zip_into` 与 `InstallTransaction`；v2 安装走 `m2::package::install_package` |
+| `security.rs` / `signature.rs` | 保留重导出 | `fuzz_invariants` 与 `sign_real_manifests` 依赖；v2 验签走 `m2::manifest` 与 core `signature` |
+| `download.rs` / `http_client.rs` | 复用 | `download_package` 沿用断点续传、镜像回退与 sha256 校验 |
+| `catalog.rs` / `trust.rs` | 保留只读 | v2 的 catalog 裁决与信任判定在 `m2::catalog` 与 `m2::trust` |
+| `env_probe.rs` / `module_probe.rs` | 保留 | 只读体检与回环地址推导 |
+| `src/ui/main.ts` | 留 M4 重做 | 命令名与返回形状保持 v1，界面暂不改动 |
 | `bin/sign_manifests.rs` | 已删除，替换为 `pack.rs` 与 `sign_catalog.rs` | 原工具只签单个 JSON，无 `files` 清单、无打包，没有给 catalog 签名的工具 |
 | `tauri.conf.json` | 分两步改 | `unstable` 与固定版本已在 M0 落到 `Cargo.toml`，升级检查清单见 [TAURI_UPGRADE.md](TAURI_UPGRADE.md)；`nsis.installMode`、`webviewInstallMode` 与 `installerHooks` 留 M5 |
+
+`#[tauri::command]` 生成的辅助宏名是 crate 级全局的，同名命令无法在同一 crate 内存在两份。因此 M3.3 建好 v2 命令面后必须立即剥掉 v1 的命令宏，不能等删除阶段再切注册面。M3.4 完成删除，`ci.yml` 不用改：`--workspace --all-targets` 自动发现剩余测试，`fuzz_invariants` 与 `sign_real_manifests` 仍绿。
 
 ## 7. 子系统行为约束
 
@@ -249,7 +246,9 @@ zip 根下放 `manifest.json` 与模块文件。签名放 manifest 的 `signatur
 
 `version` 只在同发布者指纹、`module_id`、`variant` 内比较。跨变体、跨 `module_id`、跨发布者一律不比，否则第三方写个 `99.0.0` 就能永远显示“有更新”。`variant` 默认 `stable`，禁止把变体塞进版本串。
 
-目录、venv、`data_dir`、日志、端口、进程句柄与信任记录全按 `instance_id` 索引。`active[role] = instance_id` 是原子事务：停旧实例、起新实例并占规范端口、做 health 与契约自检、提交。任一步失败回滚到旧实例。这补上了 v1 的 `is_active → spawn → insert` 无互斥与 `purge` 未停先删。
+目录、venv、`data_dir`、日志、端口、进程句柄与信任记录全按 `instance_id` 索引。`active[role] = instance_id` 的设计口径是停旧实例、起新实例并占规范端口、做 health 与契约自检、提交，任一步失败回滚到旧实例。
+
+M3 当前只做原子落盘：`switch_active` 调 `InstalledState::switch_active` 一次写完 `installed.json`，不停旧实例、不起新实例，也没有进程回滚。[ROADMAP.md](ROADMAP.md) M2 第 9 条仍未关闭。
 
 第三方实例与目录实例都不能自动成为 active，用户显式切换才允许。默认各实例数据隔离，“共享会话数据用于对比”列为显式高级选项，SQLite 并发写会冲突。
 
@@ -259,16 +258,20 @@ zip 根下放 `manifest.json` 与模块文件。签名放 manifest 的 `signatur
 
 ### 7.5 生命周期
 
-| 现状 | 目标 |
-|---|---|
-| `ORDER` 常量写死四个 id | 顺序、端口、env 与 health 全部由 manifest 声明，`depends_on` 按 role 拓扑排序加冲突检测。加第三方模块不改启动器源码 |
-| 只在 `view()` 时 `try_wait` | 独立 exit watcher 线程，进程退出即刻更新 UI 状态 |
-| 同步 `sleep` 阻塞命令线程 | 健康检查放到异步后台任务，命令立即返回 |
-| 启动无互斥 | 单实例一把锁加全局启动互斥，active 切换按 7.4 事务化 |
-| 无 Job Object，靠 `taskkill` 兜底 | Windows Job Object 的 kill-on-close 加 `CREATE_NO_WINDOW`；先 CTRL_BREAK 优雅退出，超时再 kill |
-| 不记子进程 stdout | 每实例 stdout 与 stderr 落盘并轮转，UI 可查看诊断 |
+M3 已按 role 拓扑启动、Job Object 托管与异步探测重写生命周期。上游 stdout 与 stderr 继续丢弃，M4 加显式诊断开关后才落盘并轮转。
 
-第三方模块、目录实例与官方模块走同一状态机，状态卡片按验签结果着色。卸载时先停进程，再删 venv，最后删包目录。`data_dir` 单独询问，用户源码目录不参与卸载。目录实例额外挂一条“启动前检测 HEAD，源码变更时禁止自动启动”。
+| v1 问题 | M3 对应的代码 |
+|---|---|
+| `ORDER` 常量写死四个 id | `startup_order` 读 `roles-v1.json` 的 `depends_on` 做拓扑排序，环与缺依赖报错 |
+| 只在 `view()` 时 `try_wait` | 每实例一个 exit watcher，进程退出即更新状态并发 `lifecycle-changed` |
+| 同步 `sleep` 阻塞命令线程 | health 与契约探测跑后台任务，命令只读内存快照 |
+| 启动无互斥 | `Supervisor` 的 `start_lock` 包住 `begin_start` 到进程登记 |
+| 无 Job Object，靠 `taskkill` 兜底 | Job Object 的 kill-on-close 加 `CREATE_NO_WINDOW`，优雅退出超时再 kill |
+| 不记子进程 stdout | 诊断模式开启时才落盘并轮转；M3 不写任何日志文件 |
+
+第三方模块、目录实例与官方模块走同一状态机。卸载先检查实例是否运行，运行中直接拒绝；只删 zip 实例的包目录，dir 实例的源码目录永不删除，`data_dir` 不自动清理。venv 清理与 purge 前自动停进程尚未接线。目录实例启动前调 `observe_source` 与 `require_confirmed`，源码变更未确认时不自启。
+
+M3 不落盘日志，启动器重启后没有历史崩溃记录。轮转策略已写成纯函数，M4 接开关前不碰文件句柄与目录权限。
 
 ### 7.6 界面
 
