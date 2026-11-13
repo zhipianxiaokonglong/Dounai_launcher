@@ -14,7 +14,7 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
 
-use launcher_core::lifecycle::{Phase, ProbeState, Snapshot};
+use launcher_core::lifecycle::{Phase, ProbeState, RolesDoc, Snapshot};
 use launcher_core::m2::adapters::RemoteCatalogAdapter;
 use launcher_core::m2::catalog::{select_catalog, CatalogState};
 use launcher_core::m2::installed::Instance;
@@ -33,6 +33,9 @@ use crate::lifecycle_ops::{
 use crate::lifecycle_runtime::Supervisor;
 use crate::m2_http::{ReqwestCatalogFetcher, ALL_HOST_SUFFIXES};
 use crate::state_v2::{bare_sha256, prefixed_sha256, AppStateV2};
+
+/// 启动前外部服务探测预算：只发一次请求，超时就走正常启动路径。
+const PRESTART_TIMEOUT_MS: u64 = 600;
 
 /* ------------------------------------------------------------------ */
 /* 与 v1 等价的返回形状                                                */
@@ -80,6 +83,9 @@ pub struct RunView {
     pub pid: Option<u32>,
     pub last_error: Option<String>,
     pub healthy: bool,
+    /// 服务健康但不在本启动器进程表里：由外部启动，无权停止（上游 D-4）。
+    #[serde(default)]
+    pub external: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -295,6 +301,7 @@ fn run_view(
             last_error: snap.last_error.clone().or(fallback_error),
             healthy: snap.health == ProbeState::Healthy
                 || (snap.phase == Phase::Running && snap.health == ProbeState::NotChecked),
+            external: false,
         },
         None => RunView {
             module_id: module_id.to_string(),
@@ -302,7 +309,20 @@ fn run_view(
             pid: None,
             last_error: fallback_error,
             healthy: false,
+            external: false,
         },
+    }
+}
+
+/// 外部已运行：健康、无 pid、不可由启动器停止。
+fn external_run_view(module_id: &str) -> RunView {
+    RunView {
+        module_id: module_id.to_string(),
+        run: RunStateView::Running,
+        pid: None,
+        last_error: None,
+        healthy: true,
+        external: true,
     }
 }
 
@@ -321,9 +341,9 @@ fn module_view(state: &AppStateV2, instance: &Instance, supervisor: &Supervisor)
         pid: view.pid,
         healthy: view.healthy,
         linked,
-        // v2 的进程表是唯一来源：没有「探通就标成外部进程」的兜底，
-        // 因为 M3 的 health 探测只作用于自己拉起的实例。
-        external: false,
+        // 启动前短探发现端口上已有健康服务时置 true（上游 D-4）。
+        // 快照里也已并入合成的 Running/Healthy 状态，卡片不会显示「启动失败」。
+        external: supervisor.is_external(&instance.instance_id),
     }
 }
 
@@ -338,19 +358,61 @@ pub fn start_module(
     supervisor: State<'_, Supervisor>,
 ) -> Result<RunView, String> {
     let instance = state.resolve_instance(&module_id)?;
-    start_instance(&state, &supervisor, &instance)
-        .map(|snap| run_view(&instance.module_id, Some(&snap), None))
+    let port = single_instance_port(&state, &supervisor, &instance);
+    Ok(
+        match start_instance(&state, &supervisor, &instance, port)? {
+            StartOutcome::Managed(snap) => run_view(&instance.module_id, Some(&snap), None),
+            StartOutcome::External => external_run_view(&instance.module_id),
+        },
+    )
+}
+
+/// 启动结果：由本启动器托管，或端口上已有外部健康服务。
+enum StartOutcome {
+    Managed(Snapshot),
+    External,
+}
+
+/// 单实例启动时的端口；与 start_all 的整体分配保持同一套规则。
+fn single_instance_port(
+    state: &AppStateV2,
+    supervisor: &Supervisor,
+    instance: &Instance,
+) -> Option<u16> {
+    assign_ports(state, supervisor.roles(), std::slice::from_ref(instance))
+        .get(&instance.instance_id)
+        .copied()
+        .flatten()
+}
+
+/// 按 roles 契约拼出启动前健康探测地址；无 health 端点的角色返回 None。
+fn prestart_health_url(roles: &RolesDoc, instance: &Instance, port: Option<u16>) -> Option<String> {
+    let port = port?;
+    roles
+        .health(instance.role)
+        .map(|h| format!("http://127.0.0.1:{port}{}", h.path))
 }
 
 fn start_instance(
     state: &AppStateV2,
     supervisor: &Supervisor,
     instance: &Instance,
-) -> Result<Snapshot, String> {
-    let ports = assign_ports(state, supervisor.roles(), std::slice::from_ref(instance));
-    let port = ports.get(&instance.instance_id).copied().flatten();
+    port: Option<u16>,
+) -> Result<StartOutcome, String> {
+    // 上游 D-4：进程表里没有，但服务可能由用户自己拉起，或是启动器重启后
+    // 留下的孤儿。直接 spawn 会因端口占用立刻退出（退出码 3），界面误报
+    // 「启动失败」，而服务其实一直健康。先按 roles 的 health 路径短探一次。
+    if let Some(url) = prestart_health_url(supervisor.roles(), instance, port) {
+        if Supervisor::probe_external_once(&url, PRESTART_TIMEOUT_MS) {
+            supervisor.mark_external(&instance.instance_id);
+            return Ok(StartOutcome::External);
+        }
+    }
+    // 探不通就把旧的外部标记清掉，允许接管这个端口。
+    supervisor.clear_external(&instance.instance_id);
+
     let plan = build_start_request(state, instance, port, supervisor.roles())?;
-    supervisor.start(plan.request)
+    supervisor.start(plan.request).map(StartOutcome::Managed)
 }
 
 #[tauri::command]
@@ -380,11 +442,13 @@ pub fn start_all(state: State<'_, AppStateV2>, supervisor: State<'_, Supervisor>
     let ports = assign_ports(&state, supervisor.roles(), &ordered);
     let mut out = Vec::with_capacity(ordered.len());
     for instance in &ordered {
+        // 整批分配端口仍在这里做，start_instance 只负责单个实例的启动前探测。
         let port = ports.get(&instance.instance_id).copied().flatten();
-        let result = build_start_request(&state, instance, port, supervisor.roles())
-            .and_then(|plan| supervisor.start(plan.request));
-        match result {
-            Ok(snap) => out.push(run_view(&instance.module_id, Some(&snap), None)),
+        match start_instance(&state, &supervisor, instance, port) {
+            Ok(StartOutcome::Managed(snap)) => {
+                out.push(run_view(&instance.module_id, Some(&snap), None))
+            }
+            Ok(StartOutcome::External) => out.push(external_run_view(&instance.module_id)),
             Err(error) => out.push(run_view(&instance.module_id, None, Some(error))),
         }
     }
@@ -415,11 +479,19 @@ pub fn restart_instance(
     let instance = state
         .instance(&instance_id)
         .ok_or_else(|| format!("实例不存在：{instance_id}"))?;
+    if supervisor.is_external(&instance_id) {
+        return Err(format!("实例 {instance_id} 由外部启动，启动器无法重启"));
+    }
     if supervisor.running().contains(&instance_id) {
         supervisor.stop(&instance_id)?;
     }
-    let snap = start_instance(&state, &supervisor, &instance)?;
-    Ok(run_view(&instance.module_id, Some(&snap), None))
+    let port = single_instance_port(&state, &supervisor, &instance);
+    Ok(
+        match start_instance(&state, &supervisor, &instance, port)? {
+            StartOutcome::Managed(snap) => run_view(&instance.module_id, Some(&snap), None),
+            StartOutcome::External => external_run_view(&instance.module_id),
+        },
+    )
 }
 
 #[tauri::command]
@@ -480,6 +552,12 @@ pub fn uninstall_module(
     if supervisor.running().contains(&instance.instance_id) {
         return Err(format!(
             "实例 {} 正在运行，请先停止再卸载",
+            instance.instance_id
+        ));
+    }
+    if supervisor.is_external(&instance.instance_id) {
+        return Err(format!(
+            "实例 {} 的服务由外部启动且仍在运行，请先在原进程里关闭再卸载",
             instance.instance_id
         ));
     }
@@ -1137,8 +1215,10 @@ pub fn remove_local_module(
     if instance.source_kind != InstanceSourceKind::Dir {
         return Err("remove_local_module 只解除本地目录登记，zip 实例请用 uninstall_module".into());
     }
-    if supervisor.running().contains(&instance.instance_id) {
-        return Err("实例正在运行，请先停止再解除登记".into());
+    if supervisor.running().contains(&instance.instance_id)
+        || supervisor.is_external(&instance.instance_id)
+    {
+        return Err("实例正在运行（含外部启动），请先停止再解除登记".into());
     }
     state.remove_instance(&instance.instance_id)?;
     // 源码目录归用户所有，绝不删除。
@@ -1231,7 +1311,10 @@ fn admin_url_v2(
         .pointer("/admin_ui/web_ui/requires_running")
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
-    if requires_running && !supervisor.running().contains(&instance.instance_id) {
+    // 外部已运行的服务同样算「在跑」，管理页应可打开（上游 D-4）。
+    let alive = supervisor.running().contains(&instance.instance_id)
+        || supervisor.is_external(&instance.instance_id);
+    if requires_running && !alive {
         return Err(format!("模块 {module_id} 未运行，请先启动它"));
     }
     let port = supervisor
@@ -1274,6 +1357,43 @@ pub async fn open_admin_window(
             .title(format!("{module_id} · 管理界面"))
             .inner_size(1080.0, 760.0)
             .min_inner_size(720.0, 520.0)
+            // 纵深防御：外部 URL 的 WebView 会继承 Tauri 的全局注入。
+            // capabilities 把权限限定在 windows:["main"]，admin 窗口调用命令
+            // 会被 ACL 拒绝，但注入对象本身仍等于告诉上游页面「我跑在 Tauri 里」，
+            // 并留下可枚举的入口。这里在页面脚本执行前清掉。
+            //
+            // 必须用 for_all_frames：上游页面可能用 iframe 加载子页面，
+            // 只清顶层会留后门。也不能全局关 withGlobalTauri——主窗口
+            // 的 bridge.ts 完全依赖 window.__TAURI__（未引入 @tauri-apps/api）。
+            .initialization_script_for_all_frames(
+                r#"(function(){ try { window.__DOUNAI_ADMIN_SANITIZED__ = true; } catch (e) {}
+  // __TAURI_INTERNALS__ 被 Tauri 定义为 configurable:false，delete 无效，
+  // 只能覆盖其值；连覆盖都被拒绝时再退回到赋值。
+  var kill = function (name) {
+    try { delete window[name]; } catch (e) {}
+    if (typeof window[name] !== 'undefined') {
+      try {
+        Object.defineProperty(window, name, { value: undefined, configurable: false, writable: false });
+      } catch (e) {
+        try { window[name] = undefined; } catch (e2) {}
+      }
+    }
+  };
+  kill('__TAURI__');
+  kill('__TAURI_IPC__');
+  kill('__TAURI_METADATA__');
+  // 内部对象换成冻结空壳，切断 invoke 通道；ACL 仍是最后一道防线。
+  try {
+    Object.defineProperty(window, '__TAURI_INTERNALS__', {
+      value: Object.freeze({}),
+      configurable: false,
+      writable: false,
+    });
+  } catch (e) {
+    try { window.__TAURI_INTERNALS__ = Object.freeze({}); } catch (e2) {}
+  }
+})();"#,
+            )
             .center()
             .build()
             .map_err(|e| format!("打开管理窗口失败：{e}"))?;
@@ -1423,8 +1543,8 @@ pub fn purge_local_data(
                 // 源码目录归用户，永不删除。
                 continue;
             }
-            if running.contains(&id) {
-                errors.push(format!("实例 {id} 正在运行，跳过清理"));
+            if running.contains(&id) || supervisor.is_external(&id) {
+                errors.push(format!("实例 {id} 正在运行（含外部启动），跳过清理"));
                 continue;
             }
             let base = state.paths.instance_dir_keyed(&id);

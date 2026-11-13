@@ -25,14 +25,27 @@ pub struct GpuInfo {
     pub name: String,
     pub vram_gb: f64,
     pub usable: bool,
+    /// 显存值可能被 uint32 截断（仅在回退到 AdapterRAM 且恰好接近 4 GiB 时为 true）。
+    ///
+    /// 保留这个标记而不是直接改数字：前端可以据此显示「可能不准」，
+    /// 比悄悄给一个错值更诚实。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
 }
 
 /// 磁盘信息。
 #[derive(Debug, Serialize)]
 pub struct DiskInfo {
+    /// 被检测的卷（数据根所在盘）。
     pub path: String,
     pub free_gb: f64,
     pub ok: bool,
+    /// 该卷是否就是启动器数据根所在卷。
+    ///
+    /// 现在恒为 true（我们只检测数据根），保留字段是为了让前端能区分
+    /// 「这个数字代表真正会被写入的盘」而不是别的盘——历史上这里显示的是 D 盘。
+    #[serde(default)]
+    pub is_data_root: bool,
 }
 
 /// 完整环境报告。
@@ -168,46 +181,176 @@ fn probe_runtime(cmd: &str, candidates: &[(&str, &[&str])], min: (u32, u32, u32)
     }
 }
 
+/// 探测显卡与显存。
+///
+/// ## 为什么不用 `Win32_VideoController.AdapterRAM`
+///
+/// 该字段是 **uint32**，超过 4 GiB 的显存会**溢出截断**：
+///
+/// | | 字节数 | 换算 |
+/// |---|---|---|
+/// | RTX 3080 Ti 实际 | 12884901888 | 12 GiB |
+/// | WMI `AdapterRAM` | 4293918720 | ≈4 GiB（被截断） |
+///
+/// 实测报告里就是「12 GB 的卡报成 4 GB」。这会导致对机器能力的严重低估，
+/// 进而劝退用户不要用本地模型。
+///
+/// ## 取值优先级
+///
+/// 1. 注册表 `HardwareInformation.qwMemorySize` —— **64 位**，不会被截断，
+///    且与 WMI 同源（不需要额外依赖厂商工具）
+/// 2. `nvidia-smi --query-gpu=memory.total` —— NVIDIA 卡最准，作为交叉验证
+/// 3. `AdapterRAM` —— 仅最后兜底，并在接近 4 GiB 时标注「可能被截断」
 fn probe_gpus() -> Vec<GpuInfo> {
-    // AdapterRAM 在某些驱动下为 0/不可靠；仅作参考，不做硬性判断依据
+    // 一次 PowerShell 调用同时取「注册表 64 位值」与「WMI 名称 + 32 位值」。
+    //
+    // 注册表路径里 {4d36e968-e325-11ce-bfc1-08002be10318} 是显示适配器类 GUID，
+    // 其下每个 4 位数字子键对应一块显卡，qwMemorySize 是 64 位显存字节数。
     let (ok, out) = run_with_timeout(
         "powershell",
         &[
             "-NoProfile",
             "-Command",
-            "Get-CimInstance Win32_VideoController | ForEach-Object { \"$($_.Name)|$($_.AdapterRAM)\" }",
+            r#"
+$cls = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}'
+$reg = @{}
+if (Test-Path $cls) {
+  Get-ChildItem $cls -ErrorAction SilentlyContinue | ForEach-Object {
+    $p = $_.PSPath
+    $mem = (Get-ItemProperty -Path $p -Name 'HardwareInformation.qwMemorySize' -ErrorAction SilentlyContinue).'HardwareInformation.qwMemorySize'
+    $desc = (Get-ItemProperty -Path $p -Name 'DriverDesc' -ErrorAction SilentlyContinue).DriverDesc
+    if ($mem -and $desc) { $reg[$desc] = $mem }
+  }
+}
+Get-CimInstance Win32_VideoController | ForEach-Object {
+  $n = $_.Name
+  $a = $_.AdapterRAM
+  # 只做精确匹配：显示适配器名称在 WMI 与注册表 DriverDesc 中是一致的。
+  # 曾经试过模糊匹配，结果把 NVIDIA 的 12GB 错配给了虚拟显示器——
+  # 宁可为 0，也不能张冠李戴。
+  $q = 0
+  if ($reg.ContainsKey($n)) { $q = $reg[$n] }
+  "$n|$a|$q"
+}
+"#,
         ],
-        Duration::from_secs(10),
+        Duration::from_secs(15),
     );
     if !ok {
         return Vec::new();
     }
+
+    // nvidia-smi 的总显存（字节），用于交叉校验与缺失时兜底
+    let nv_total = nvidia_total_vram_bytes();
+
     out.lines()
         .map(|l| l.trim())
-        .filter(|l| l.contains('|'))
+        .filter(|l| l.split('|').count() >= 2)
         .map(|l| {
-            let mut it = l.splitn(2, '|');
+            let mut it = l.splitn(3, '|');
             let name = it.next().unwrap_or("").trim().to_string();
-            let ram: f64 = it.next().unwrap_or("0").trim().parse().unwrap_or(0.0);
-            let vram_gb = (ram / 1024.0 / 1024.0 / 1024.0 * 10.0).round() / 10.0;
+            let adapter: f64 = it.next().unwrap_or("0").trim().parse().unwrap_or(0.0);
+            let qword: f64 = it.next().unwrap_or("0").trim().parse().unwrap_or(0.0);
+
+            // 优先 64 位注册表值；其次 nvidia-smi（**仅限 NVIDIA 卡**）；最后 AdapterRAM。
+            //
+            // 「仅限 NVIDIA 卡」很关键：nvidia-smi 报的是 NVIDIA 卡的显存，
+            // 若给虚拟显示器也套用，就会得出「虚拟显卡 12GB」这种荒谬结论。
+            let name_is_nvidia = name.to_ascii_lowercase().contains("nvidia");
+            let (bytes, source) = if qword > 0.0 {
+                (qword, "registry")
+            } else if name_is_nvidia {
+                match nv_total {
+                    Some(nv) => (nv, "nvidia-smi"),
+                    None => (adapter, "adapterram"),
+                }
+            } else {
+                (adapter, "adapterram")
+            };
+
+            let vram_gb = (bytes / 1024.0 / 1024.0 / 1024.0 * 10.0).round() / 10.0;
+
+            // AdapterRAM 接近 4 GiB 时几乎必然是被 uint32 截断的结果
+            let truncated_hint = source == "adapterram" && (bytes - 4_294_967_295.0f64).abs() < 1.0;
+
             GpuInfo {
                 usable: vram_gb >= 2.0,
                 name,
                 vram_gb,
+                truncated: truncated_hint,
             }
         })
         .filter(|g| !g.name.is_empty())
         .collect()
 }
 
-fn probe_disk() -> DiskInfo {
+/// 用 nvidia-smi 取第一块 NVIDIA 卡的总显存（字节）。
+///
+/// 机器上没有 NVIDIA 卡或没装驱动时返回 None——这是正常情况，不报错。
+fn nvidia_total_vram_bytes() -> Option<f64> {
+    let (ok, out) = run_with_timeout(
+        "nvidia-smi",
+        &["--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+        Duration::from_secs(8),
+    );
+    if !ok {
+        return None;
+    }
+    // 输出是 MiB 数字（可能带单位与空行），取第一行第一个数字
+    out.lines()
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty())
+        .and_then(|l| l.split_whitespace().next().map(|s| s.to_string()))
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .map(|mib| mib * 1024.0 * 1024.0)
+}
+
+/// 探测**数据根所在盘**的剩余空间。
+///
+/// ## 为什么不能再硬编码 D 盘
+///
+/// 盘符写死 `D` 会同时导致两类错误：
+///
+/// 1. **漏报**：启动器数据根实际是
+///    `app_local_data_dir()/launcher`（通常在 C 盘）。
+///    用户看到「D 盘剩 1161 GB 空间充足」，但真正写入的 C 盘只剩 196 GB，
+///    等安装失败才知道。
+/// 2. **误报**：机器没有 D 盘时 `free_gb = 0`，判定为「空间不足」——
+///    而这类机器很常见。
+///
+/// 修法：直接检测数据根路径所在的卷。
+/// 从数据根取出 `X:` 形态的盘符。
+///
+/// 只接受单个 ASCII 字母加冒号：UNC 路径、非 Windows 路径都返回空串，
+/// 免得把任意字符串拼进 PowerShell 脚本。检测目标是数据根，不是当前盘。
+fn data_root_drive(data_root: &std::path::Path) -> String {
+    let prefix = data_root
+        .components()
+        .find_map(|c| match c {
+            std::path::Component::Prefix(p) => Some(p.as_os_str().to_string_lossy().to_string()),
+            _ => None,
+        })
+        .unwrap_or_default()
+        .trim_end_matches('\\')
+        .to_string();
+    let mut chars = prefix.chars();
+    match (chars.next(), chars.next()) {
+        (Some(letter), Some(':')) if letter.is_ascii_alphabetic() => {
+            format!("{}:", letter.to_ascii_uppercase())
+        }
+        _ => String::new(),
+    }
+}
+
+fn probe_disk(data_root: &std::path::Path) -> DiskInfo {
+    let drive = data_root_drive(data_root);
+    let script = format!(
+        "$d=Get-PSDrive -Name '{}' -ErrorAction SilentlyContinue; if($d){{[math]::Round($d.Free/1GB,1)}}",
+        drive.trim_end_matches(':')
+    );
     let (ok, out) = run_with_timeout(
         "powershell",
-        &[
-            "-NoProfile",
-            "-Command",
-            "$d=Get-PSDrive -Name D -ErrorAction SilentlyContinue; if($d){[math]::Round($d.Free/1GB,1)}",
-        ],
+        &["-NoProfile", "-Command", &script],
         Duration::from_secs(8),
     );
     let free_gb: f64 = if ok {
@@ -216,16 +359,34 @@ fn probe_disk() -> DiskInfo {
         0.0
     };
     DiskInfo {
-        path: "D:\\".into(),
+        // 拿不到盘符时不编造一个 `\`：如实写成「数据根所在卷」，
+        // 让提示文字仍说明检测对象，而不是给一个看似真实的错误路径。
+        path: if drive.is_empty() {
+            "数据根所在卷".into()
+        } else {
+            format!("{drive}\\")
+        },
         free_gb,
+        is_data_root: true,
         // 至少留 2GB 给安装
         ok: free_gb >= 2.0,
     }
 }
 
 /// 汇总环境报告。
+///
+/// v2 把数据根直接注入命令：磁盘检测以 `Paths::data_root` 所在卷为准，
+/// 不用工作目录兜底，也不再硬编码盘符（上游 D-3）。命令名与零参数形状
+/// 不变，`src/bridge.ts` 无需改动。
 #[tauri::command]
-pub fn probe_environment() -> EnvReport {
+pub fn probe_environment(state: tauri::State<'_, crate::state_v2::AppStateV2>) -> EnvReport {
+    probe_environment_with(&state.paths.data_root)
+}
+
+/// 探测环境，磁盘检测以 data_root 所在卷为准。
+///
+/// 命令层传入 v2 数据根；单测可直接传任意路径，不依赖 Tauri 状态。
+pub fn probe_environment_with(data_root: &std::path::Path) -> EnvReport {
     // Python：优先 python，其次 py 启动器（Windows 常见），最后 python3
     let python = probe_runtime(
         "Python",
@@ -239,7 +400,7 @@ pub fn probe_environment() -> EnvReport {
     let node = probe_runtime("Node.js", &[("node", &["--version"])], (20, 0, 0));
     let uv = probe_runtime("uv", &[("uv", &["--version"])], (0, 1, 0));
     let gpus = probe_gpus();
-    let disk = probe_disk();
+    let disk = probe_disk(data_root);
 
     let mut problems = Vec::new();
     // Python 与 Node 缺失会直接阻塞模块安装；uv 仅影响加速
@@ -250,7 +411,11 @@ pub fn probe_environment() -> EnvReport {
         problems.push("缺少 Node.js（建议 20+）".to_string());
     }
     if !disk.ok {
-        problems.push(format!("磁盘空间不足（D 盘剩余 {} GB）", disk.free_gb));
+        problems.push(format!(
+            "磁盘空间不足（{} 剩余 {} GB）",
+            disk.path.trim_end_matches('\\'),
+            disk.free_gb
+        ));
     }
 
     EnvReport {
@@ -358,11 +523,34 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
     #[test]
     fn probe_environment_returns_report_without_panic() {
-        // 在无特定运行时的机器上也必须返回结构完整的报告
-        let r = probe_environment();
+        // 在无特定运行时的机器上也必须返回结构完整的报告。
+        // 显式给一个 C 盘数据根，验证 D-3 不再写死 D 盘。
+        let r = probe_environment_with(std::path::Path::new(
+            r"C:\Users\test\AppData\Local\launcher",
+        ));
         assert!(!r.problems.is_empty() || r.healthy);
-        assert!(r.disk.path.contains("D"));
+        assert!(!r.disk.path.is_empty(), "应报告实际检测的卷");
+        assert!(r.disk.is_data_root, "检测的应是数据根所在卷");
+        assert!(r.disk.path.starts_with("C:"), "应检测数据根所在卷");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn data_root_drive_follows_the_given_root() {
+        assert_eq!(
+            data_root_drive(std::path::Path::new(r"E:\Dounai-ai\launcher")),
+            "E:"
+        );
+        assert_eq!(
+            data_root_drive(std::path::Path::new(r"C:\Users\test")),
+            "C:"
+        );
+        assert_eq!(
+            data_root_drive(std::path::Path::new(r"\\server\share\launcher")),
+            ""
+        );
     }
 }

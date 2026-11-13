@@ -67,10 +67,29 @@ fn emit_snapshot(app: &AppHandle, id: &str, snapshot: Option<&Snapshot>) {
     let _ = app.emit(EVENT_NAME, event);
 }
 
+/// 进程表之外、由外部启动但健康端点已通的实例（上游 D-4）。
+///
+/// 这些服务不在 Job Object 里，启动器既不该重复拉起，也无权停止。
+/// 只在内存里标记，不落盘；下次启动前会重新探测，探不通就清掉标记。
+fn external_snapshot(id: &str) -> Snapshot {
+    Snapshot {
+        instance_id: id.to_string(),
+        phase: Phase::Running,
+        ticket: 0,
+        pid: None,
+        health: ProbeState::Healthy,
+        // 只探了 health，契约一致性未知，不冒充 Healthy。
+        contract: ProbeState::NotChecked,
+        exit_code: None,
+        last_error: None,
+    }
+}
+
 pub struct Supervisor {
     lifecycle: Arc<Mutex<LifecycleState>>,
     processes: Mutex<BTreeMap<String, WinProcess>>,
     roles_by_instance: Mutex<BTreeMap<String, Role>>,
+    external: Mutex<BTreeSet<String>>,
     /// 包住 begin_start 到进程登记，状态机本身不代替临界区。
     start_lock: Mutex<()>,
     roles: RolesDoc,
@@ -84,6 +103,7 @@ impl Supervisor {
             lifecycle: Arc::new(Mutex::new(LifecycleState::default())),
             processes: Mutex::new(BTreeMap::new()),
             roles_by_instance: Mutex::new(BTreeMap::new()),
+            external: Mutex::new(BTreeSet::new()),
             start_lock: Mutex::new(()),
             roles,
             app,
@@ -94,12 +114,51 @@ impl Supervisor {
         self.lifecycle.clone()
     }
 
+    /// 视图用快照：进程表加上外部已运行的实例。
     pub fn snapshot(&self) -> BTreeMap<String, Snapshot> {
-        lock(&self.lifecycle).snapshot()
+        let mut map = lock(&self.lifecycle).snapshot();
+        for id in lock(&self.external).iter() {
+            map.insert(id.clone(), external_snapshot(id));
+        }
+        map
     }
 
+    /// 只看自己拉起的进程。卸载、一键停止等写操作用这个口径，
+    /// 外部实例不算「由我管理」，启动器无权停掉别人的进程。
     pub fn running(&self) -> BTreeSet<String> {
         lock(&self.lifecycle).running()
+    }
+
+    pub fn is_external(&self, id: &str) -> bool {
+        lock(&self.external).contains(id)
+    }
+
+    pub fn mark_external(&self, id: &str) {
+        lock(&self.external).insert(id.to_string());
+        let snap = external_snapshot(id);
+        emit_snapshot(&self.app, id, Some(&snap));
+    }
+
+    pub fn clear_external(&self, id: &str) {
+        lock(&self.external).remove(id);
+    }
+
+    /// 启动前一次性短探：端口上已有健康服务就不重复拉起（上游 D-4）。
+    ///
+    /// 与后台探测分开：这里只发一次请求、不轮询，避免点「启动」先等几秒。
+    /// 探测失败一律返回 false，交由正常启动路径处理，不吞掉真实错误。
+    pub fn probe_external_once(url: &str, timeout_ms: u64) -> bool {
+        let client = match reqwest::blocking::Client::builder()
+            .timeout(Duration::from_millis(timeout_ms.clamp(100, 1500)))
+            .build()
+        {
+            Ok(client) => client,
+            Err(_) => return false,
+        };
+        matches!(
+            client.get(url).send(),
+            Ok(response) if response.status().is_success()
+        )
     }
 
     pub fn roles(&self) -> &RolesDoc {
@@ -138,6 +197,8 @@ impl Supervisor {
         self.spawn_probe(&id, ticket, &request);
         lock(&self.processes).insert(id.clone(), process);
         lock(&self.roles_by_instance).insert(id.clone(), request.role);
+        // 真正接管成功，外部标记失效。
+        self.clear_external(&id);
 
         let snapshot = {
             let state = lock(&self.lifecycle);
@@ -149,6 +210,11 @@ impl Supervisor {
     }
 
     pub fn stop(&self, id: &str) -> Result<Snapshot, String> {
+        if self.is_external(id) {
+            return Err(format!(
+                "实例 {id} 由外部启动，启动器无权停止；请在原进程里关闭"
+            ));
+        }
         let ticket = {
             let mut state = lock(&self.lifecycle);
             state.begin_stop(id).map_err(|e| e.to_string())?;

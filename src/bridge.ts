@@ -45,6 +45,8 @@ export interface RunView {
   pid: number | null;
   last_error: string | null;
   healthy: boolean;
+  /** true 表示端口上已有外部启动的健康服务，本次没有拉起进程（D-4）。 */
+  external: boolean;
 }
 
 export interface CatalogEntry {
@@ -301,8 +303,15 @@ export interface RustEnvReport {
   python: { available: boolean; version: string; detail: string };
   node: { available: boolean; version: string; detail: string };
   uv: { available: boolean; version: string; detail: string };
-  gpus: Array<{ name: string; vram_gb: number; usable: boolean }>;
-  disk: { path: string; free_gb: number; ok: boolean };
+  /** truncated 只在回退到 uint32 的 AdapterRAM、疑似被截断时出现（D-2）。 */
+  gpus: Array<{
+    name: string;
+    vram_gb: number;
+    usable: boolean;
+    truncated?: boolean;
+  }>;
+  /** is_data_root 恒为 true：检测的是数据根所在卷，不再是写死的 D 盘（D-3）。 */
+  disk: { path: string; free_gb: number; ok: boolean; is_data_root?: boolean };
   problems: string[];
   healthy: boolean;
 }
