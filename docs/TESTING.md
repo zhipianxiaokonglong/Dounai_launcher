@@ -226,3 +226,18 @@ M3 代码落在四处：core 的 `lifecycle/` 纯逻辑、app 的 `process/win.r
 5. 卸载只删 zip 实例的包目录，不删 venv；purge 跳过运行中实例，没有先停全部进程。
 6. `purge_local_data` 的 `state` 只重置 catalog 水位，保留实例表，与 v1 的清状态语义不同。
 7. `list_module_states` 仍按 `module_id` 返回单行，多实例细节走 `list_instances`。
+
+## 上游 main 修复移植（2026-11-13）
+
+来源：`origin/main` 从 `a3e688f` 推到 `b8ab274`，四个提交（2026-11-12 18:50 到 21:10），对应上游的《测试与审计报告》。没有合并 main：v2 已删的 `commands.rs`、`runtime.rs`、`state.rs` 正是那批提交改的文件，合并会带回 v1 死代码并产生删除冲突。按功能面挑四项移植，分类越权修复按决定忽略。
+
+| 项 | v2 落点 | 与上游的差异 |
+|---|---|---|
+| 显存 4 GiB 截断、磁盘硬编码 D 盘 | `src-tauri/src/env_probe.rs` | `probe_environment` 直接注入 `AppStateV2.paths.data_root`，不新增 `probe_environment_here` 命令；盘符提取抽成 `data_root_drive`，只接受 `X:` 形态，UNC 返回空。`bridge.ts` 的 `RustEnvReport` 补两个可选字段 |
+| 外部已运行服务被误报启动失败 | `lifecycle_runtime.rs` 的 `external` 集合、`commands_v2.rs` 的 `StartOutcome` | 上游改进程表与 `RunView`；v2 把合成快照并进 `Supervisor::snapshot()`，`running()` 仍只数托管进程，停止与卸载明确拒绝，整批端口分配留在 `start_all` |
+| 管理窗口暴露 Tauri 注入 | `open_admin_window` 的逐帧初始化脚本 | 与上游同一段脚本 |
+| CI 缺前端依赖审计 | `ci.yml` 的 frontend job | 与上游同为生产依赖阻断、开发依赖报告两步 |
+
+门禁：`cargo fmt --all -- --check`、`clippy --offline --workspace --all-targets -- -D warnings`、`cargo test --offline --workspace --all-targets` 全绿，11 组测试目标零失败，app lib 87 项，比 M3.5 记录的 86 项多 1 项盘符提取单测。`npm run typecheck` 通过，`npm test` 65 项全过，`vite build` 通过。契约 107 项断言与 ajv 六份状态 schema 编译通过。CI 工作流用临时安装的 YAML 解析器解析成功：5 个 job，frontend 8 步，含两步审计。上游 `b8ab274` 修的就是注释写坏导致工作流在解析阶段终止，这一步不省。
+
+四项都未实测。显存取值依赖真实显卡与注册表，磁盘取值依赖真实卷。外部服务识别依赖真实 HTTP 服务，注入清理依赖真实 WebView。按 [ROADMAP.md](ROADMAP.md) 开头的规则，离线断言不计通过。

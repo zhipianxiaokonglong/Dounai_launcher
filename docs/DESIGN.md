@@ -264,7 +264,7 @@ M3 已按 role 拓扑启动、Job Object 托管与异步探测重写生命周期
 |---|---|
 | `ORDER` 常量写死四个 id | `startup_order` 读 `roles-v1.json` 的 `depends_on` 做拓扑排序，环与缺依赖报错 |
 | 只在 `view()` 时 `try_wait` | 每实例一个 exit watcher，进程退出即更新状态并发 `lifecycle-changed` |
-| 同步 `sleep` 阻塞命令线程 | health 与契约探测跑后台任务，命令只读内存快照 |
+| 同步 `sleep` 阻塞命令线程 | 长轮询的 health 与契约探测跑后台任务；启动前另有一次 600 ms 上限的短探，用来识别外部已运行的服务 |
 | 启动无互斥 | `Supervisor` 的 `start_lock` 包住 `begin_start` 到进程登记 |
 | 无 Job Object，靠 `taskkill` 兜底 | Job Object 的 kill-on-close 加 `CREATE_NO_WINDOW`，优雅退出超时再 kill |
 | 不记子进程 stdout | 诊断模式开启时才落盘并轮转；M3 不写任何日志文件 |
@@ -272,6 +272,19 @@ M3 已按 role 拓扑启动、Job Object 托管与异步探测重写生命周期
 第三方模块、目录实例与官方模块走同一状态机。卸载先检查实例是否运行，运行中直接拒绝；只删 zip 实例的包目录，dir 实例的源码目录永不删除，`data_dir` 不自动清理。venv 清理与 purge 前自动停进程尚未接线。目录实例启动前调 `observe_source` 与 `require_confirmed`，源码变更未确认时不自启。
 
 M3 不落盘日志，启动器重启后没有历史崩溃记录。轮转策略已写成纯函数，M4 接开关前不碰文件句柄与目录权限。
+
+启动前短探按 roles 的 health 路径对分配到的端口发一次请求，不通就走正常启动。探通时把实例记进 `Supervisor.external`，快照合成 `Running` 加 `Healthy`、`pid` 为 null，不拉起第二个进程。`running()` 只数自己托管的进程；停止、重启、卸载、解除登记与清包目录对外部实例一律明确拒绝，管理页允许打开。标记只在内存里，下次启动前重探，探不通即清除。
+
+`origin/main` 在 2026-11-12 推了四个修复提交。v2 取其中四项：
+
+- 外部运行态识别。
+- 管理窗口注入清理。
+- 环境体检的显存与盘符修正。
+- CI 前端依赖审计。
+
+空白 CMD 窗口一项 M3.2 已有 `CREATE_NO_WINDOW`，不重复移植。
+
+分类越权修复没有移植。v2 命令面不读 `category` 判权限，也没有“core 不可卸载”这条约束。这是契约层差异，另行定口径。门禁与未实测项见 [TESTING.md](TESTING.md)。
 
 ### 7.6 界面
 
@@ -316,6 +329,8 @@ M3 不落盘日志，启动器重启后没有历史崩溃记录。轮转策略�
 4. 生命周期绑定进程状态。实例未启动显示本地占位页，health 变 200 时 reload，进程退出时切回占位，卸载时销毁子 WebView。label 按 `instance_id` 派生，重复点击复用。
 
 子 WebView 创建失败时退化为独立窗口，不丢状态。三个上游不需要改 CSP 或加反向代理，理由见 [ADMIN_UI.md](ADMIN_UI.md)。
+
+当前 `open_admin_window` 走的是独立外部窗口，用逐帧初始化脚本清除 `__TAURI__` 等注入对象，ACL 仍限定 `windows:["main"]`。M4 换成内嵌子 WebView 后要重新验证注入范围，不能假定独立窗口的结论自动成立。
 
 ## 8. 与 SECURITY.md 的分工
 
