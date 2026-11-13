@@ -18,6 +18,7 @@ use launcher_core::lifecycle::{
     activation_steps, rollback_steps, ActivationStep, Phase, ProbeState, RecoveryStep, RolesDoc,
     Snapshot,
 };
+use launcher_core::admin_host::{AdminHost, Bounds, MountRequest};
 use launcher_core::m2::adapters::RemoteCatalogAdapter;
 use launcher_core::m2::catalog::{select_catalog, CatalogState};
 use launcher_core::m2::installed::Instance;
@@ -2137,12 +2138,24 @@ pub async fn open_admin_window(
     request: OpenAdminUiRequest,
 ) -> Result<String, String> {
     let url = admin_url_v2(&state, &supervisor, &request.module_id)?;
-    let module_id = request.module_id.clone();
+    build_admin_window(&app, &url, &request.module_id)
+}
+
+/// 独立窗口：既是「在独立窗口打开」按钮的落点，也是内嵌失败的兜底。
+///
+/// 与 v1 相同，Tauri 2 在 Windows 上必须把建窗口挪出命令线程，否则 Webview2
+/// 的 COM 初始化会死锁在 about:blank。注入清理脚本与内嵌页共用一份，避免
+/// 两条路径的清理规则分叉。capability 按 webview label 授权，这个窗口的
+/// label 不是 main，因此拿不到任何命令权限；清注入仍是必要的纵深防御。
+fn build_admin_window(
+    app: &tauri::AppHandle,
+    url: &str,
+    module_id: &str,
+) -> Result<String, String> {
+    let module_id = module_id.to_string();
     let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
     let app_for_thread = app.clone();
-    let url_for_thread = url.clone();
-    // 与 v1 相同：Tauri 2 在 Windows 上必须把建窗口挪出命令线程，
-    // 否则 Webview2 COM 初始化会死锁在 about:blank。
+    let url_for_thread = url.to_string();
     std::thread::spawn(move || {
         let result = (|| -> Result<String, String> {
             let label = format!("admin-{module_id}");
@@ -2162,43 +2175,7 @@ pub async fn open_admin_window(
             .title(format!("{module_id} · 管理界面"))
             .inner_size(1080.0, 760.0)
             .min_inner_size(720.0, 520.0)
-            // 纵深防御：外部 URL 的 WebView 会继承 Tauri 的全局注入。
-            // capabilities 把权限限定在 windows:["main"]，admin 窗口调用命令
-            // 会被 ACL 拒绝，但注入对象本身仍等于告诉上游页面「我跑在 Tauri 里」，
-            // 并留下可枚举的入口。这里在页面脚本执行前清掉。
-            //
-            // 必须用 for_all_frames：上游页面可能用 iframe 加载子页面，
-            // 只清顶层会留后门。也不能全局关 withGlobalTauri——主窗口
-            // 的 bridge.ts 完全依赖 window.__TAURI__（未引入 @tauri-apps/api）。
-            .initialization_script_for_all_frames(
-                r#"(function(){ try { window.__DOUNAI_ADMIN_SANITIZED__ = true; } catch (e) {}
-  // __TAURI_INTERNALS__ 被 Tauri 定义为 configurable:false，delete 无效，
-  // 只能覆盖其值；连覆盖都被拒绝时再退回到赋值。
-  var kill = function (name) {
-    try { delete window[name]; } catch (e) {}
-    if (typeof window[name] !== 'undefined') {
-      try {
-        Object.defineProperty(window, name, { value: undefined, configurable: false, writable: false });
-      } catch (e) {
-        try { window[name] = undefined; } catch (e2) {}
-      }
-    }
-  };
-  kill('__TAURI__');
-  kill('__TAURI_IPC__');
-  kill('__TAURI_METADATA__');
-  // 内部对象换成冻结空壳，切断 invoke 通道；ACL 仍是最后一道防线。
-  try {
-    Object.defineProperty(window, '__TAURI_INTERNALS__', {
-      value: Object.freeze({}),
-      configurable: false,
-      writable: false,
-    });
-  } catch (e) {
-    try { window.__TAURI_INTERNALS__ = Object.freeze({}); } catch (e2) {}
-  }
-})();"#,
-            )
+            .initialization_script_for_all_frames(crate::admin_embed::ADMIN_SANITIZE_SCRIPT)
             .center()
             .build()
             .map_err(|e| format!("打开管理窗口失败：{e}"))?;
@@ -2208,6 +2185,169 @@ pub async fn open_admin_window(
     });
     rx.recv_timeout(std::time::Duration::from_secs(15))
         .unwrap_or_else(|_| Err("打开管理窗口超时".into()))
+}
+
+/* ------------------------------------------------------------------ */
+/* 同窗口内嵌管理页                                                    */
+/* ------------------------------------------------------------------ */
+
+/// 子 WebView 的位置与尺寸，单位是相对主窗口客户区的逻辑像素，由 UI 一处计算。
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct AdminBounds {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AdminHostRequest {
+    pub label: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AdminMountResult {
+    /// embedded = 内嵌成功；window = 内嵌失败但已退化为独立窗口。
+    pub mode: String,
+    pub label: String,
+    pub url: String,
+    /// 降级原因；成功时为 null。
+    pub reason: Option<String>,
+}
+
+fn checked_label(label: &str) -> Result<&str, String> {
+    if !label.starts_with(crate::admin_embed::LABEL_PREFIX) {
+        return Err("非法的管理页 label".into());
+    }
+    Ok(label)
+}
+
+fn bounds_of(b: AdminBounds) -> Bounds {
+    Bounds {
+        x: b.x,
+        y: b.y,
+        width: b.width,
+        height: b.height,
+    }
+}
+
+/// manifest 的 `admin_ui.web_ui.embed` 默认 true；声明 false 的模块要求独立窗口。
+///
+/// 读不到 manifest 时按默认处理：`admin_url_v2` 已经先读过一次并失败就返回了，
+/// 这里不会掩盖错误，只是不再为同一个字段再报错一次。
+fn admin_embed_preferred(state: &AppStateV2, module_id: &str) -> bool {
+    let Ok(instance) = state.resolve_instance(module_id) else {
+        return true;
+    };
+    let Ok(raw) = read_manifest_value(&state.module_dir(&instance)) else {
+        return true;
+    };
+    raw.pointer("/admin_ui/web_ui/embed")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true)
+}
+
+/// 在启动器窗口内打开管理页。URL 只来自 `admin_url_v2`，不接受前端传地址。
+///
+/// 创建失败时自动退化为独立窗口，不丢状态：模块服务还在跑，URL 也一样，
+/// 只是展示形态变了。前端据 `mode` 显示占位或「已在独立窗口打开」。
+#[tauri::command]
+pub async fn open_admin_embedded(
+    app: tauri::AppHandle,
+    state: State<'_, AppStateV2>,
+    supervisor: State<'_, Supervisor>,
+    request: OpenAdminUiRequest,
+    bounds: AdminBounds,
+) -> Result<AdminMountResult, String> {
+    let url = admin_url_v2(&state, &supervisor, &request.module_id)?;
+    let instance = state.resolve_instance(&request.module_id)?;
+    let label = crate::admin_embed::derive_label(&instance.instance_id);
+    if !admin_embed_preferred(&state, &request.module_id) {
+        // 模块自己要求独立窗口：这是声明，不是内嵌失败，文案要区分开。
+        build_admin_window(&app, &url, &request.module_id)?;
+        return Ok(AdminMountResult {
+            mode: "window".into(),
+            label,
+            url,
+            reason: Some("模块声明 web_ui.embed = false，按它要求开了独立窗口".into()),
+        });
+    }
+    let host = crate::admin_embed::TauriAdminHost::new(app.clone());
+    let mount = MountRequest {
+        label: label.clone(),
+        url: url.clone(),
+        bounds: bounds_of(bounds),
+    };
+    match host.mount(&mount) {
+        Ok(()) => Ok(AdminMountResult {
+            mode: "embedded".into(),
+            label,
+            url,
+            reason: None,
+        }),
+        Err(error) => {
+            let reason = format!("内嵌失败：{error}");
+            match build_admin_window(&app, &url, &request.module_id) {
+                Ok(_) => Ok(AdminMountResult {
+                    mode: "window".into(),
+                    label,
+                    url,
+                    reason: Some(reason),
+                }),
+                Err(fallback) => Err(format!("{reason}；独立窗口也打不开：{fallback}")),
+            }
+        }
+    }
+}
+
+/// 窗口缩放或容器改尺寸时重下发 bounds。
+#[tauri::command]
+pub async fn admin_host_resize(
+    app: tauri::AppHandle,
+    request: AdminHostRequest,
+    bounds: AdminBounds,
+) -> Result<(), String> {
+    let label = checked_label(&request.label)?;
+    crate::admin_embed::TauriAdminHost::new(app)
+        .resize(label, bounds_of(bounds))
+        .map_err(|e| e.to_string())
+}
+
+/// health 变 200 后刷新内嵌页，让它重新拉一次自己的状态。
+#[tauri::command]
+pub async fn admin_host_reload(
+    app: tauri::AppHandle,
+    request: AdminHostRequest,
+) -> Result<(), String> {
+    let label = checked_label(&request.label)?;
+    crate::admin_embed::TauriAdminHost::new(app)
+        .reload(label)
+        .map_err(|e| e.to_string())
+}
+
+/// 卸载实例时销毁子 WebView；label 由 instance_id 派生，复用时不会撞。
+#[tauri::command]
+pub async fn admin_host_unmount(
+    app: tauri::AppHandle,
+    request: AdminHostRequest,
+) -> Result<(), String> {
+    let label = checked_label(&request.label)?;
+    crate::admin_embed::TauriAdminHost::new(app)
+        .unmount(label)
+        .map_err(|e| e.to_string())
+}
+
+/// 切到别的视图时隐藏而不是销毁，切回来再显示，页面里的输入不丢。
+#[tauri::command]
+pub async fn admin_host_visible(
+    app: tauri::AppHandle,
+    request: AdminHostRequest,
+    visible: bool,
+) -> Result<(), String> {
+    let label = checked_label(&request.label)?;
+    crate::admin_embed::TauriAdminHost::new(app)
+        .set_visible(label, visible)
+        .map_err(|e| e.to_string())
 }
 
 /// 下载目录中缓存包的文件名。模块 id 用 `_` 替掉 `/`，`is_safe_filename` 兜底。

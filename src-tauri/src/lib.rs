@@ -4,6 +4,7 @@
 //! 本 crate 的命令面只校验参数与转换结果，不放业务逻辑。
 //! v1 的进程管理、状态库与命令面已在 M3 移除；命令面在 `commands_v2`，状态层在 `state_v2`。
 
+pub mod admin_embed;
 pub mod commands_v2;
 pub mod diag_log;
 pub mod download;

@@ -1,7 +1,7 @@
 {
   "identifier": "default",
-  "description": "最小权限集：core:default 供现有命令面调用，另开放窗口显示与焦点、文件选择器（只选不读，读文件由 Rust 命令自己做）；不放开文件系统、Shell、任意网络与 core:webview:*。子 WebView 所需权限按 docs/TAURI_UPGRADE.md 在 M4 逐项加入",
-  "windows": ["main"],
+  "description": "最小权限集：core:default 供现有命令面调用，另开放窗口显示与焦点、文件选择器（只选不读，读文件由 Rust 命令自己做）；不放开文件系统、Shell、任意网络与 core:webview:*。按 webview label 授权而不是 window label：内嵌管理页是挂在 main 窗口下的子 WebView，用 windows:[\"main\"] 会让它继承主窗口全部权限",
+  "webviews": ["main"],
   "permissions": [
     "core:default",
     "core:window:allow-show",
