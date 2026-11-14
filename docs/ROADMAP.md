@@ -157,7 +157,7 @@ M3 顺带关闭的遗留：M2 第 16 条的卸载不删源码目录、第 9 条�
 - 环境与日志页、公钥与保留数设置。
 - 同窗口子 WebView 与两个本地导入入口。
 
-进度（2026-11-13）：主界面已重写，六个视图（模块、环境、日志、管理、设置、导入本地）与深浅双主题落地，按 role 分组、实例行、外部启动标记、未验证标记都已接线。原「套装」视图已删除：它按 v1 的 `module_id` 列表规划安装，与 v2 的 `module_id@variant` 安装单位对不上，页面上的「开始安装」从未接通；在线安装改到模块页的「模块目录」弹窗。入门引导、日志页重排与内嵌子 WebView 三项剩余工作均已实现，见下面各节。真机验收仍待实测（七条 WebView 冒烟断言与逐条点选）。
+进度（2026-11-13）：主界面已重写，六个视图（模块、环境、日志、管理、设置、导入本地）与深浅双主题落地，按 role 分组、实例行、外部启动标记、未验证标记都已接线。原「套装」视图已删除：它按 v1 的 `module_id` 列表规划安装，与 v2 的 `module_id@variant` 安装单位对不上，页面上的「开始安装」从未接通；在线安装当时改到模块页的「模块目录」弹窗，M8 起独立成侧栏「下载」视图。入门引导、日志页重排与内嵌子 WebView 三项剩余工作均已实现，见下面各节。真机验收仍待实测（七条 WebView 冒烟断言与逐条点选）。
 
 同窗口子 WebView 已于 2026-11-13 完成，处置如下：
 
@@ -264,6 +264,8 @@ M3 顺带关闭的遗留：M2 第 16 条的卸载不删源码目录、第 9 条�
 
 > 2026-11-13 追加。编号按范围定，不按时间；实现顺序见「顺序与推进方式」。
 
+**状态（2026-11-14）**：阶段 1 到 4 已实现并提交到 `refactor/launcher-v2`。阶段 5 的 12 条真机验收尚未执行——离线断言只证明逻辑，不计真机通过。提交分五组：`feat(contracts)`（源注册表 schema 与断言）、`feat(core)`（按源验签与裁决）、`feat(app)`（命令面与按源白名单）、`feat(ui)`（下载视图与向导）、`docs`（本段与 DESIGN 7.2、SECURITY 同步改写）。
+
 主要内容：
 
 - 模块目录从模块页的弹窗独立成侧栏「下载」视图，承载多源、多版本、多变体。
@@ -274,7 +276,7 @@ M3 顺带关闭的遗留：M2 第 16 条的卸载不删源码目录、第 9 条�
 
 ### 为什么「加源」必须同时「加公钥并信任」
 
-[DESIGN.md](DESIGN.md) 7.2 现写「添加源不需要配置源公钥，信任来自包内签名」，那是单源假设下的结论，M8 落地时要同步改。理由是 `refresh_catalog` 目前对任何 URL 都用**内置 K5** 验签，`allowed_hosts()` 也只含 GitHub 与 SourceForge 后缀。多源时三条路都不通：
+这一节写的是 M8 落地前的判断依据：M8 之前的 `refresh_catalog` 对任何 URL 都用**内置 K5** 验签，`allowed_hosts()` 也只含 GitHub 与 SourceForge 后缀。多源时三条路都不通：
 
 1. 社区源用自己的钥匙签 catalog → 内置 K5 验不过，源直接不可用。
 2. 想验过就得共用官方 K5 私钥 → 等于把官方的新鲜度锚交给第三方。
@@ -290,9 +292,21 @@ M3 顺带关闭的遗留：M2 第 16 条的卸载不删源码目录、第 9 条�
 
 - 官方主源与其镜像仍是「同一份 catalog 的两个副本」，继续按 `sequence` 与新鲜度二选一；**不同发布者的源是并列集合**，不能互相覆盖。合并条目按 `source_id / publisher_fp / module_id / variant` 区分，重名时界面显示来源与发布者指纹，安装目标由用户点选的那一行决定，不做隐式优选。
 - 每个源独立记 `sequence` / `expires` / `last_seen_version`，否则社区源的 sequence 能压制官方源，或一方的回退状态污染另一方。「跨 variant 不比较版本」（M2 验收 10）在新界面上继续成立。
-- `catalog-v2.schema.json` 已经带 `variant` / `version` / `min_version` / `revoked` / `sources[]` / `expected_signer_fp`，**不改 M0 冻结的 catalog 契约**；缺的是后端 `CatalogEntryView` 把字段补全（现在 `download_url` 只取 `sources[0]`）和前端的分组视图。新增的只有源注册表状态 schema，按 [contracts/README.md](../contracts/README.md) 的变更规则走，`validate.mjs` 必须加负例。
+- `catalog-v2.schema.json` 已经带 `variant` / `version` / `min_version` / `revoked` / `sources[]` / `expected_signer_fp`，缺的是后端 `CatalogEntryView` 把字段补全（原来 `download_url` 只取 `sources[0]`）和前端的分组视图。新增的只有源注册表状态 schema，按 [contracts/README.md](../contracts/README.md) 的变更规则走，`validate.mjs` 必须加负例。
+
+**契约在 M8 期间改过三处，与本节原计划「不改 M0 冻结文件」不同**：多源场景下那三处不改就写不出正确实现，事后擦屁股比提前改更贵。
+
+| 文件 | 改动 | 为什么非改不可 |
+|---|---|---|
+| `catalog-v2.schema.json` | `signature.signer_fp` 改为必填；`key_id` 降级为展示字段 | 跨源时必须知道「这份目录该由哪把钥匙验」。`key_id` 只是人写的标签，不能当判定依据 |
+| `source-v1.schema.json` | instance 增 `source_id`；停用 `catalog_state.sequence` / `expires` | 实例要记来源，否则跨源同名实例分不清是谁；`sequence` / `expires` 是目录级水位，多源下必须下沉到源表 |
+| `sources-v1.schema.json` | 新增 | 源注册表与每源新鲜度状态 |
+
+教训记在这里：契约冻结如果发生在「还没想清楚要支持什么」的时候，后面每一处妥协都要在实现里擦一遍屁股。M8 的三条拍板（源表独立、跨源并存、catalog 公钥隔离）反过来要求契约能改，所以这几处就改了，没有加兼容分支。
 
 ### 阶段顺序
+
+第 1 到 4 步已完成；第 5 步待真机。
 
 1. 契约与状态：新增 `sources-v1.schema.json`（源注册表 + 每源新鲜度状态）、字段约束、`validate.mjs` 断言与负例。按「已拍板」四条结论执行，开工前不再有待决项。
 2. 后端：源表读写、按源验签、按源裁决与合并、按源扩展 host 白名单、`refresh_catalog` 从「传一个 URL」改成「按已启用源集合拉」、`CatalogEntryView` 补全字段。
@@ -300,11 +314,13 @@ M3 顺带关闭的遗留：M2 第 16 条的卸载不删源码目录、第 9 条�
 4. 文档与披露：改 DESIGN 7.2 的源公钥口径，[SECURITY.md](SECURITY.md) 增第三方源条目，M5 验收 8 的对外通知口径按新模型定稿。
 5. 真机验收：下面 12 条逐条实测，离线测试不计通过。
 
+M5 验收 8 的对外通知口径按新模型定稿为三行：官方 K5 泄露靠 `expires` 窗口加带外公告与强制升级；官方 K1 泄露靠公告加新版启动器与 catalog 的 `revoked`；**某个社区源的 catalog 公钥泄露，用户在「下载」页撤销该源即可，不必升级启动器**——源的公钥不是内置的，撤销动作在用户手里。最后一行不等于用户一定会发现，启动器没有异常提示，社区公告仍要负责提醒。完整表述见 [SECURITY.md](SECURITY.md)「泄露后的对外通知口径」。
+
 ### 已拍板（2026-11-13）
 
 用户拍板，四条全部按「新增文件 / 新增路径，不改写 M2 判定链与 M0 冻结契约」这一原则定稿。开工前不再有待决项。
 
-1. **新增 `state/sources.json` + `contracts/sources-v1.schema.json`，`installed.json` 一行不改**。源注册表与每源独立的 `sequence` / `expires` 放新文件；`catalog_state.last_seen_version` 仍留原处——它的键已经是 `publisher_fp/module_id/variant`，天然按发布者隔离，不必按源再拆。这也符合 [contracts/README.md](../contracts/README.md) 第 6 条：那条约束的是 `last_seen_version` 的归属，不是源配置。`source-v1` 不升级、不加兼容分支。
+1. **新增 `state/sources.json` + `contracts/sources-v1.schema.json`，`installed.json` 的实例表不改**。源注册表与每源独立的 `sequence` / `expires` 放新文件；`catalog_state.last_seen_version` 仍留原处——它的键已经是 `publisher_fp/module_id/variant`，天然按发布者隔离，不必按源再拆。这也符合 [contracts/README.md](../contracts/README.md) 第 6 条：那条约束的是 `last_seen_version` 的归属，不是源配置。`source-v1` 不升级、不加兼容分支（实例侧的 `source_id` 除外，见上节：那是新增字段，不是版本升级）。
 2. **跨源同名 `module_id@variant` 允许并存，active 只在用户点「设为当前」时才变**。`active[role]` 本来就绑 `instance_id`，并存没有技术障碍（此前记的「两者会争同一个 active 槽」不准确，已更正）。安装确认框必须显示来源名与发布者指纹，界面标「跨源同名」，不做隐式优选、不自动激活。
 3. **社区源实例默认 `auto_update: false`，只提示有新版、不自动装**。复用 `source-v1` 现有字段与「C 类固定 false」先例，零契约改动；跨源自动更新一律禁止。
 4. **另立源公钥表，物理隔离**。catalog 签名公钥存在 `sources.json` 的源条目里，验 catalog 只查这张表；`state/trust.json`、`TrustedKey` 与 `is_trusted()` 零改动，判定代码根本读不到这把钥匙。代价是留下上面那条 K5 理论越权，按已知限制披露，不在 M8 里动 M2 判定链。

@@ -220,7 +220,7 @@ M3 代码落在四处：core 的 `lifecycle/` 纯逻辑、app 的 `process/win.r
 ### 已知限制
 
 1. 日志只记录启动器事件（拉起、退出码、探测结果），子进程的 stdout/stderr 默认丢弃，需显式设置 `DOUNAI_LOG_CHILD_OUTPUT=1` 才接管管道；开关交给界面属 M4。日志目录没有显式 ACL，随数据根继承权限。
-2. 内置 K5 公钥是真实值，但还没有已签发的 catalog，`refresh_catalog` 按 `unavailable` 返回，不降级放行。`set_k5_pubkey` 可在本次会话内替换公钥，界面入口在 M4。
+2. 内置 K5 公钥是真实值，但还没有已签发的 catalog，`refresh_catalog` 按 `unavailable` 返回，不降级放行。当时 `set_k5_pubkey` 可在本次会话内替换公钥，界面入口在 M4；M8 已删除该命令——能在会话内换掉验签公钥是一条绕过通道。
 3. `switch_active` 已按 `activation_steps` 执行停旧、起新、探测、提交与回滚。限制有两条：目标实例由外部进程提供时直接拒绝（验不了契约、也无法回滚）；目标已是 active 且在跑时只重新探测，不重启进程。
 4. 卸载的 `remove_files` 会清包目录、venv 与日志，`data_dir` 按契约保留；`purge_local_data` 先停托管实例再删目录，外部实例停不掉，跳过并记进 `errors`。
 5. `purge_local_data` 的 `state` 只重置 catalog 水位，保留实例表，与 v1 的清状态语义不同。
@@ -638,3 +638,71 @@ watcher 只把状态改成 `exited`，`processes` 表里的 `WinProcess` 一直�
 ```
 
 **未实测**：装上新包后三个模块应落在 8101/8102/8103；以及卸载某个 active 实例后，同 role 的另一个实例自动接位。
+
+## M8 下载中心与可配置源离线验收（2026-11-14）
+
+M8 的 12 条验收要求真机逐条实测，离线断言只证明逻辑层。本节记已跑的离线结果与**未实测**项，两者不混。
+
+**一、契约层**
+
+新增 `contracts/sources-v1.schema.json`（源注册表 + 每源 `sequence` / `expires` / 域名白名单 / 独立 catalog 指纹），`contracts/examples/state/sources.json` 给出样例。`validate.mjs` 断言从 109 增到 **129**，新增的负例逐条对应 ROADMAP 验收 11：
+
+- 源条目缺 `catalog_fingerprint` → 拒；
+- 内置源 `deletable: true` → 拒；
+- 社区源 `auto_update: true` → 拒；
+- 源条目自述 `pubkey` → 拒（验签公钥只认本地注册表）；
+- 空 `host_suffixes` → 拒；
+- 公共后缀 `com` → 拒（白名单元素必须是完整域名）；
+- 非 https 的 `base_url` → 拒；
+- 撤销公钥后仍 `enabled: true` → 拒；
+- 源 id 唯一，官方主源与镜像共享同一水位组；
+- `allowlist` 只由已启用源的 host 后缀派生；
+- 样例源表的公钥与 Rust 内嵌 K5 一致。
+
+同时改了三处契约（详见 [ROADMAP.md](ROADMAP.md) M8「契约在 M8 期间改过三处」）：`catalog-v2` 的 `signature.signer_fp` 改必填、`key_id` 降级为展示字段；`source-v1` 的 instance 增 `source_id`、停用 `catalog_state.sequence` / `expires`。
+
+**二、后端**
+
+core 新增 2 项，都针对「源自己的钥匙」：
+
+- `community_catalog_only_verifies_with_its_own_registered_key`：社区源用自己登记的公钥签的 catalog 能验过；换成另一把钥匙签的同内容 catalog 被拒。
+- `catalog_cannot_smuggle_its_own_pubkey`：catalog 自带的 `signature.pubkey` 不被采信——源表里登记的才是判定依据。
+
+app 侧改动：`catalog.rs` 的 `parse` 拒收 catalog 自述公钥、改为按源的 `expected_signer_fp` 验签；`validate()` 改用每源水位；`observe()` 只推进 `last_seen_version`；`adapters.rs` 按源注入公钥与白名单；`installed.rs` 的 instance 增 `source_id`。命令面删掉 `set_k5_pubkey`、`catalog_adapter` 与 `BUILTIN_CATALOG_*` 常量，`refresh_catalog` 改为按已启用源集合拉。
+
+**三、前端**
+
+「下载」是侧栏独立视图，不是模态。新增 `tests/download-view.test.ts` 11 项，钉住两条核心语义：
+
+- 跨源同名 `module_id` 分成两组，不做隐式优选；
+- 同一 `module_id@variant` 的多个版本并列，按版本从新到旧排，且不依赖传入顺序。
+
+另有筛选的 6 项：按源、按 role、按关键词（名称 / 模块 ID / 变体 / 来源名）、只看可安装、叠加取交集。
+
+`tests/bridge.test.ts` 同步改两处签名：`install_from_catalog` 从 `(moduleId, variant, confirm)` 改成 `(entryKey, confirm)`——安装目标由用户点选的那一行决定，界面不做隐式优选；`refresh_catalog` 从传 URL 改成无参数，新增 `catalog_cache` 只读会话缓存。
+
+**四、删掉的三条绕过通道**
+
+1. 设置页的会话级 catalog URL 输入框——能拉白名单外主机的目录；
+2. `set_k5_pubkey` 命令——能在会话内换掉验签公钥；
+3. `DOUNAI_CATALOG_*` 环境变量——绕过源注册表指定目录。
+
+**门禁**
+
+Rust：app lib 80、core lib 188、pack 6、sign_catalog 2、bundled_uv 3、fuzz_invariants 7、sign_real_manifests 2、signing_roundtrip 3、env_engine 3、lifecycle_engine 11、m2_engine 11，合计 **316** 通过；`live_source` 2 项与 `env_engine` 1 项按设计 ignored。前端 `npm test` **71** 项（8 个文件）。契约 **129** 项。`tsc --noEmit`、`vite build`、`clippy --workspace --all-targets -D warnings` 全绿。
+
+**未实测（12 条真机验收全部未执行）**
+
+以下都没有跑过真机，不能当作验收通过：
+
+- 「下载」视图的切换、筛选保持与装包时主界面可操作；
+- 添加源向导的完整指纹展示与确认框默认焦点（默认焦点在「取消」这条只写进了代码，没在界面上验过）；
+- 用真源拉取、真机安装（真机安装在新界面上仍未跑过一次）；
+- 撤销源后已装实例标「发布者已不再受信任」的显示；
+- 禁用内置官方源后本地 zip 导入仍可用；
+- 两个源同时启用时条目并列与各自标来源；
+- 离线时远程请求数为零；
+- 加源与撤销源流程对 `trust.json` 零写入（离线断言只覆盖逻辑，未在真机数据根上核过文件 mtime）；
+- 社区源实例不自动更新。
+
+真机验收按 [ROADMAP.md](ROADMAP.md) M8 的 12 条逐条走，走完再更新本节。

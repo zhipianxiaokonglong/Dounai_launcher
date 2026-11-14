@@ -122,9 +122,9 @@ Windows 专属代码圈进 `process/win` 单一模块边界。`launcher-core` �
 |---|---|---|
 | 交付物 | NSIS 安装包（含引导器） | ≤ 25 MB；便携 exe ≤ 15 MB |
 | 常驻 | 启动器空闲内存与 CPU | 无任务时不得轮询忙等 |
-| 一次性 | 首次下载量 | 模块目录按包明示体积并允许改镜像，不静默下载 |
+| 一次性 | 首次下载量 | 下载页按包明示体积并允许改镜像，不静默下载 |
 
-Python、venv、wheels 与模块包不计入交付物体积，但要在模块目录与设置页写清楚。三个产物都过体积门禁，便携版不得跳过。
+Python、venv、wheels 与模块包不计入交付物体积，但要在下载页与设置页写清楚。三个产物都过体积门禁，便携版不得跳过。
 
 ## 6. v1 代码处置结果
 
@@ -231,11 +231,15 @@ dir 允许重解析，哈希变化写进 `runtime.json` 的 `snapshot_change`，
 
 已知约束：GitHub REST API 未认证时每小时每 IP 限 60 次，不能每次启动查 `/releases/latest`；asset 会重定向，白名单要覆盖目标域名。SourceForge 的下载域现在**全链路 302**：`master.dl`/`downloads.sourceforge.net` 跳 `xxx.dl.sourceforge.net`，没有稳定 host。处理方式是「逐跳跟随 + 每跳都校验域名后缀」，上限 5 跳，任何一跳落在白名单外立即中止；最终仍以 sha256 为准。实现见 `m2_http.rs` 与 `http_client.rs`：两处都必须手动跟跳，用 reqwest 的自动跟随会因为看不到中间跳而绕过白名单。当前确定使用 SourceForge，GitHub 适配器保留为第二源但目录未上传。
 
-`SourceAdapter` 按 catalog URL 注册，官方两源内置，第三方源由用户在设置里显式添加 URL 后生效。添加源不需要配置源公钥，信任来自包内签名。接口与不变式见 [contracts/source-adapter-v1.md](../contracts/source-adapter-v1.md)。
+`SourceAdapter` 按源注册，官方两源内置，第三方源由用户在「下载」页显式添加后生效。添加源必须同时登记该源的 catalog 签名公钥——**信任一个下载位置与信任一个发布者是两件事，前者不能顺带变成后者**。接口与不变式见 [contracts/source-adapter-v1.md](../contracts/source-adapter-v1.md)。
 
-> **计划变更（M8，2026-11-13 追加）**：上面「添加源不需要配置源公钥」是单源假设下的结论，描述的是当前实现，不是多源下的目标。当前 `refresh_catalog` 对任何 URL 都用内置 K5 验签，社区源用自己的钥匙签 catalog 会验不过，共用官方 K5 私钥又等于交出官方新鲜度锚，不签 catalog 则丢掉 `sequence` / `expires` / `revoked`。M8 把它改成「每源绑定一把 catalog 签名公钥，用户带外导入并显式信任后才启用」，验签公钥只认本地注册表、不采信 catalog 自述；这把钥匙还必须与包签名公钥在存储和判定上隔离——`is_trusted(fp)` 现同时查 `builtin` 与 `trusted` 且不看 `purpose`（`KeyPurpose` 只用于 `BuiltinKey`），直接写进 `trust.json` 会让「信任一个下载位置」顺带变成「信任该发布者签的任意包」。同时把模块目录从弹窗独立成「下载」视图，展示同一 `module_id` 的多 variant 与多 version。契约层 `catalog-v2` 已有这些字段，不改 M0 冻结文件。开工前四条拍板项已于 2026-11-13 定稿，见 [ROADMAP.md](ROADMAP.md) M8「已拍板」：新增 `sources.json` 不动 `installed.json`、跨源同名并存但不自动激活、社区源默认不自动更新、catalog 公钥另立源表且不碰 `trust.json`。排期、阶段顺序与 12 条验收同见 M8。M8 落地时本段正文与 [SECURITY.md](SECURITY.md) 同步改写；在此之前按现行口径理解代码。
+**M8 已落地（2026-11-14）**：源注册表是 `state/sources.json`，schema 见 [contracts/sources-v1.schema.json](../contracts/sources-v1.schema.json)。每个源条目自带 `catalog_fingerprint`、独立的 `sequence` / `expires` 与自己的域名白名单。添加源是原子操作：URL + 公钥 → 展示完整 SHA-256 指纹 → 确认框（默认焦点在「取消」）→ 公钥写入源条目并绑定该指纹 → 源启用。验签公钥只认本地注册表，**不采信 catalog 自述的 `signature.pubkey`**；未登记公钥签的 catalog 一律硬拒，界面没有「仍然继续」。
 
-catalog 用 K5 签名，签的是索引、版本单调性与新鲜度。K1 只用于签官方 zip 包。
+这把公钥与包签名公钥在存储和判定上物理隔离：catalog 公钥只存在 `sources.json`，验 catalog 的代码只查这张表；`state/trust.json`、`TrustedKey` 与 `is_trusted()` 一行未改，包的四级判定读不到这把钥匙。理由是 `is_trusted(fp)` 同时查 `builtin` 与 `trusted` 且不看 `purpose`（`KeyPurpose` 只用于 `BuiltinKey`），若把源的 catalog 公钥按 `confirm_trusted_key` 写进 `trust.json`，同一个指纹会命中包判定的 A 类「已信任发布者」——等于给用户信任一个下载位置的同时，顺手信任了该发布者签的任意包。
+
+留了一条已知限制：内置 K5 标着 `catalog_signing`，却也在 `is_trusted` 的查询表里，理论上同一把钥匙签的包也会判 A 类。K5 私钥离线保管且不用于签包，这条判定链属 M2，M8 不动，按已知限制披露。
+
+catalog 用 K5 签名，签的是索引、版本单调性与新鲜度。K1 只用于签官方 zip 包。社区源用自己的钥匙签它自己的 catalog，官方 K5 继续只服务官方源。
 
 两钥分离修掉一处自证漏洞。共用一把钥匙时，K1 泄露后攻击者能签一份不含 `revoked` 的 catalog。`revoked` 撤不掉同一把密钥签出的旧 catalog。
 
@@ -250,21 +254,28 @@ catalog 用 K5 签名，签的是索引、版本单调性与新鲜度。K1 只�
 
 K1 与 K5 均已于 2026-11-13 生成并内置，规程见 [SIGNING.md](SIGNING.md)。
 
-远程分发已于 2026-11-13 接通，链路固定为：
+远程分发已于 2026-11-13 接通，链路在 M8 后固定为：
 
 ```
-模块目录（模块页 → 右上「模块目录」）
-  ① refresh_catalog("")           内置源，空串即用 https://downloads.sourceforge.net/project/dounai-releases
-  ② 逐源验签（K5）→ select_catalog 裁决序号与新鲜度 → 会话内缓存
-  ③ install_from_catalog(id, variant, confirm=false)
-       按目录条目取 sources → 逐条 validate_download_url → download（断点续传/重试/哈希）
+下载视图（左侧导航 →「下载」）
+  ① refresh_catalog()                按 sources.json 里已启用的源集合拉，无会话级 URL
+       官方主源与镜像：二选一，同一 sequence/expires 组
+       社区源：各自独立验签、各自裁决，失败不影响其它源
+  ② install_from_catalog(entry_key, confirm)
+       entry_key 由用户点选的那一行决定，跨源同名不做隐式优选
+       按该条目所属源取 sources → 逐条 validate_download_url → download（断点续传/重试/哈希）
        大小与目录声明比对 → commit_install（同一条本地包安装链路）
-  ④ 需要确认的 B/C 类包由 Rust 拒绝并说明原因，界面把同一按钮改成「确认并安装」再带 true 重试
+  ③ 需要确认的 B/C 类包由 Rust 拒绝并说明原因，界面把同一按钮改成「确认并安装」再带 true 重试
+  ④ 装完只读会话缓存刷新状态（catalog_cache），不重发网络请求
 ```
+
+会话级 URL 参数已删除。它是一条绕过源注册表的通道：能从白名单外的主机拉 catalog，且绕过按源验签。
 
 三处用的是**同一个** sha256 与 size：目录条目、下载校验、安装校验。界面不负责判断可信，只负责把用户的决定回传。下载到的包落在 `<data_root>/downloads/<module_id_>@<variant>.zip`，重装与离线排障可以直接复用。
 
 catalog 有效期上限 7 天，过期后 `refresh_catalog` 会返回不可用并说明原因，不会把过期目录当成功结果展示；回退只允许回退**本次会话内已验签过**的 doc。
+
+出网白名单不再有全局兜底列表，由已启用源的域名逐个派生。为空即不发起任何远程请求。
 
 ### 7.3 包信任
 
@@ -405,7 +416,7 @@ M3 已按 role 拓扑启动、Job Object 托管与异步探测重写生命周期
 
 管理页看起来像启动器自带的页面，容易让人误解密钥归属。启动器主 UI 要渲染一条常驻横幅，写明边界。
 
-实现状态（2026-11-13 重写）：界面分为骨架、共享层与六个视图。`index.html` 只放左侧栏、页头、正文容器、状态栏与模态挂点；`styles/app.css` 存两套语义令牌；`src/ui/main.ts` 做内存路由与全局刷新。六个视图在 `src/ui/views/`：模块、环境、日志、管理、设置、导入本地。原「套装」页已删除：它按 v1 的 `module_id` 列表规划安装，而 v2 的安装单位是 `module_id@variant`，页面上的「开始安装」从来没接通。在线安装改放在模块页的「模块目录」弹窗里，见 7.7。共享层三件：`store.ts` 管数据与派生查询，`dom.ts` 管转义、toast 与模态，`theme.ts` 管深浅切换。
+实现状态（2026-11-14 更新）：界面分为骨架、共享层与七个视图。`index.html` 只放左侧栏、页头、正文容器、状态栏与模态挂点；`styles/app.css` 存两套语义令牌；`src/ui/main.ts` 做内存路由与全局刷新。七个视图在 `src/ui/views/`：模块、下载、环境、日志、管理、设置、导入本地。原「套装」页已删除：它按 v1 的 `module_id` 列表规划安装，而 v2 的安装单位是 `module_id@variant`，页面上的「开始安装」从来没接通。在线安装在 M8 后独立成侧栏「下载」视图，见 7.7。共享层三件：`store.ts` 管数据与派生查询，`dom.ts` 管转义、toast 与模态，`theme.ts` 管深浅切换。
 
 数据只认一处来源：实例与端口取 `list_instance_views`，环境取 `probe_environment`，信任表与保留数取 `settings_snapshot`。界面层不推算端口、不拼指纹，避免与后端分叉。
 
@@ -446,7 +457,7 @@ M3 已按 role 拓扑启动、Job Object 托管与异步探测重写生命周期
 - 状态仍存 `state/onboarding.json`，字段不变。走完记 `skipped: false`，中途关掉记 `skipped: true`，两种都不再自动弹。设置页页头常驻「走一遍引导」（五个分组下都可见，不藏在「诊断」里），且重看不改状态（不会把已完成的打回未完成）。
 - 气泡定位、挖洞、居中与视口判定都是纯函数（`placePop` / `holeOf` / `centerPop` / `viewport`），16 项单测钉住四种贴边、首选侧装不下时的退让、视口夹取与冷启动的错误尺寸。
 - **不拿 layout viewport 定位**。WebView 冷启动时 `innerHeight` 可能远大于真实窗口（实测上万像素），第一版用 CSS `top: 50%` 居中，气泡因此落在窗口下方，要用户拖一下窗口才出现。`viewport()` 取 `innerHeight` / `visualViewport` / `outerHeight` / `screen.availHeight` 四者最小值——真实可见区域不会比其中任何一个更大。居中坐标也由 JS 算成像素写进 style，跟着每 120ms 的校位一起重算，窗口尺寸一同步，下一拍就纠正。
-- 首版的「首次下载量估算」与「选模块批量装」随之删掉：模块目录弹窗已经显示每个包的体积，再在引导里估一遍只会和真实占用对账不上。`onboarding_facts` 改名 `storage_facts`，内容（数据根、实例数、解释器与缓存字节、数据根总占用）搬进设置页「存储与清理」——那里才是它该出现的地方。
+- 首版的「首次下载量估算」与「选模块批量装」随之删掉：下载视图已经显示每个包的体积，再在引导里估一遍只会和真实占用对账不上。`onboarding_facts` 改名 `storage_facts`，内容（数据根、实例数、解释器与缓存字节、数据根总占用）搬进设置页「存储与清理」——那里才是它该出现的地方。
 
 ### 7.7 子 WebView
 
