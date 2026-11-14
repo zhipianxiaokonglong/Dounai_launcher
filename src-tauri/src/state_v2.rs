@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
+use launcher_core::chain::{ChainRegistry, ChainRunResult};
 use launcher_core::m2::catalog::{entry_key, CatalogDocument, CatalogEntry};
 use launcher_core::m2::installed::{InstalledState, Instance};
 use launcher_core::m2::retention::RetentionPolicy;
@@ -125,6 +126,10 @@ pub struct AppStateV2 {
     trust: Mutex<TrustStore>,
     retention: Mutex<RetentionPolicy>,
     sources: Mutex<SourceRegistry>,
+    /// 用户自定义链路。默认链路不在这里，由实例表按 role 拓扑隐式生成。
+    chains: Mutex<ChainRegistry>,
+    /// 每条链路最近一次启动结果，供 only_started 回滚停止使用。内存态，重启即空。
+    last_chain_runs: Mutex<BTreeMap<String, ChainRunResult>>,
     /// 本次会话内已验签的目录条目，键是 entry_key。重启即空，不落盘。
     catalog: Mutex<BTreeMap<String, CachedEntry>>,
     /// v1 界面的启用开关是内存态：M0 冻结的 installed.json 没有 enabled 字段，
@@ -180,6 +185,10 @@ impl AppStateV2 {
             SourceRegistry::builtin(BUILTIN_K5_PUBKEY_B64, BUILTIN_K5_FINGERPRINT)
                 .map_err(|e| e.to_string())
         })?;
+        let chains = load_or(&paths.state_dir().join("chains.json"), || Ok(ChainRegistry::empty()))?;
+        chains
+            .validate()
+            .map_err(|e| format!("chains.json 不合法：{e}"))?;
         let mut diagnostics = load_or(&paths.state_dir().join("diagnostics.json"), || {
             Ok(Diagnostics::default())
         })?;
@@ -196,6 +205,8 @@ impl AppStateV2 {
             trust: Mutex::new(trust),
             retention: Mutex::new(retention),
             sources: Mutex::new(sources),
+            chains: Mutex::new(chains),
+            last_chain_runs: Mutex::new(BTreeMap::new()),
             catalog: Mutex::new(BTreeMap::new()),
             disabled: Mutex::new(BTreeSet::new()),
             dev_mode: AtomicBool::new(false),
@@ -349,6 +360,50 @@ impl AppStateV2 {
         policy
             .save(&self.retention_path())
             .map_err(|e| e.to_string())
+    }
+
+    pub fn chains_path(&self) -> PathBuf {
+        self.paths.state_dir().join("chains.json")
+    }
+
+    pub fn chains(&self) -> ChainRegistry {
+        lock(&self.chains).clone()
+    }
+
+    /// 改动后一次原子落盘；闭包返回 Err 时内存回滚，不写文件。
+    pub fn mutate_chains<R>(
+        &self,
+        f: impl FnOnce(&mut ChainRegistry) -> Result<R, String>,
+    ) -> Result<R, String> {
+        let mut guard = lock(&self.chains);
+        let before = guard.clone();
+        match f(&mut guard) {
+            Ok(value) => {
+                guard.save(&self.chains_path()).map_err(|e| e.to_string())?;
+                Ok(value)
+            }
+            Err(error) => {
+                *guard = before;
+                Err(error)
+            }
+        }
+    }
+
+    /// 当前实例表里所有 instance_id。链路读取时用它与 steps 比对，只在内存里标悬空。
+    pub fn known_instance_ids(&self) -> BTreeSet<String> {
+        lock(&self.installed)
+            .instances
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    pub fn set_last_chain_run(&self, result: &ChainRunResult) {
+        lock(&self.last_chain_runs).insert(result.chain_id.clone(), result.clone());
+    }
+
+    pub fn last_chain_run(&self, chain_id: &str) -> Option<ChainRunResult> {
+        lock(&self.last_chain_runs).get(chain_id).cloned()
     }
 
     pub fn sources_path(&self) -> PathBuf {

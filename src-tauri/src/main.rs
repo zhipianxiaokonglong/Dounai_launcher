@@ -107,6 +107,12 @@ fn main() {
             dounai_launcher::commands_v2::set_source_enabled,
             dounai_launcher::commands_v2::revoke_source,
             dounai_launcher::commands_v2::remove_source,
+            // M6：链路。
+            dounai_launcher::commands_v2::list_chains,
+            dounai_launcher::commands_v2::save_chain,
+            dounai_launcher::commands_v2::delete_chain,
+            dounai_launcher::commands_v2::start_chain,
+            dounai_launcher::commands_v2::stop_chain,
         ])
         .build(tauri::generate_context!())
         .expect("启动器构建失败");

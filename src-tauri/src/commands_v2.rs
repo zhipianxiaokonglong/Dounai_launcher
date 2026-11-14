@@ -12,13 +12,17 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use tauri::{Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use launcher_core::lifecycle::{
     activation_steps, rollback_steps, ActivationStep, Phase, ProbeState, RecoveryStep, RolesDoc,
     Snapshot,
 };
 use launcher_core::admin_host::{AdminHost, Bounds, MountRequest};
+use launcher_core::chain::{
+    ChainPlan, ChainProgress, ChainProgressPhase, ChainRegistry, ChainRunResult, ChainStepResult,
+    ChainStepState, StepStatus, DEFAULT_CHAIN_ID,
+};
 use launcher_core::m2::adapters::RemoteCatalogAdapter;
 use launcher_core::m2::catalog::{
     check_update_allowed, select_catalog_entry, version_key, CatalogEntry,
@@ -567,50 +571,11 @@ pub async fn stop_module(module_id: String, app: tauri::AppHandle) -> Result<Run
     .map_err(|e| format!("停止没有跑完：{e}"))?
 }
 
+/// 一键启动 = 启动隐式默认链路。命令名沿用 v1 以保持前端调用点稳定，
+/// 语义见 ROADMAP M6：与自定义链路共用同一引擎，返回按步骤的结果。
 #[tauri::command]
-pub async fn start_all(app: tauri::AppHandle) -> Vec<RunView> {
-    match tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<AppStateV2>();
-        let supervisor = app.state::<Supervisor>();
-        start_all_impl(&state, &supervisor)
-    })
-    .await
-    {
-        Ok(out) => out,
-        Err(error) => vec![run_view(
-            "start_all",
-            None,
-            Some(format!("启动没有跑完：{error}")),
-        )],
-    }
-}
-
-fn start_all_impl(state: &AppStateV2, supervisor: &Supervisor) -> Vec<RunView> {
-    // 端口按全集分配，再挑出要启动的那些：只按启动集合算，同一实例
-    // 在列表里显示 18102、这里却可能分到 18101。
-    let all = all_instances(state);
-    let ports = assign_ports(state, supervisor.roles(), &all);
-    let instances: Vec<Instance> = all
-        .into_iter()
-        .filter(|i| !state.is_disabled(&i.module_id))
-        .collect();
-    let ordered = match ordered_instances(supervisor.roles(), instances) {
-        Ok(list) => list,
-        Err(error) => return vec![run_view("start_all", None, Some(error))],
-    };
-    let mut out = Vec::with_capacity(ordered.len());
-    for instance in &ordered {
-        // 整批分配端口仍在这里做，start_instance 只负责单个实例的启动前探测。
-        let port = ports.get(&instance.instance_id).copied().flatten();
-        match start_instance(state, supervisor, instance, port) {
-            Ok(StartOutcome::Managed(snap)) => {
-                out.push(run_view(&instance.module_id, Some(&snap), None))
-            }
-            Ok(StartOutcome::External) => out.push(external_run_view(&instance.module_id)),
-            Err(error) => out.push(run_view(&instance.module_id, None, Some(error))),
-        }
-    }
-    out
+pub async fn start_all(app: AppHandle) -> Result<ChainRunResult, String> {
+    start_chain(DEFAULT_CHAIN_ID.to_string(), app).await
 }
 
 #[tauri::command]
@@ -3372,6 +3337,336 @@ pub fn open_instance_logs_dir(
     Ok(dir.display().to_string())
 }
 
+/* ------------------------------------------------------------------ */
+/* M6 链路                                                             */
+/* ------------------------------------------------------------------ */
+
+/// 每步提交与完成各发一次，界面用它画状态点。命令返回整轮汇总。
+pub const EVENT_CHAIN_PROGRESS: &str = "chain-progress";
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChainStepView {
+    pub index: usize,
+    pub instance_id: String,
+    /// 清单里的展示名；实例不存在时退回 instance_id。
+    pub name: String,
+    pub exists: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChainView {
+    pub id: String,
+    pub name: String,
+    pub steps: Vec<ChainStepView>,
+    pub missing_count: usize,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChainsView {
+    pub chains: Vec<ChainView>,
+    /// 隐式默认链路的步骤（按 role 拓扑），只用于界面预览，不落盘。
+    pub default_steps: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChainStopResult {
+    pub chain_id: String,
+    pub stopped: Vec<String>,
+    pub failed: Vec<ChainStepResult>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SaveChainRequest {
+    /// 空或 None 表示新建，后端生成 chain-N；非空表示编辑已有 id。
+    pub id: Option<String>,
+    pub name: String,
+    pub steps: Vec<String>,
+}
+
+fn next_chain_id(registry: &ChainRegistry) -> String {
+    let mut n = 1;
+    loop {
+        let id = format!("chain-{n}");
+        if registry.find(&id).is_none() {
+            return id;
+        }
+        n += 1;
+    }
+}
+
+/// 默认链路按 role 拓扑排序。抽成不依赖 Supervisor 的纯函数，便于离线断言顺序。
+fn default_ordered_ids(
+    roles: &RolesDoc,
+    instances: Vec<Instance>,
+) -> Result<Vec<String>, String> {
+    let ordered = ordered_instances(roles, instances)?;
+    Ok(ordered.iter().map(|i| i.instance_id.clone()).collect())
+}
+
+/// 默认链路完全按 role 拓扑生成，不写入 chains.json。
+fn default_chain_plan(state: &AppStateV2, supervisor: &Supervisor) -> Result<ChainPlan, String> {
+    let instances: Vec<Instance> = all_instances(state)
+        .into_iter()
+        .filter(|i| !state.is_disabled(&i.module_id))
+        .collect();
+    let ids = default_ordered_ids(supervisor.roles(), instances)?;
+    Ok(ChainPlan::from_default(&ids))
+}
+
+/// 逆序停止，同时保留原步骤编号，界面才能把失败定位回卡片上那一行。
+fn reversed_steps(ids: &[String]) -> Vec<(usize, &str)> {
+    ids.iter()
+        .enumerate()
+        .rev()
+        .map(|(i, id)| (i + 1, id.as_str()))
+        .collect()
+}
+
+/// 返回 Some 表示该步不进入 spawn。悬空与依赖未准备都只跳过自己，不中止整轮。
+/// 抽成纯函数是为了让「跳过哪一步、为什么」能被无窗口单测直接钉住。
+fn precheck_step(
+    status: StepStatus,
+    exists: bool,
+    prepared: bool,
+) -> Option<(ChainStepState, &'static str)> {
+    if status == StepStatus::Dangling || !exists {
+        return Some((ChainStepState::Dangling, "实例已卸载或不存在"));
+    }
+    if !prepared {
+        return Some((ChainStepState::Blocked, "依赖未准备"));
+    }
+    None
+}
+
+/// 预探到外部健康服务算通过，只标出来；不判失败，也不等于启动器托管的进程。
+fn outcome_to_state(outcome: &StartOutcome) -> (ChainStepState, Option<String>) {
+    match outcome {
+        StartOutcome::Managed(_) => (ChainStepState::Started, None),
+        StartOutcome::External => (
+            ChainStepState::External,
+            Some("端口上已有外部健康服务".into()),
+        ),
+    }
+}
+
+fn chain_plan(
+    chain_id: &str,
+    state: &AppStateV2,
+    supervisor: &Supervisor,
+) -> Result<ChainPlan, String> {
+    if chain_id == DEFAULT_CHAIN_ID {
+        return default_chain_plan(state, supervisor);
+    }
+    ChainPlan::from_registry(&state.chains(), chain_id, &state.known_instance_ids())
+        .map_err(|e| e.to_string())
+}
+
+fn chains_view(state: &AppStateV2, supervisor: &Supervisor) -> ChainsView {
+    let registry = state.chains();
+    let known = state.known_instance_ids();
+    let chains = registry
+        .chains
+        .iter()
+        .map(|chain| {
+            let plan = ChainPlan::from_chain(chain, &known);
+            let steps = plan
+                .steps
+                .iter()
+                .map(|step| ChainStepView {
+                    index: step.index,
+                    name: state
+                        .instance(&step.instance_id)
+                        .map(|i| manifest_brief(state, &i).name)
+                        .unwrap_or_else(|| step.instance_id.clone()),
+                    instance_id: step.instance_id.clone(),
+                    exists: step.status == StepStatus::Ready,
+                })
+                .collect();
+            ChainView {
+                id: chain.id.clone(),
+                name: chain.name.clone(),
+                steps,
+                missing_count: plan.dangling().len(),
+                created_at: chain.created_at.clone(),
+                updated_at: chain.updated_at.clone(),
+            }
+        })
+        .collect();
+    let default_steps = default_chain_plan(state, supervisor)
+        .map(|plan| plan.runnable_ids())
+        .unwrap_or_default();
+    ChainsView {
+        chains,
+        default_steps,
+    }
+}
+
+/// 一轮批量 spawn，步骤间不插入等待点。健康与契约探测仍由后台线程跑，
+/// 本函数只汇总同步结论；单步失败不阻断其余步骤，已启动的不回滚。
+fn run_chain(
+    plan: &ChainPlan,
+    state: &AppStateV2,
+    supervisor: &Supervisor,
+    app: Option<&AppHandle>,
+) -> ChainRunResult {
+    let mut result = ChainRunResult::from_plan(plan);
+    // 端口按整张实例表一次分配：只按启动集合算，每个非 active 实例都会拿到 18101。
+    let all = all_instances(state);
+    let ports = assign_ports(state, supervisor.roles(), &all);
+    let prepared: BTreeSet<String> = all
+        .iter()
+        .filter(|i| {
+            !i.role.needs_runtime()
+                || launcher_core::verify_instance(&state.paths, &i.instance_id).is_ok()
+        })
+        .map(|i| i.instance_id.clone())
+        .collect();
+
+    for step in &plan.steps {
+        let emit = |phase: ChainProgressPhase,
+                    step_state: Option<ChainStepState>,
+                    reason: Option<String>| {
+            if let Some(handle) = app {
+                let _ = handle.emit(
+                    EVENT_CHAIN_PROGRESS,
+                    ChainProgress {
+                        chain_id: plan.chain_id.clone(),
+                        index: step.index,
+                        total: plan.steps.len(),
+                        instance_id: step.instance_id.clone(),
+                        phase,
+                        state: step_state,
+                        reason,
+                    },
+                );
+            }
+        };
+        let instance = state.instance(&step.instance_id);
+        let exists = instance.is_some();
+        if let Some((step_state, cause)) = precheck_step(
+            step.status,
+            exists,
+            prepared.contains(&step.instance_id),
+        ) {
+            let reason = cause.to_string();
+            if step_state == ChainStepState::Blocked {
+                result.missing_deps.push(step.instance_id.clone());
+            }
+            result.set(step.index, step_state, Some(reason.clone()));
+            emit(ChainProgressPhase::Finished, Some(step_state), Some(reason));
+            continue;
+        }
+        let instance = instance.expect("precheck 已确认实例存在");
+
+        emit(ChainProgressPhase::Submitting, None, None);
+        let port = ports.get(&step.instance_id).copied().flatten();
+        let (step_state, reason) = match start_instance(state, supervisor, &instance, port) {
+            Ok(outcome) => outcome_to_state(&outcome),
+            Err(error) => (ChainStepState::Failed, Some(error)),
+        };
+        result.set(step.index, step_state, reason.clone());
+        emit(ChainProgressPhase::Finished, Some(step_state), reason);
+    }
+    result
+}
+
+#[tauri::command]
+pub fn list_chains(state: State<'_, AppStateV2>, supervisor: State<'_, Supervisor>) -> ChainsView {
+    chains_view(&state, &supervisor)
+}
+
+#[tauri::command]
+pub fn save_chain(
+    request: SaveChainRequest,
+    state: State<'_, AppStateV2>,
+    supervisor: State<'_, Supervisor>,
+) -> Result<ChainsView, String> {
+    let SaveChainRequest { id, name, steps } = request;
+    let now = AppStateV2::now();
+    state.mutate_chains(move |registry| {
+        let id = match id.as_deref() {
+            Some(value) if !value.is_empty() => value.to_string(),
+            _ => next_chain_id(registry),
+        };
+        registry
+            .upsert(&id, &name, steps, &now)
+            .map_err(|e| e.to_string())
+    })?;
+    Ok(chains_view(&state, &supervisor))
+}
+
+#[tauri::command]
+pub fn delete_chain(
+    id: String,
+    state: State<'_, AppStateV2>,
+    supervisor: State<'_, Supervisor>,
+) -> Result<ChainsView, String> {
+    state.mutate_chains(|registry| registry.remove(&id).map_err(|e| e.to_string()))?;
+    Ok(chains_view(&state, &supervisor))
+}
+
+#[tauri::command]
+pub async fn start_chain(
+    chain_id: String,
+    app: AppHandle,
+) -> Result<ChainRunResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppStateV2>();
+        let supervisor = app.state::<Supervisor>();
+        let plan = chain_plan(&chain_id, &state, &supervisor)?;
+        let result = run_chain(&plan, &state, &supervisor, Some(&app));
+        state.set_last_chain_run(&result);
+        Ok(result)
+    })
+    .await
+    .map_err(|e| format!("链路启动没有跑完：{e}"))?
+}
+
+/// 按 steps 逆序停，单步失败不阻断后续。only_started 只收本次链路拉起的实例，
+/// 前端在失败态把它标成「回滚停止」。
+#[tauri::command]
+pub async fn stop_chain(
+    chain_id: String,
+    only_started: Option<bool>,
+    app: AppHandle,
+) -> Result<ChainStopResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppStateV2>();
+        let supervisor = app.state::<Supervisor>();
+        let plan = chain_plan(&chain_id, &state, &supervisor)?;
+        let ids = if only_started.unwrap_or(false) {
+            state
+                .last_chain_run(&chain_id)
+                .map(|result| result.started_ids())
+                .unwrap_or_default()
+        } else {
+            plan.runnable_ids()
+        };
+        let mut stopped = Vec::new();
+        let mut failed = Vec::new();
+        for (index, id) in reversed_steps(&ids) {
+            match supervisor.stop(id) {
+                Ok(_) => stopped.push(id.to_string()),
+                Err(error) => failed.push(ChainStepResult {
+                    index,
+                    instance_id: id.to_string(),
+                    state: ChainStepState::Failed,
+                    reason: Some(error),
+                }),
+            }
+        }
+        Ok(ChainStopResult {
+            chain_id,
+            stopped,
+            failed,
+        })
+    })
+    .await
+    .map_err(|e| format!("链路停止没有跑完：{e}"))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3698,5 +3993,119 @@ mod tests {
         // 都不匹配时给的是「没找到」而不是「未安装某个模块」。
         let err = state.resolve_instance("dounai/nope@stable").unwrap_err();
         assert!(err.contains("没有找到实例或模块"), "{err}");
+    }
+
+    /* ---------------- M6 链路 ---------------- */
+
+    /// 默认链路不落盘：按 role 拓扑从实例表即时生成，增删实例不需要维护第二份事实。
+    #[test]
+    fn default_chain_follows_role_topology() {
+        let roles = launcher_core::lifecycle::embedded_roles().unwrap();
+        let instance = |id: &str, role: &str| -> Instance {
+            serde_json::from_value(serde_json::json!({
+                "instance_id": id,
+                "module_id": id.split('@').next().unwrap(),
+                "variant": "stable",
+                "version": "0.1.0",
+                "role": role,
+                "category": "core",
+                "verdict": "A",
+                "confirmed_at": "2026-11-13T00:00:00Z",
+                "installed_at": "2026-11-13T00:00:00Z",
+                "source_kind": "zip",
+                "pinned": false,
+                "auto_update": false,
+            }))
+            .unwrap()
+        };
+        // 故意乱序传入，拓扑排序必须把它拉回来。
+        let ids = default_ordered_ids(
+            &roles,
+            vec![
+                instance("out@stable", "output"),
+                instance("sh@stable", "shell"),
+                instance("llm@stable", "llm"),
+                instance("in@stable", "input"),
+            ],
+        )
+        .unwrap();
+        let pos = |id: &str| ids.iter().position(|x| x == id).unwrap();
+        assert!(pos("in@stable") < pos("llm@stable"));
+        assert!(pos("llm@stable") < pos("out@stable"));
+        assert!(pos("llm@stable") < pos("sh@stable"));
+        assert_eq!(ids.len(), 4);
+        let plan = ChainPlan::from_default(&ids);
+        assert!(plan.is_default);
+        assert_eq!(plan.chain_id, DEFAULT_CHAIN_ID);
+    }
+
+    /// 逆序停止时保留原步骤编号，失败才能定位回卡片上那一行。
+    #[test]
+    fn chain_reverse_stop_keeps_original_step_numbers() {
+        let ids = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        assert_eq!(reversed_steps(&ids), vec![(3, "c"), (2, "b"), (1, "a")]);
+        assert!(reversed_steps(&[]).is_empty());
+    }
+
+    /// 端口上的外部健康服务算通过，但要明确标出来，不能假装是启动器托管的。
+    #[test]
+    fn chain_external_service_is_passed_but_marked() {
+        let (state, reason) = outcome_to_state(&StartOutcome::External);
+        assert_eq!(state, ChainStepState::External);
+        assert!(reason.unwrap().contains("外部"));
+        let snap = Snapshot {
+            instance_id: "a@stable".into(),
+            phase: Phase::Starting,
+            ticket: 1,
+            pid: Some(7),
+            health: ProbeState::Pending,
+            contract: ProbeState::NotChecked,
+            exit_code: None,
+            last_error: None,
+        };
+        let (state, reason) = outcome_to_state(&StartOutcome::Managed(snap));
+        assert_eq!(state, ChainStepState::Started);
+        assert!(reason.is_none());
+    }
+
+    /// 悬空与依赖未准备都只跳过自己，不中止整轮，也不 spawn。
+    #[test]
+    fn chain_precheck_skips_only_the_bad_step() {
+        assert_eq!(
+            precheck_step(StepStatus::Dangling, true, true),
+            Some((ChainStepState::Dangling, "实例已卸载或不存在"))
+        );
+        assert_eq!(
+            precheck_step(StepStatus::Ready, false, true),
+            Some((ChainStepState::Dangling, "实例已卸载或不存在"))
+        );
+        assert_eq!(
+            precheck_step(StepStatus::Ready, true, false),
+            Some((ChainStepState::Blocked, "依赖未准备"))
+        );
+        assert_eq!(precheck_step(StepStatus::Ready, true, true), None);
+    }
+
+    #[test]
+    fn new_chain_ids_do_not_collide_with_existing_ones() {
+        let mut registry = ChainRegistry::empty();
+        registry
+            .upsert(
+                "chain-1",
+                "第一条",
+                vec!["a@stable".into()],
+                "2026-11-14T00:00:00Z",
+            )
+            .unwrap();
+        assert_eq!(next_chain_id(&registry), "chain-2");
+        registry
+            .upsert(
+                "chain-2",
+                "第二条",
+                vec!["b@stable".into()],
+                "2026-11-14T00:00:00Z",
+            )
+            .unwrap();
+        assert_eq!(next_chain_id(&registry), "chain-3");
     }
 }
