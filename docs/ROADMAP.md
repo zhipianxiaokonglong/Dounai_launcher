@@ -399,3 +399,25 @@ M1 收口（install.json 自举 + 内置 uv）
 | 第三方界面仿冒配置页 | `explicit_only`、常驻发布者标记、确认文案披露与手动回退。启动器无法验证界面内容，不得写成“已验证” |
 
 契约文件的变更规则见 [contracts/README.md](../contracts/README.md)。
+
+## Backlog：现网修复与签发流程欠账（2026-11-14）
+
+M8 上线当天真机验收撞到现网 catalog 与新契约不兼容：11-13 签发的旧件缺 `signature.signer_fp`、条目 `source_id` 是 `"sourceforge"` 而源表登记的是 `official-sf`、且两天后过期。当天的处置是**只修数据不改代码**：三包 sha256 与现网一致，用 K5 重签一份 `sequence=2`、`source_id=official-sf`、7 天有效期的新 catalog 覆盖上传（签发工具 sign 后自验通过，现网回读确认生效）。由此暴露的欠账记在这里，按优先级排：
+
+### 代码侧
+
+1. **签发工具缺自检**（根因）。`sign_catalog` 不检查 catalog 的 `sources[].id` 与 `entries[].source_id` 是否与启动器源表登记一致——这次三处不兼容里两处（缺 `signer_fp`、`source_id` 漂移）都源于签发侧与消费侧各改各的。应给 `sign` 子命令加预检：source_id 必须匹配内置源 id 或给出显式参数确认；`signature` 块的完整校验（含 `signer_fp` 必填）在签名前而不是签名后做。
+2. **多源失败的错误聚合太粗**。`refresh_catalog` 全部源都失败时报「没有可用的已验签 catalog：catalog 字段不合法：missing field signer_fp」，不说哪个源、各源各自什么原因。源状态视图（`inspect_source`）应逐源带 `last_error` 与 `last_error_at`，界面把每个源的失败原因分行展示。
+3. **签发到上传未脚本化**。哈希核对、`sequence` 递增、7 天时间窗计算这次全是手工，每 7 天重复一次必然再出错。应做一个 `release-catalog` 脚本：从 SF 现读旧 catalog 取 `sequence`+1、自动算时间窗、重算各包哈希并与待签文档比对、签后自验、打印 sftp 上传命令（上传仍人工执行）。
+4. **`live_source` 真源冒烟按旧模型写的**（2 项 ignored）。源模型改了，要按多源模型重写：现网 catalog 验签 + 指纹比对 + 条目 source_id 与源表匹配。
+
+### 源侧（非代码，待拍板）
+
+5. **官方镜像源 `official-gh` 指向的仓库不存在**。内置源表里 GitHub 镜像指向 `raw.githubusercontent.com/Tonyjh07/dounai-releases/main`，该仓库目前 404。建仓属于对外可见动作，等作者拍板；拍板前该源每次刷新都会失败，错误聚合修好之前会把噪音混进总错误信息。
+6. **catalog 是手工周期品**。7 天有效期意味着每周必须重签重传一次，漏签的后果是官方源整体报「已过期」（fail-closed，安全但不可用）。上面第 3 条的脚本化之外，还需要一个提醒机制（日历或自动化）。
+
+### 修源当天的操作记录
+
+- 新 catalog：`sequence=2`（旧件 sequence=1）、`generated_at=2026-11-14T04:10:00Z`、`expires=2026-11-21T04:10:00Z`（恰好 7 天）、三包哈希与旧件逐字比对一致、条目与顶层 `source_id` 全部改 `official-sf`。
+- 签发：`sign_catalog sign --key <K5 私钥> --key-id K5`，工具自动写入 `signer_fp` 并用同钥自验；再用 `verify --pubkey <K5 公钥>` 复验通过。
+- 上传：sftp 覆盖 `/home/frs/project/dounai-releases/catalog.json`；`downloads.sourceforge.net` 回读确认新件生效。

@@ -220,7 +220,7 @@ M3 代码落在四处：core 的 `lifecycle/` 纯逻辑、app 的 `process/win.r
 ### 已知限制
 
 1. 日志只记录启动器事件（拉起、退出码、探测结果），子进程的 stdout/stderr 默认丢弃，需显式设置 `DOUNAI_LOG_CHILD_OUTPUT=1` 才接管管道；开关交给界面属 M4。日志目录没有显式 ACL，随数据根继承权限。
-2. 内置 K5 公钥是真实值，但还没有已签发的 catalog，`refresh_catalog` 按 `unavailable` 返回，不降级放行。当时 `set_k5_pubkey` 可在本次会话内替换公钥，界面入口在 M4；M8 已删除该命令——能在会话内换掉验签公钥是一条绕过通道。
+2. 内置 K5 公钥是真实值。官方 catalog 已于 2026-11-13 起在 SourceForge 签发（2026-11-14 按 M8 新契约重签为 `sequence=2`，见 [ROADMAP.md](ROADMAP.md) Backlog 的操作记录）。签发流程当时的口径：`refresh_catalog` 对验不过、过期或字段不合法的 catalog 一律按 `unavailable` 返回，不降级放行。当时 `set_k5_pubkey` 可在本次会话内替换公钥，界面入口在 M4；M8 已删除该命令——能在会话内换掉验签公钥是一条绕过通道。
 3. `switch_active` 已按 `activation_steps` 执行停旧、起新、探测、提交与回滚。限制有两条：目标实例由外部进程提供时直接拒绝（验不了契约、也无法回滚）；目标已是 active 且在跑时只重新探测，不重启进程。
 4. 卸载的 `remove_files` 会清包目录、venv 与日志，`data_dir` 按契约保留；`purge_local_data` 先停托管实例再删目录，外部实例停不掉，跳过并记进 `errors`。
 5. `purge_local_data` 的 `state` 只重置 catalog 水位，保留实例表，与 v1 的清状态语义不同。
