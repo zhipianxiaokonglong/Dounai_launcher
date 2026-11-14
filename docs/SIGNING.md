@@ -108,6 +108,20 @@ sha256sum /tmp/c.json <catalog.json>
 
 上传后 SF 需要几十秒同步镜像，此时 `master.dl` 仍可能 404。
 
+### 5.2 已发布的 catalog 版本
+
+| sequence | 时间 | 内容 |
+|---|---|---|
+| 1 | 2026-11-13 | 首次签发，三个数据面模块 |
+| 2 | 2026-11-14 | 修 `signer_fp` 字段与条目 `source_id`，改为 `official-sf` 单源 |
+| 3 | 2026-11-14 | 四个模块重打：`dounai-input 0.2.2`、`omninexus 0.3.5`、`moodvoice 1.0.1`、首次发布的 `dounai-ui 0.3.1`（shell） |
+
+`sequence=3` 中三个数据面模块的 patch 号比上游仓库 `pyproject.toml` 里的版本各高一档。上游改了代码但没有改版本号，而 catalog 的版本单调只看版本串，同版本换哈希不会让已装用户看到更新，所以重新打包时由发布方升 patch。
+
+`dounai-ui` 是首个 shell 包，内容只有 `tauri build --no-bundle` 产出的单个 `dounai.exe`（前端资源已内嵌），入口写 `{module_dir}/dounai.exe`。这也暴露过一处契约缺口：旧规则要求 shell 的 `entry.command` 含 `{install_root}`，而 `{install_root}` 是只读程序根，zip 包解压在 `data_root/instances/<key>/package`，照旧规则打的包一定起不来。契约已改为 `{module_dir}`。
+
+重签用 `scripts/release-catalog.py`，它拉现网底稿、`sequence+1`、7 天窗、逐条重算包哈希、调 `sign_catalog` 签名并复验。本次新增一条行为：条目自带的 `expires` 跟着 catalog 顶层窗口一起刷新，只刷顶层会让启动器在 catalog 仍有效时把每个条目都判成过期。
+
 上传通道是 SFTP 与 `rsync`/`scp`。2026-11-13 已把本机 SSH 公钥登记到 SourceForge，实测 `tonyjh07@frs.sourceforge.net` 认证通过，`/home/frs/project/dounai-releases/` 可上传、列出与删除。上传仍未脚本化，发布时逐次执行。K1 私钥、K5 私钥与上传凭据分开保管，任一泄露都按密钥泄露流程处理。
 
 启动器侧的顺序固定，见 [DESIGN.md](DESIGN.md) 7.3。源站会 302 到镜像主机，两个 HTTP 客户端都逐跳校验域名后再跟随（见 7.2）。
@@ -153,19 +167,18 @@ K1 与 K5 都已生成并内置。模块包与已签名的 `catalog.json` 已上
 | K5 私钥 | 已生成，仓库外，ACL 仅限当前用户 |
 | K5 公钥与指纹 | 已登记在 `keys/K5.json` 与 `state_v2.rs` |
 | K5 签出的 catalog | 离线验签通过，篡改条目被硬拒 |
-| SourceForge 项目 | 已创建，3 个模块包与 catalog.json 已上传（2026-11-13） |
+| SourceForge 项目 | 已创建，4 个模块包与 catalog.json 已上传（2026-11-14） |
 | SourceForge 上传通道 | 已实测，SSH 认证与目录写入通过 |
-| 远程 catalog 分发 | 未启用，尚无签名 catalog |
+| 远程 catalog 分发 | 已启用，现网 `sequence=3`，有效期至 2026-11-21 |
 | 真机安装 | 未实测 |
 
-没有已签发的 catalog 时，`refresh_catalog` 返回 `unavailable`。这是 fail-closed，不是故障。K5 验签路径本身已经可用，缺的是 SourceForge 上的索引文件。
+catalog 过期（或 `sequence` 未推进）时 `refresh_catalog` 返回 `unavailable`，这是 fail-closed，不是故障。
 
-启用远程分发前要完成四件事。
+远程分发启用后仍需完成的事。
 
-1. 打包并上传首个模块包，记录 `sha256`、`size` 与 `publisher_fp`。
-2. 生成 catalog，`sources` 指向 SourceForge，用 `sign_catalog` 以 K5 签名。
-3. 上传 `catalog.json`，回读核对。
-4. 真机验证拉取、验签、下包与安装。
+1. 真机验证四条装链路：从下载页拉取、验签、下包、安装，四个条目各一次。
+2. 每 7 天重签一次 catalog，过期窗口内不重签会让自动更新断掉。
+3. shell 包首次激活要单独确认并在界面常驻发布者，装完必须眼过一遍真实窗口，启停与卸载各试一次。
 
 说明：[ROADMAP.md](ROADMAP.md) 规定离线断言不计真机验收通过。上表的离线结果不改写 M3 与 M5 的验收状态。
 
