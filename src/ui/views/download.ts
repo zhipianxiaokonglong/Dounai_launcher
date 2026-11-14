@@ -31,7 +31,7 @@ import {
   openModal,
   toast,
 } from "../dom.js";
-import { describeError } from "../store.js";
+import { describeError, refreshViews } from "../store.js";
 import { ROLE_ORDER, ROLE_TITLE } from "../roles.js";
 import type { ViewSlots } from "./modules.js";
 
@@ -483,6 +483,11 @@ async function runInstall(button: HTMLElement, confirm: boolean): Promise<void> 
     toast(`已安装 ${res.module_id}：${res.files} 个文件，${formatBytes(res.bytes)}${slot}`, "ok");
     // 只读会话缓存刷新状态，不重新拉网络：拉失败会把刚装好的条目一起清掉。
     view.catalog = await catalogCache();
+    // 实例表也跟着变了一次。这里不重绘下载页（它在 finally 里自己刷），
+    // 但不刷新 store 的话，「模块」页还停在启动时那份快照上——刚装好的
+    // 模块（比如总装层）会看不见，直到下一次生命周期推送。
+    await refreshViews().catch(() => undefined);
+    window.dispatchEvent(new CustomEvent("dounai:views-updated"));
   } catch (error) {
     const message = describeError(error);
     button.removeAttribute("disabled");

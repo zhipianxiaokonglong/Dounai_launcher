@@ -3864,6 +3864,51 @@ mod tests {
         assert!(views[1].snapshot.is_none());
     }
 
+    /// 总装层（shell）也是实例表里的一行，不能被卡片列表漏掉。
+    ///
+    /// 它没有规范端口、不参与 active 槽，也不跑依赖环境——这些都是「没有值」，
+    /// 不是「不该显示」。真机上「装了总装层但模块页看不到」就是按「有没有端口」
+    /// 过滤造成的，这里把这条钉住。
+    #[test]
+    fn shell_instance_is_listed_without_port() {
+        let shell: Instance = serde_json::from_value(serde_json::json!({
+            "instance_id": "dounai/dounai-ui@stable",
+            "module_id": "dounai/dounai-ui",
+            "variant": "stable",
+            "version": "0.3.1",
+            "role": "shell",
+            "category": "core",
+            "verdict": "A",
+            "confirmed_at": "2026-11-14T00:00:00Z",
+            "installed_at": "2026-11-14T00:00:00Z",
+            "source_kind": "zip",
+            "pinned": false,
+            "auto_update": true,
+        }))
+        .unwrap();
+        let id = shell.instance_id.clone();
+        let mut ports = std::collections::BTreeMap::new();
+        ports.insert(id.clone(), None);
+        let views = compose_instance_views(
+            vec![shell],
+            &ports,
+            &std::collections::BTreeMap::new(),
+            &BTreeSet::new(),
+            &std::collections::BTreeMap::new(),
+            &EnvFacts {
+                prepared: [id.clone()].into_iter().collect(),
+                pinned: std::collections::BTreeMap::new(),
+            },
+            &std::collections::BTreeMap::new(),
+        );
+        assert_eq!(views.len(), 1, "shell 实例不能从列表里消失");
+        assert_eq!(views[0].instance.role, Role::Shell);
+        assert_eq!(views[0].port, None);
+        assert!(!views[0].active);
+        // shell 不要运行时，恒视为就绪，界面直接给「启动」而不是「安装依赖」。
+        assert!(views[0].prepared);
+    }
+
     /// 造一个未签名的合法包：`files` 必须与 zip 内条目逐一对应。
     fn unsigned_package() -> Vec<u8> {
         use sha2::{Digest, Sha256};

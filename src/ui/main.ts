@@ -80,6 +80,10 @@ async function renderView(view: ViewId, arg?: string): Promise<void> {
   try {
     switch (view) {
       case "modules":
+        // 实例表会被「安装 / 卸载 / 启用停用」改写，而这些动作不保证触发
+        // 生命周期推送。进页先拉一次，否则看到的是启动时那份快照——
+        // 表现为「刚装好的模块不在列表里」。读失败就沿用上一份，不挡渲染。
+        await refreshViews().catch(() => undefined);
         renderModules(slots);
         break;
       case "download":
