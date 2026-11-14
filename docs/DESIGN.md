@@ -454,12 +454,12 @@ M3 已按 role 拓扑启动、Job Object 托管与异步探测重写生命周期
 
 四条行为约束：
 
-1. URL 只能来自 `admin_url_v2`（读 manifest 的 `admin_ui.web_ui.path` 与端口表），前端不传地址；`admin_host::validate_mount_request` 再验一次回环、端口与路径。子 WebView 还挂了 `on_navigation`，只允许同 host 同端口的站内跳转——否则管理页能跳到本机另一个模块的服务当跳板。端口取该实例的实际分配端口，备用端口同样成立。
+1. URL 只能来自 `admin_url_v2`（读 manifest 的 `admin_ui.web_ui.path` 与端口表），前端不传地址；`admin_host::validate_mount_request` 再验一次回环、端口与路径。子 WebView 还挂了 `on_navigation`，只允许同 host 同端口的站内跳转——否则管理页能跳到本机另一个模块的服务当跳板。端口取该实例的实际分配端口，备用端口同样成立。校验允许 `path = "/"`：官方样例 `dounai-input` 与 `moodvoice` 的管理页就在服务根。M4 真机首测发现旧校验把根路径判成「缺少路径」、使这两个模块全部降级成独立窗口，现只挡路径里的 `..`，并加了遍历三个官方样例 manifest 的回归测试。
 2. 创建在独立线程里跑（`TauriAdminHost::mount` 起线程 + channel + 15s 超时）。Windows 上 Webview2 的 COM 初始化会死锁在 `about:blank`，命令线程里建窗是已知的死锁源；连续切换多个实例也不该在命令线程里排队。
 3. **capability 按 webview label 授权**。`default.json` 用 `"webviews": ["main"]` 而不是 `"windows": ["main"]`：Tauri 的 ACL 判定是「webviews 匹配 **或** windows 匹配」，而内嵌页挂在 `main` 窗口下，用 `windows` 会让它继承主窗口的全部命令权限。改成按 label 后，内嵌页（`admin-embed-*`）与独立窗口（`admin-*`）都不匹配，没有任何权限。两条路径仍共用一份 `initialization_script_for_all_frames` 清掉 `__TAURI__` / `__TAURI_INTERNALS__` 等注入——capability 是硬隔离，清注入是纵深防御，不能只做一半。`for_all_frames` 是必须的，上游页面可能用 iframe 加载子页面。
 4. 生命周期绑定进程状态。实例未启动显示本地占位页（不显示连接错误）；health 从非健康变健康时 reload 一次；进程退出时隐藏子视图并回到占位；卸载时 `admin_host_unmount` 销毁。切到别的视图用 `hide` 而不是 `close`——原生视图不会跟着 DOM 消失，不藏就会浮在下一页上，而隐藏能保住页面里填了一半的表单。label 按 `instance_id` 派生（非法字符替换后加哈希），重复点击复用同一个子视图。
 
-`admin_host.rs` 是 M0 冻结契约，M4 起由 `TauriAdminHost` 真正实现 `AdminHost` 的 mount / unmount / reload 三方法。resize 与 visible 没有生命周期语义，作为宿主自己的方法，不进 trait。`web_ui.embed = false` 的模块按声明开独立窗口，不算降级失败；子 WebView 创建失败时同样自动退化为独立窗口，URL 不变、模块服务仍在跑，不丢状态。
+`admin_host.rs` 是 M0 冻结契约，M4 起由 `TauriAdminHost` 真正实现 `AdminHost` 的 mount / unmount / reload 三方法。勘误（2026-11-13 真机）：`validate_mount_request` 原本还要求「路径非空」，与官方样例 `web_ui.path = "/"` 冲突；这条规则在 M4 之前没有消费者，第一次落地即暴露。现只保留回环、端口与 `..` 三项检查——host 与 port 仍锁死，放行服务根不放宽安全边界。resize 与 visible 没有生命周期语义，作为宿主自己的方法，不进 trait。`web_ui.embed = false` 的模块按声明开独立窗口，不算降级失败；子 WebView 创建失败时同样自动退化为独立窗口，URL 不变、模块服务仍在跑，不丢状态。
 
 坐标由 UI 一处算、core 一处下发：`clampAdminBounds` 把容器矩形夹进可见视口（负坐标与零尺寸会被 `validate_mount_request` 硬拒），窗口缩放时 120ms 一拍重下发，所以这一页不滚动。6 项前端单测钉住夹取、完全不可见与极小窗口。
 

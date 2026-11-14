@@ -11,7 +11,7 @@
 | `kind` | 模块类别标签 |
 | `title` | 按钮标题 |
 | `capabilities` | 界面声明的能力，仅作展示 |
-| `web_ui.path` | 相对模块服务根的路径，必须以 `/` 开头 |
+| `web_ui.path` | 相对模块服务根的路径，必须以 `/` 开头；`/` 本身即合法值，表示服务根（`dounai-input`、`moodvoice` 两个样例都这么写） |
 | `web_ui.label` | 按钮文案 |
 | `web_ui.requires_running` | 为 true 时，模块未运行则按钮禁用 |
 | `web_ui.embed` | 默认 true：用同窗口子 WebView 打开；声明 false 时开独立窗口 |
