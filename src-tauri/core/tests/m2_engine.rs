@@ -154,6 +154,8 @@ fn remote_source(
         added_at: None,
         revoked_at: None,
         note: None,
+        last_error: None,
+        last_error_at: None,
     }
 }
 

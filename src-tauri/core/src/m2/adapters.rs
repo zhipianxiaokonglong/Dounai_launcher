@@ -238,11 +238,11 @@ mod tests {
         }
     }
 
-    fn official(index: usize) -> SourceEntry {
+    fn official() -> SourceEntry {
         let sk = SigningKey::from_bytes(&[5; 32]);
         let pk = base64::engine::general_purpose::STANDARD.encode(sk.verifying_key().to_bytes());
         let fp = crate::m2::fingerprint(&pk).unwrap();
-        SourceRegistry::builtin(&pk, &fp).unwrap().sources[index].clone()
+        SourceRegistry::builtin(&pk, &fp).unwrap().sources[0].clone()
     }
 
     fn entry() -> CatalogEntry {
@@ -273,7 +273,7 @@ mod tests {
         let http = FakeHttp {
             responses: BTreeMap::new(),
         };
-        let source = official(0);
+        let source = official();
         let adapter = RemoteCatalogAdapter::from_source(&source, vec![source.id.clone()], &http);
         assert!(matches!(
             adapter.fetch_catalog(),
@@ -287,27 +287,33 @@ mod tests {
         let http = FakeHttp {
             responses: BTreeMap::new(),
         };
-        let source = official(0);
+        let source = official();
         let adapter = RemoteCatalogAdapter::from_source(&source, vec![source.id.clone()], &http);
         let error = adapter.package_url(&entry()).unwrap_err();
         assert!(error.reason().contains("不跨发布者回落"));
     }
 
     #[test]
-    fn official_mirror_shares_the_download_group() {
+    fn group_member_entry_accepts_urls_within_its_source_whitelist() {
         let http = FakeHttp {
             responses: BTreeMap::new(),
         };
-        let source = official(1);
+        // 内置表已暂不下发 GitHub 镜像，这里手工构造一个同组源来验证组语义。
+        let base = official();
+        let mirror = SourceEntry {
+            id: "official-gh".into(),
+            host_suffixes: vec!["github.com".into(), "githubusercontent.com".into()],
+            ..base
+        };
         let adapter = RemoteCatalogAdapter::from_source(
-            &source,
+            &mirror,
             vec!["official-sf".into(), "official-gh".into()],
             &http,
         );
         let mut entry = entry();
         entry.sources[0].source_id = "official-gh".into();
         entry.sources[0].url = "https://raw.githubusercontent.com/x/a.zip".into();
-        // githubusercontent.com 在官方 GitHub 源的白名单内，URL 本身通过校验。
+        // githubusercontent.com 在该源的白名单内，且条目指向同组成员。
         assert!(adapter.package_url(&entry).is_ok());
     }
 

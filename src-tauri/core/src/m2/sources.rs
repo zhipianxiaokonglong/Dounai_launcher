@@ -22,6 +22,15 @@ pub const OFFICIAL_GROUP: &str = "official";
 pub const OFFICIAL_SF_ID: &str = "official-sf";
 pub const OFFICIAL_GH_ID: &str = "official-gh";
 
+/// 暂不下发的内置源。GitHub 镜像指向的仓库尚未建立（对外可见动作，待作者拍板），
+/// 在此期间不注册、加载旧文件时一并剔除——它每次刷新都 404，会把噪音混进源状态。
+/// 仓库就绪后从这张表移除即恢复下发。
+pub const HIDDEN_OFFICIAL_IDS: &[&str] = &[OFFICIAL_GH_ID];
+
+/// 内置源 id 全集（含暂不下发的）。签发侧预检 catalog 的 source_id 用这张表：
+/// 签发工具不该放行源表里根本不存在的 id。
+pub const BUILTIN_SOURCE_IDS: &[&str] = &[OFFICIAL_SF_ID, OFFICIAL_GH_ID];
+
 /// 从 base_url 派生出的后缀不能是公共后缀，否则等于「任意 https 都能拉」。
 const PUBLIC_SUFFIXES: &[&str] = &[
     "com", "net", "org", "io", "cn", "co", "top", "xyz", "site", "online", "dev", "app",
@@ -63,6 +72,11 @@ pub struct SourceEntry {
     pub revoked_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// 该源最近一次刷新失败的摘要；成功刷新后清空。只描述事实，不参与信任判定。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error_at: Option<String>,
 }
 
 impl SourceEntry {
@@ -104,33 +118,30 @@ impl SourceRegistry {
                 added_at: None,
                 revoked_at: None,
                 note: None,
+                last_error: None,
+                last_error_at: None,
             }
         };
         let registry = Self {
             schema_version: 1,
-            sources: vec![
-                common(
-                    OFFICIAL_SF_ID,
-                    "官方源（SourceForge）",
-                    "https://downloads.sourceforge.net/project/dounai-releases",
-                    SOURCEFORGE_HOST_SUFFIXES,
-                    1,
-                ),
-                common(
-                    OFFICIAL_GH_ID,
-                    "官方镜像（GitHub）",
-                    "https://raw.githubusercontent.com/Tonyjh07/dounai-releases/main",
-                    GITHUB_HOST_SUFFIXES,
-                    2,
-                ),
-            ],
+            sources: vec![common(
+                OFFICIAL_SF_ID,
+                "官方源（SourceForge）",
+                "https://downloads.sourceforge.net/project/dounai-releases",
+                SOURCEFORGE_HOST_SUFFIXES,
+                1,
+            )],
         };
         registry.validate()?;
         Ok(registry)
     }
 
     pub fn load(path: &Path) -> Result<Self, M2Error> {
-        let registry: Self = crate::state::read_json(path)?;
+        let mut registry: Self = crate::state::read_json(path)?;
+        // 内置源的下发口径由代码说了算：旧文件里残存的暂不下发内置源直接剔除。
+        registry
+            .sources
+            .retain(|s| s.deletable || !HIDDEN_OFFICIAL_IDS.contains(&s.id.as_str()));
         registry.validate()?;
         Ok(registry)
     }
@@ -268,6 +279,16 @@ impl SourceRegistry {
             if raise {
                 source.expires = Some(expires.to_string());
             }
+        }
+    }
+
+    /// 记录 / 清除某源最近一次刷新失败。`error` 为 None 即清除（成功刷新后调用）。
+    /// 只写事实字段，不改 enabled / 水位；界面据此逐源展示失败原因。
+    pub fn set_last_error(&mut self, id: &str, error: Option<(String, String)>) {
+        if let Some(source) = self.find_mut(id) {
+            let (message, at) = error.map(|e| (Some(e.0), Some(e.1))).unwrap_or((None, None));
+            source.last_error = message;
+            source.last_error_at = at;
         }
     }
 
@@ -410,17 +431,68 @@ mod tests {
             added_at: None,
             revoked_at: None,
             note: None,
+            last_error: None,
+            last_error_at: None,
         }
     }
 
     #[test]
-    fn builtin_registry_has_two_undeletable_sources_sharing_one_watermark() {
-        let registry = registry();
-        assert_eq!(registry.sources.len(), 2);
-        assert!(registry.sources.iter().all(|s| !s.deletable && s.enabled));
-        assert_eq!(registry.group_ids(OFFICIAL_SF_ID).len(), 2);
-        assert_eq!(registry.watermark(OFFICIAL_GH_ID), SourceWatermark::default());
-        assert_eq!(registry.allowlist().len(), 4);
+    fn builtin_registry_has_one_undeletable_source_and_hides_the_github_mirror() {
+        let builtin = registry();
+        assert_eq!(builtin.sources.len(), 1);
+        assert!(builtin.sources.iter().all(|s| !s.deletable && s.enabled));
+        assert_eq!(builtin.group_ids(OFFICIAL_SF_ID).len(), 1);
+        assert_eq!(builtin.watermark(OFFICIAL_GH_ID), SourceWatermark::default());
+        assert_eq!(builtin.allowlist().len(), 2);
+        // 加载残存旧文件时，暂不下发的内置镜像被剔除；社区同名源不受影响。
+        let mut stale = registry();
+        let mirror = stale.sources[0].clone();
+        stale.sources.push(SourceEntry {
+            id: OFFICIAL_GH_ID.into(),
+            name: "官方镜像（GitHub）".into(),
+            kind: SourceClass::Official,
+            base_url: "https://raw.githubusercontent.com/x/main".into(),
+            catalog_pubkey: mirror.catalog_pubkey,
+            catalog_fingerprint: mirror.catalog_fingerprint,
+            host_suffixes: vec!["github.com".into(), "githubusercontent.com".into()],
+            enabled: true,
+            deletable: false,
+            auto_update: true,
+            group: Some(OFFICIAL_GROUP.into()),
+            sequence: None,
+            expires: None,
+            priority: Some(2),
+            added_at: None,
+            revoked_at: None,
+            note: None,
+            last_error: None,
+            last_error_at: None,
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sources.json");
+        stale.save(&path).unwrap();
+        let loaded = SourceRegistry::load(&path).unwrap();
+        assert_eq!(loaded.sources.len(), 1);
+        assert_eq!(loaded.sources[0].id, OFFICIAL_SF_ID);
+    }
+
+    #[test]
+    fn last_error_is_recorded_and_cleared() {
+        let mut registry = registry();
+        registry.set_last_error(
+            OFFICIAL_SF_ID,
+            Some(("旧格式缺 signer_fp".into(), "2026-11-14T04:00:00Z".into())),
+        );
+        assert_eq!(registry.sources[0].last_error.as_deref(), Some("旧格式缺 signer_fp"));
+        assert_eq!(
+            registry.sources[0].last_error_at.as_deref(),
+            Some("2026-11-14T04:00:00Z")
+        );
+        registry.set_last_error(OFFICIAL_SF_ID, None);
+        assert!(registry.sources[0].last_error.is_none());
+        assert!(registry.sources[0].last_error_at.is_none());
+        // 不存在的源静默忽略，不报错。
+        registry.set_last_error("nope", Some(("x".into(), "t".into())));
     }
 
     #[test]
@@ -435,9 +507,9 @@ mod tests {
         let mut registry = registry();
         assert!(registry.remove(OFFICIAL_SF_ID).is_err());
         registry.set_enabled(OFFICIAL_SF_ID, false).unwrap();
-        assert_eq!(registry.enabled().len(), 1);
+        assert_eq!(registry.enabled().len(), 0);
         registry.set_enabled(OFFICIAL_SF_ID, true).unwrap();
-        assert_eq!(registry.enabled().len(), 2);
+        assert_eq!(registry.enabled().len(), 1);
     }
 
     #[test]
