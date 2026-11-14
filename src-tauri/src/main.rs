@@ -97,9 +97,15 @@ fn main() {
             dounai_launcher::commands_v2::onboarding_state,
             dounai_launcher::commands_v2::complete_onboarding,
             dounai_launcher::commands_v2::reset_onboarding,
-            dounai_launcher::commands_v2::set_k5_pubkey,
             dounai_launcher::commands_v2::confirm_trusted_key,
             dounai_launcher::commands_v2::revoke_trusted_key,
+            // M8：下载中心与可配置源。
+            dounai_launcher::commands_v2::list_sources,
+            dounai_launcher::commands_v2::inspect_source,
+            dounai_launcher::commands_v2::add_source,
+            dounai_launcher::commands_v2::set_source_enabled,
+            dounai_launcher::commands_v2::revoke_source,
+            dounai_launcher::commands_v2::remove_source,
         ])
         .build(tauri::generate_context!())
         .expect("启动器构建失败");

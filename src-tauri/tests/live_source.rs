@@ -12,7 +12,6 @@
 
 use std::path::Path;
 
-use dounai_launcher::commands_v2::BUILTIN_CATALOG_BASE;
 use dounai_launcher::download::{download, DownloadOptions};
 use dounai_launcher::http_client::ReqwestClient;
 use dounai_launcher::m2_http::ReqwestCatalogFetcher;
@@ -20,26 +19,33 @@ use dounai_launcher::state_v2::{BUILTIN_K5_FINGERPRINT, BUILTIN_K5_PUBKEY_B64};
 use launcher_core::m2::adapters::RemoteCatalogAdapter;
 use launcher_core::m2::catalog::CatalogDocument;
 use launcher_core::m2::source::SourceAdapter;
+use launcher_core::m2::sources::{SourceEntry, SourceRegistry, OFFICIAL_SF_ID};
+
+/// 用内置源表里的官方 SourceForge 记录装配适配器，与运行时走同一份配置。
+fn official_source() -> SourceEntry {
+    SourceRegistry::builtin(BUILTIN_K5_PUBKEY_B64, BUILTIN_K5_FINGERPRINT)
+        .unwrap()
+        .sources
+        .into_iter()
+        .find(|s| s.id == OFFICIAL_SF_ID)
+        .expect("内置源表应含官方 SourceForge 源")
+}
 
 /// 内置 K5 公钥必须能把线上 catalog 验通——验不过是发版事故，不是测试问题。
 #[test]
 #[ignore = "需要出网：访问 SourceForge"]
 fn builtin_catalog_verifies_with_builtin_k5() {
-    let fetcher = ReqwestCatalogFetcher::new().unwrap();
-    let adapter = RemoteCatalogAdapter::sourceforge(
-        "sourceforge",
-        BUILTIN_CATALOG_BASE,
-        1,
-        BUILTIN_K5_PUBKEY_B64,
-        &fetcher,
-    );
+    let source = official_source();
+    let fetcher = ReqwestCatalogFetcher::new(source.host_suffixes.clone()).unwrap();
+    let adapter =
+        RemoteCatalogAdapter::from_source(&source, vec![source.id.clone()], &fetcher);
     let doc = adapter
         .fetch_catalog()
         .expect("线上 catalog 应可取到并验签通过")
         .expect("sourceforge 应返回目录");
     assert!(!doc.modules.is_empty(), "目录不该是空的");
-    assert_eq!(doc.signature.key_id, "K5");
-    // 指纹是界面展示与实际判定共用的同一个值。
+    // 判定只认指纹；key_id 只是展示用的槽位标识。
+    assert_eq!(doc.signature.signer_fp, BUILTIN_K5_FINGERPRINT);
     assert_eq!(
         launcher_core::m2::fingerprint(BUILTIN_K5_PUBKEY_B64).unwrap(),
         BUILTIN_K5_FINGERPRINT
@@ -70,14 +76,10 @@ fn builtin_catalog_verifies_with_builtin_k5() {
 #[test]
 #[ignore = "需要出网：从 SourceForge 下载模块包"]
 fn first_catalog_package_downloads_and_matches_hash() {
-    let fetcher = ReqwestCatalogFetcher::new().unwrap();
-    let adapter = RemoteCatalogAdapter::sourceforge(
-        "sourceforge",
-        BUILTIN_CATALOG_BASE,
-        1,
-        BUILTIN_K5_PUBKEY_B64,
-        &fetcher,
-    );
+    let source = official_source();
+    let fetcher = ReqwestCatalogFetcher::new(source.host_suffixes.clone()).unwrap();
+    let adapter =
+        RemoteCatalogAdapter::from_source(&source, vec![source.id.clone()], &fetcher);
     let doc: CatalogDocument = adapter.fetch_catalog().unwrap().unwrap();
     let entry = doc.modules.first().expect("目录为空");
 
@@ -95,8 +97,13 @@ fn first_catalog_package_downloads_and_matches_hash() {
                 .to_string(),
         ),
     };
-    let report = download(&ReqwestClient::default_client().unwrap(), &sources, &dest, &options)
-        .expect("包应能下载并通过哈希校验");
+    let report = download(
+        &ReqwestClient::default_client(source.host_suffixes.clone()).unwrap(),
+        &sources,
+        &dest,
+        &options,
+    )
+    .expect("包应能下载并通过哈希校验");
     assert_eq!(report.bytes, entry.size, "下载大小与目录声明不一致");
     assert!(Path::new(&report.path).is_file());
 

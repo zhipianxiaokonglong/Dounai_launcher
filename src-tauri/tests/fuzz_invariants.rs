@@ -378,7 +378,12 @@ fn fuzz_json_parsers_never_panic() {
         assert!(r1.is_ok(), "第 {iteration} 次：PackageManifest::parse panic");
 
         let r2 = std::panic::catch_unwind(|| {
-            CatalogDocument::parse(&text, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").is_ok()
+            CatalogDocument::parse(
+                &text,
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                &format!("sha256:{}", "a".repeat(64)),
+            )
+            .is_ok()
         });
         assert!(r2.is_ok(), "第 {iteration} 次：CatalogDocument::parse panic");
     }
@@ -424,7 +429,12 @@ fn fuzz_catalog_with_structured_mutations() {
 
         let text = String::from_utf8_lossy(&data).into_owned();
         let outcome = std::panic::catch_unwind(|| {
-            CatalogDocument::parse(&text, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").is_ok()
+            CatalogDocument::parse(
+                &text,
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                &format!("sha256:{}", "a".repeat(64)),
+            )
+            .is_ok()
         });
         assert!(outcome.is_ok(), "第 {iteration} 次：结构化变异导致 panic");
     }

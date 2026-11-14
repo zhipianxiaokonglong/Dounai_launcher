@@ -9,9 +9,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
-use launcher_core::m2::catalog::CatalogDocument;
+use launcher_core::m2::catalog::{entry_key, CatalogDocument, CatalogEntry};
 use launcher_core::m2::installed::{InstalledState, Instance};
 use launcher_core::m2::retention::RetentionPolicy;
+use launcher_core::m2::sources::{SourceClass, SourceEntry, SourceRegistry};
 use launcher_core::m2::trust::TrustStore;
 use launcher_core::m2::{InstanceSourceKind, M2Error};
 use launcher_core::paths::{InstallMode, Paths};
@@ -29,23 +30,44 @@ pub const BUILTIN_K1_FINGERPRINT: &str =
 /// K5 是 catalog 签名钥，必须与 K1 分离，2026-11-13 生成，私钥离线保管在仓库外。
 /// 登记文件见仓库 `keys/K5.json`，生成与轮换规程见 `docs/SIGNING.md`。
 ///
-/// catalog 的签名段不含 `pubkey`，启动器只能拿下面这枚内置公钥验签；信任判定
-/// 比对同一枚公钥算出的指纹。`set_k5_pubkey` 可在本次会话内替换公钥，
-/// 重启回落到内置值。
+/// catalog 的签名段不含 `pubkey`，启动器只能拿本地 sources.json 里该源登记的
+/// 公钥验签；这把公钥与包信任表物理隔离，不存在「会话内替换」的入口。
 pub const BUILTIN_K5_PUBKEY_B64: &str = "+56W2k6Sw60cMspmEKUESgqX1TGJLqmVozPJvI0n8G8=";
 pub const BUILTIN_K5_FINGERPRINT: &str =
     "sha256:8c1d31cf6f5ce98961be579f88fe49f8521242bcaa07483e85d0bbea1532eff5";
 
-/// 允许的出网域名后缀集，与 `m2::source` 的双源白名单一致。
-pub fn allowed_hosts() -> Vec<String> {
-    let mut hosts: Vec<String> = launcher_core::m2::source::GITHUB_HOST_SUFFIXES
-        .iter()
-        .chain(launcher_core::m2::source::SOURCEFORGE_HOST_SUFFIXES.iter())
-        .map(|s| (*s).to_string())
-        .collect();
-    hosts.sort();
-    hosts.dedup();
-    hosts
+/// 会话缓存里的一条可安装条目。键含 source_id / variant / version，
+/// 跨源同名与多版本不做隐式优选，用户点哪一行就装哪一行。
+#[derive(Debug, Clone)]
+pub struct CachedEntry {
+    pub key: String,
+    pub source_id: String,
+    pub source_name: String,
+    pub source_kind: SourceClass,
+    pub catalog_fingerprint: String,
+    pub auto_update: bool,
+    pub host_suffixes: Vec<String>,
+    pub group_ids: Vec<String>,
+    pub entry: CatalogEntry,
+    /// 条目所属的那份已验签 catalog，撤销列表与版本单调判定都从它读。
+    pub doc: CatalogDocument,
+}
+
+impl CachedEntry {
+    pub fn new(source: &SourceEntry, group_ids: Vec<String>, doc: &CatalogDocument, entry: &CatalogEntry) -> Self {
+        Self {
+            key: entry_key(&source.id, &entry.module_id, &entry.variant, &entry.version),
+            source_id: source.id.clone(),
+            source_name: source.name.clone(),
+            source_kind: source.kind,
+            catalog_fingerprint: source.catalog_fingerprint.clone(),
+            auto_update: source.auto_update,
+            host_suffixes: source.host_suffixes.clone(),
+            group_ids,
+            entry: entry.clone(),
+            doc: doc.clone(),
+        }
+    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -102,7 +124,9 @@ pub struct AppStateV2 {
     installed: Mutex<InstalledState>,
     trust: Mutex<TrustStore>,
     retention: Mutex<RetentionPolicy>,
-    catalog: Mutex<Option<CatalogDocument>>,
+    sources: Mutex<SourceRegistry>,
+    /// 本次会话内已验签的目录条目，键是 entry_key。重启即空，不落盘。
+    catalog: Mutex<BTreeMap<String, CachedEntry>>,
     /// v1 界面的启用开关是内存态：M0 冻结的 installed.json 没有 enabled 字段，
     /// M3 不新增状态文件。M4 界面重做时按实例粒度重新定义。
     disabled: Mutex<BTreeSet<String>>,
@@ -111,7 +135,6 @@ pub struct AppStateV2 {
     diagnostics: Mutex<Diagnostics>,
     /// 首次向导是否走完。界面据此决定开机是否弹向导。
     onboarding: Mutex<Onboarding>,
-    k5_pubkey_b64: Mutex<String>,
     /// 启动时补写/校正 `install.json` 的说明；`None` 表示本来就是一致的。
     /// 设置页直接展示，用户能看出「安装器没跑，是启动器兜的」。
     pub install_note: Option<String>,
@@ -153,6 +176,10 @@ impl AppStateV2 {
         let retention = load_or(&paths.state_dir().join("retention.json"), || {
             Ok(RetentionPolicy::default())
         })?;
+        let sources = load_or(&paths.state_dir().join("sources.json"), || {
+            SourceRegistry::builtin(BUILTIN_K5_PUBKEY_B64, BUILTIN_K5_FINGERPRINT)
+                .map_err(|e| e.to_string())
+        })?;
         let mut diagnostics = load_or(&paths.state_dir().join("diagnostics.json"), || {
             Ok(Diagnostics::default())
         })?;
@@ -168,12 +195,12 @@ impl AppStateV2 {
             installed: Mutex::new(installed),
             trust: Mutex::new(trust),
             retention: Mutex::new(retention),
-            catalog: Mutex::new(None),
+            sources: Mutex::new(sources),
+            catalog: Mutex::new(BTreeMap::new()),
             disabled: Mutex::new(BTreeSet::new()),
             dev_mode: AtomicBool::new(false),
             diagnostics: Mutex::new(diagnostics),
             onboarding: Mutex::new(onboarding),
-            k5_pubkey_b64: Mutex::new(BUILTIN_K5_PUBKEY_B64.to_string()),
             install_note,
             instance_locks: Mutex::new(BTreeMap::new()),
         })
@@ -324,20 +351,48 @@ impl AppStateV2 {
             .map_err(|e| e.to_string())
     }
 
-    pub fn k5_pubkey(&self) -> String {
-        lock(&self.k5_pubkey_b64).clone()
+    pub fn sources_path(&self) -> PathBuf {
+        self.paths.state_dir().join("sources.json")
     }
 
-    pub fn set_k5_pubkey(&self, pubkey_b64: String) {
-        *lock(&self.k5_pubkey_b64) = pubkey_b64;
+    pub fn sources(&self) -> SourceRegistry {
+        lock(&self.sources).clone()
     }
 
-    pub fn cached_catalog(&self) -> Option<CatalogDocument> {
+    /// 改动后一次原子落盘；闭包返回 Err 时内存回滚，不写文件。
+    pub fn mutate_sources<R>(
+        &self,
+        f: impl FnOnce(&mut SourceRegistry) -> Result<R, String>,
+    ) -> Result<R, String> {
+        let mut guard = lock(&self.sources);
+        let before = guard.clone();
+        match f(&mut guard) {
+            Ok(value) => {
+                guard.save(&self.sources_path()).map_err(|e| e.to_string())?;
+                Ok(value)
+            }
+            Err(error) => {
+                *guard = before;
+                Err(error)
+            }
+        }
+    }
+
+    /// 已启用源的域名后缀并集；禁用全部源即为空集，此时不发任何远程请求。
+    pub fn allowlist(&self) -> Vec<String> {
+        lock(&self.sources).allowlist()
+    }
+
+    pub fn cached_entries(&self) -> BTreeMap<String, CachedEntry> {
         lock(&self.catalog).clone()
     }
 
-    pub fn set_cached_catalog(&self, doc: Option<CatalogDocument>) {
-        *lock(&self.catalog) = doc;
+    pub fn cached_entry(&self, key: &str) -> Option<CachedEntry> {
+        lock(&self.catalog).get(key).cloned()
+    }
+
+    pub fn replace_cached_entries(&self, entries: BTreeMap<String, CachedEntry>) {
+        *lock(&self.catalog) = entries;
     }
 
     pub fn is_disabled(&self, module_id: &str) -> bool {

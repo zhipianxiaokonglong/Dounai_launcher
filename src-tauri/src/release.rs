@@ -221,10 +221,18 @@ pub fn sign_manifest(
 }
 
 /// 给 catalog 签名。公钥是内置 K5，包内不带 `pubkey`。
-pub fn sign_catalog_doc(catalog: &mut Value, sk: &SigningKey) -> Result<(), ReleaseError> {
+pub fn sign_catalog_doc(
+    catalog: &mut Value,
+    sk: &SigningKey,
+    key_id: &str,
+) -> Result<(), ReleaseError> {
+    // 指纹从签名钥直接算，不给调用方「填一个和公钥不一致的值」的机会。
+    let signer_fp = launcher_core::m2::fingerprint(&B64.encode(sk.verifying_key().to_bytes()))
+        .map_err(|e| ReleaseError::BadCatalog(e.to_string()))?;
     let block = json!({
         "algo": SUPPORTED_ALGO,
-        "key_id": "K5",
+        "key_id": key_id,
+        "signer_fp": signer_fp,
         "signed_at": utc_now()?,
         "value": ""
     });
@@ -326,6 +334,11 @@ pub fn check_catalog(c: &Value) -> Result<(), ReleaseError> {
     if c["modules"].as_array().is_none() || c["revoked"].as_array().is_none() {
         return Err(ReleaseError::BadCatalog(
             "modules 与 revoked 必须是数组".into(),
+        ));
+    }
+    if c.get("signature").and_then(|s| s.get("pubkey")).is_some() {
+        return Err(ReleaseError::BadCatalog(
+            "catalog 不得自述 pubkey，验签公钥只来自 sources.json".into(),
         ));
     }
     Ok(())
@@ -564,10 +577,14 @@ mod tests {
     fn catalog_signature_roundtrip() {
         let sk = key();
         let mut c = catalog();
-        sign_catalog_doc(&mut c, &sk).unwrap();
+        sign_catalog_doc(&mut c, &sk, "K5").unwrap();
         let pk = B64.encode(sk.verifying_key().to_bytes());
         assert!(verify_manifest(&c, &pk).is_ok());
         assert_eq!(c["signature"]["key_id"], json!("K5"));
+        assert_eq!(
+            c["signature"]["signer_fp"],
+            json!(launcher_core::m2::fingerprint(&pk).unwrap())
+        );
         assert!(c["signature"].get("pubkey").is_none());
         c["sequence"] = json!(99);
         assert!(verify_manifest(&c, &pk).is_err());

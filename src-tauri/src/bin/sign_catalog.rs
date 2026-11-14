@@ -1,13 +1,15 @@
-//! catalog 签名工具。签名钥是 K5，与包签名钥 K1 分离。
+//! catalog 签名工具。每个源用自己的 catalog 签名钥，官方默认 K5。
 //!
 //! 用法：
 //! ```text
-//! dounai-sign-catalog sign   --key <K5 私钥> --catalog <catalog.json> [--out <路径>]
-//! dounai-sign-catalog verify --pubkey <K5 公钥> --catalog <catalog.json>
+//! dounai-sign-catalog sign   --key <私钥> --catalog <catalog.json> [--key-id K5] [--out <路径>]
+//! dounai-sign-catalog verify --pubkey <公钥> --catalog <catalog.json>
 //! ```
 //!
-//! 工具会检查有效期不超过 7 天。K5 泄露时靠短过期窗口加带外公告与强制升级
-//! 启动器处置，catalog 的 `revoked` 不能单独撤销 K5。
+//! `sign` 会把 `signature.signer_fp` 写成该私钥对应公钥的完整指纹；
+//! 启动器拿 sources.json 里该源登记的公钥验签，并比对这个指纹。
+//! 工具会检查有效期不超过 7 天。签名钥泄露时靠短过期窗口加带外公告与
+//! 强制升级启动器处置，catalog 的 `revoked` 不能单独撤销签名钥。
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -47,12 +49,13 @@ fn print_usage() {
         "Dounai catalog 签名工具\n\
          \n\
          用法:\n\
-         \x20 dounai-sign-catalog sign   --key <K5 私钥> --catalog <catalog.json> [--out <路径>]\n\
-         \x20 dounai-sign-catalog verify --pubkey <K5 公钥> --catalog <catalog.json>\n\
+         \x20 dounai-sign-catalog sign   --key <私钥> --catalog <catalog.json> [--key-id K5] [--out <路径>]\n\
+         \x20 dounai-sign-catalog verify --pubkey <公钥> --catalog <catalog.json>\n\
          \n\
          说明:\n\
          \x20 sign 默认覆盖原文件，指定 --out 则写到新文件。\n\
-         \x20 有效期上限 7 天；K1 与 K5 不得使用同一把密钥。"
+         \x20 --key-id 只是展示用标识，社区源可写自己的；判定只认 signer_fp 与公钥指纹。\n\
+         \x20 有效期上限 7 天；catalog 签名钥与包签名钥不得使用同一把密钥。"
     );
 }
 
@@ -81,7 +84,8 @@ fn cmd_sign(args: &[String]) -> Result<(), ReleaseError> {
     let sk = load_signing_key(Path::new(&require(args, "--key")?))?;
     let mut catalog = read_json(&catalog_path)?;
     check_catalog(&catalog)?;
-    sign_catalog_doc(&mut catalog, &sk)?;
+    let key_id = flag(args, "--key-id").unwrap_or_else(|| "K5".into());
+    sign_catalog_doc(&mut catalog, &sk, &key_id)?;
 
     // 签完立即用同一把公钥验一遍，避免写出验不过的索引。
     let pk = B64.encode(sk.verifying_key().to_bytes());
@@ -94,7 +98,8 @@ fn cmd_sign(args: &[String]) -> Result<(), ReleaseError> {
     println!("  sequence      = {}", catalog["sequence"]);
     println!("  generated_at  = {}", catalog["generated_at"]);
     println!("  expires       = {}", catalog["expires"]);
-    println!("  key_id        = K5");
+    println!("  key_id        = {key_id}");
+    println!("  signer_fp     = {}", catalog["signature"]["signer_fp"]);
     println!("  pubkey        = {pk}");
     Ok(())
 }
@@ -107,9 +112,20 @@ fn cmd_verify(args: &[String]) -> Result<(), ReleaseError> {
     let catalog = read_json(&catalog_path)?;
     verify_manifest(&catalog, &pk)?;
     check_catalog(&catalog)?;
+    let fp = launcher_core::m2::fingerprint(&pk)
+        .map_err(|e| ReleaseError::BadCatalog(e.to_string()))?;
+    let signer_fp = catalog["signature"]["signer_fp"]
+        .as_str()
+        .ok_or_else(|| ReleaseError::BadCatalog("catalog 缺少 signer_fp".into()))?;
+    if signer_fp != fp {
+        return Err(ReleaseError::BadCatalog(format!(
+            "signer_fp 与公钥指纹不符：文档 {signer_fp}，公钥 {fp}"
+        )));
+    }
     println!("验签通过：{catalog_path}");
-    println!("  sequence = {}", catalog["sequence"]);
-    println!("  expires  = {}", catalog["expires"]);
+    println!("  sequence  = {}", catalog["sequence"]);
+    println!("  expires   = {}", catalog["expires"]);
+    println!("  signer_fp = {fp}");
     Ok(())
 }
 

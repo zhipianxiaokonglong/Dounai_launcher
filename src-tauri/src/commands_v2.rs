@@ -6,7 +6,7 @@
 //! 边界：状态文件只由 `AppStateV2` 写；进程只由 `Supervisor` 管；
 //! 验签、目录确认、端口分配与启动编排分别由 core / `lifecycle_ops` 负责。
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -20,14 +20,20 @@ use launcher_core::lifecycle::{
 };
 use launcher_core::admin_host::{AdminHost, Bounds, MountRequest};
 use launcher_core::m2::adapters::RemoteCatalogAdapter;
-use launcher_core::m2::catalog::{select_catalog, CatalogState};
+use launcher_core::m2::catalog::{
+    check_update_allowed, select_catalog_entry, version_key, CatalogEntry,
+};
 use launcher_core::m2::installed::Instance;
 use launcher_core::m2::local::{observe_source, validate_local_dir};
 use launcher_core::m2::manifest::PackageManifest;
 use launcher_core::m2::package::{install_package, verify_zip, ZipExpectation};
-use launcher_core::m2::source::{validate_download_url, SourceAdapter};
+use launcher_core::m2::source::{validate_download_url, SourceAdapter, SourceError};
+use launcher_core::m2::sources::{
+    derive_host_suffixes, valid_id, validate_suffix, SourceClass, SourceEntry, SourceRegistry,
+    OFFICIAL_GROUP,
+};
 use launcher_core::m2::trust::{classify, ClassifyContext};
-use launcher_core::m2::{Category, InstanceSourceKind, Verdict, MAX_UNPACKED_BYTES};
+use launcher_core::m2::{semver_cmp, Category, InstanceSourceKind, Verdict, MAX_UNPACKED_BYTES};
 use launcher_core::manifest::{ModuleManifestV2, Role};
 
 use crate::lifecycle_ops::{
@@ -35,8 +41,8 @@ use crate::lifecycle_ops::{
     MANIFEST_FILE,
 };
 use crate::lifecycle_runtime::Supervisor;
-use crate::m2_http::{ReqwestCatalogFetcher, ALL_HOST_SUFFIXES};
-use crate::state_v2::{bare_sha256, prefixed_sha256, AppStateV2};
+use crate::m2_http::ReqwestCatalogFetcher;
+use crate::state_v2::{bare_sha256, prefixed_sha256, AppStateV2, CachedEntry};
 
 /// 启动前外部服务探测预算：只发一次请求，超时就走正常启动路径。
 const PRESTART_TIMEOUT_MS: u64 = 600;
@@ -100,7 +106,84 @@ pub enum TrustVerdictView {
 }
 
 #[derive(Debug, Serialize)]
+pub struct SourceStatusView {
+    pub id: String,
+    pub name: String,
+    /// ok / unavailable / invalid。
+    pub state: String,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SourceView {
+    pub id: String,
+    pub name: String,
+    pub kind: SourceClass,
+    pub base_url: String,
+    pub catalog_fingerprint: String,
+    pub host_suffixes: Vec<String>,
+    pub enabled: bool,
+    pub deletable: bool,
+    pub auto_update: bool,
+    pub revoked: bool,
+    pub sequence: Option<u64>,
+    pub expires: Option<String>,
+}
+
+impl From<&SourceEntry> for SourceView {
+    fn from(source: &SourceEntry) -> Self {
+        Self {
+            id: source.id.clone(),
+            name: source.name.clone(),
+            kind: source.kind,
+            base_url: source.base_url.clone(),
+            catalog_fingerprint: source.catalog_fingerprint.clone(),
+            host_suffixes: source.host_suffixes.clone(),
+            enabled: source.enabled,
+            deletable: source.deletable,
+            auto_update: source.auto_update,
+            revoked: source.is_revoked(),
+            sequence: source.sequence,
+            expires: source.expires.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct SourcesView {
+    pub sources: Vec<SourceView>,
+    pub allowlist: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SourcePreview {
+    pub id: String,
+    pub name: String,
+    pub base_url: String,
+    pub catalog_pubkey: String,
+    /// 完整指纹，界面必须原样展示后才允许确认。
+    pub catalog_fingerprint: String,
+    pub host_suffixes: Vec<String>,
+    /// true 表示后缀由 base_url 派生、用户尚未改过。
+    pub derived: bool,
+    pub note: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RevokeSourceResult {
+    pub sources: SourcesView,
+    /// 从该源安装、现在标「发布者已不再受信任」的实例 ID。
+    pub affected: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct CatalogEntryView {
+    /// 会话缓存主键，安装时原样回传，界面不做隐式优选。
+    pub entry_key: String,
+    pub source_id: String,
+    pub source_name: String,
+    pub source_kind: SourceClass,
+    pub catalog_fingerprint: String,
     pub module_id: String,
     pub variant: String,
     pub name: String,
@@ -109,15 +192,28 @@ pub struct CatalogEntryView {
     /// 目录声明的整包哈希（`sha256:` 前缀），界面原样展示。
     pub sha256: String,
     pub size: u64,
-    /// 第一条 source 的地址，仅供排障阅读；安装时由 Rust 重新逐源校验。
+    /// 本源组内的下载地址，仅供排障阅读；安装时由 Rust 重新校验。
     pub download_url: String,
     pub signature_required: bool,
+    pub publisher_fp: String,
+    pub min_launcher: Option<String>,
+    pub min_version: Option<String>,
+    pub expires: String,
+    pub revoked: bool,
+    /// available / installed / upgrade / downgrade / incompatible。
+    pub installed_state: String,
+    pub auto_update: bool,
+    pub source_revoked: bool,
+    /// 版本回退 / 不兼容等判定理由，界面原样展示。
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct CatalogResponse {
+    /// remote / partial / cache / unavailable。
     pub source: String,
     pub entries: Vec<CatalogEntryView>,
+    pub sources: Vec<SourceStatusView>,
     pub allowlist: Vec<String>,
     pub reason: Option<String>,
 }
@@ -270,6 +366,34 @@ pub struct KeyRequest {
     pub fingerprint: String,
     #[serde(default)]
     pub label: Option<String>,
+}
+
+/// 添加源第一步：只算指纹与派生白名单，绝不落盘。
+#[derive(Debug, Deserialize)]
+pub struct InspectSourceRequest {
+    pub base_url: String,
+    pub catalog_pubkey: String,
+    #[serde(default)]
+    pub host_suffixes: Option<Vec<String>>,
+}
+
+/// 添加源第二步。`confirm=false` 一律拒绝写入，界面必须先展示完整指纹。
+#[derive(Debug, Deserialize)]
+pub struct AddSourceRequest {
+    pub id: String,
+    pub name: String,
+    pub base_url: String,
+    pub catalog_pubkey: String,
+    pub host_suffixes: Vec<String>,
+    #[serde(default)]
+    pub confirm: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SourceIdRequest {
+    pub id: String,
+    #[serde(default)]
+    pub enabled: Option<bool>,
 }
 
 /* ------------------------------------------------------------------ */
@@ -1057,6 +1181,22 @@ fn runtime_manifest(raw: &serde_json::Value) -> Result<ModuleManifestV2, String>
 ///
 /// `module_id_in_request` 与 `version_in_request` 是「调用方以为的包内容」，
 /// 用于挡住请求与包内清单不一致的情况；本地导入没有这两个声明，传 None。
+/// 在线安装时随包一起落盘的来源信息。
+#[derive(Debug, Clone)]
+pub struct InstallSource {
+    pub source_id: String,
+    pub source_kind: SourceClass,
+    pub auto_update: bool,
+}
+
+/// 在线安装时随包一起落盘的来源与目录条目。本地 zip 导入传 None。
+/// 收成一个参数，是为了不把「这次安装有没有来源」藏进一长串位置参数里。
+#[derive(Debug, Clone, Default)]
+pub struct CatalogContext {
+    pub source: Option<InstallSource>,
+    pub entry: Option<CatalogEntry>,
+}
+
 fn commit_install(
     state: &AppStateV2,
     bytes: &[u8],
@@ -1064,6 +1204,7 @@ fn commit_install(
     module_id_in_request: Option<&str>,
     version_in_request: Option<&str>,
     confirmed: bool,
+    catalog: Option<CatalogContext>,
 ) -> Result<InstallResponse, String> {
     if expected_sha256.trim().is_empty() {
         return Err("拒绝安装：缺少 expected_sha256".into());
@@ -1095,13 +1236,18 @@ fn commit_install(
     // 验签分类只看包内 manifest，绝不采信请求里传的 manifest 对象。
     // catalog entry 与历史指纹先取成 owned，再进只读闭包，避免悬垂引用。
     let module_id = verified.manifest.module_id.clone();
-    let cached_entry = state
-        .cached_catalog()
-        .and_then(|doc| doc.entry(&module_id, &verified.manifest.variant).cloned());
-    let previous_fp = state
-        .instances_for_module(&module_id)
-        .first()
-        .and_then(|i| i.publisher_fp.clone());
+    let cached_entry = catalog.as_ref().and_then(|c| c.entry.clone());
+    let source = catalog.as_ref().and_then(|c| c.source.as_ref());
+    let previous_fp = state.with_installed(|s| {
+        s.instances
+            .values()
+            .find(|i| {
+                i.module_id == module_id
+                    && i.variant == verified.manifest.variant
+                    && i.source_id == source.map(|src| src.source_id.clone())
+            })
+            .and_then(|i| i.publisher_fp.clone())
+    });
     let classification = state.with_trust(|store| {
         classify(
             store,
@@ -1128,10 +1274,18 @@ fn commit_install(
         ));
     }
 
-    let instance_id = format!(
-        "{}@{}",
-        verified.manifest.module_id, verified.manifest.variant
-    );
+    // 社区源的实例 id 带来源后缀，跨源同名才真的并存；官方源沿用 M1 的
+    // `module_id@variant`，老实例与 active 槽都不变。
+    let instance_id = match source {
+        Some(src) if src.source_kind == SourceClass::Community => format!(
+            "{}@{}@{}",
+            verified.manifest.module_id, verified.manifest.variant, src.source_id
+        ),
+        _ => format!(
+            "{}@{}",
+            verified.manifest.module_id, verified.manifest.variant
+        ),
+    };
     launcher_core::paths::validate_instance_id(&instance_id)
         .map_err(|e| format!("instance_id 不合法：{e}"))?;
     let dir = package_dir(&state.paths, &instance_id);
@@ -1154,9 +1308,12 @@ fn commit_install(
         installed_at: now,
         source_kind: InstanceSourceKind::Zip,
         source_path: None,
+        source_id: source.map(|s| s.source_id.clone()),
         git: None,
         pinned: false,
-        auto_update: classification.verdict.can_auto_update(),
+        // 社区源永远 false；A 类官方包沿用四级判定结果。
+        auto_update: classification.verdict.can_auto_update()
+            && source.map(|s| s.auto_update).unwrap_or(true),
         zip_sha256: Some(verified.sha256.clone()),
         expected_signer_fp: cached_entry
             .as_ref()
@@ -1302,10 +1459,10 @@ fn inspect_bytes(
         max_unpacked: MAX_UNPACKED_BYTES,
     };
     let verified = verify_zip(bytes, &expectation).map_err(|e| e.to_string())?;
-    let cached_entry = state.cached_catalog().and_then(|doc| {
-        doc.entry(&verified.manifest.module_id, &verified.manifest.variant)
-            .cloned()
-    });
+    let cached_entry = state.cached_entries().values().find(|cached| {
+        cached.entry.module_id == verified.manifest.module_id
+            && cached.entry.variant == verified.manifest.variant
+    }).map(|cached| cached.entry.clone());
     let previous_fp = state
         .instances_for_module(&verified.manifest.module_id)
         .first()
@@ -1401,6 +1558,7 @@ pub async fn install_local_package(
         None,
         None,
         confirm.unwrap_or(false),
+        None,
     )
 }
 
@@ -1552,126 +1710,334 @@ fn prepare_instance_env_impl(
 
 /// 内置分发根：SourceForge 项目 `dounai-releases` 的下载目录。
 ///
-/// 目录与包都从这里取。SF 的下载域一律 302 到镜像主机，跟随与逐跳域名校验
-/// 在 `m2_http::ReqwestCatalogFetcher` 里完成。
-pub const BUILTIN_CATALOG_BASE: &str =
-    "https://downloads.sourceforge.net/project/dounai-releases";
-
-/// 第二个源：GitHub 仓库的 raw 目录。没有配就是不参与，不算故障。
-const BUILTIN_CATALOG_MIRROR: &str =
-    "https://raw.githubusercontent.com/Tonyjh07/dounai-releases/main";
-
-/// 按 URL 主机挑白名单：同一套适配器代码要同时服务两个源。
-fn catalog_adapter<'a>(
-    id: &str,
-    base_url: &str,
-    priority: u32,
-    k5: &str,
+/// 用一条源表记录装配远程适配器：公钥、指纹与白名单全来自本地表。
+/// 没有「任意 URL + 内置 K5」这条通道，也没有会话级换源入口。
+fn source_adapter<'a>(
+    source: &SourceEntry,
+    registry: &SourceRegistry,
     http: &'a dyn launcher_core::m2::adapters::HttpFetcher,
 ) -> RemoteCatalogAdapter<'a> {
-    let host = launcher_core::m2::source::url_host(base_url).unwrap_or_default();
-    if launcher_core::m2::source::host_allowed(
-        host,
-        launcher_core::m2::source::SOURCEFORGE_HOST_SUFFIXES,
-    ) {
-        RemoteCatalogAdapter::sourceforge(id, base_url, priority, k5, http)
-    } else {
-        RemoteCatalogAdapter::github(id, base_url, priority, k5, http)
+    RemoteCatalogAdapter::from_source(source, registry.group_ids(&source.id), http)
+}
+
+fn sources_view(registry: &SourceRegistry) -> SourcesView {
+    SourcesView {
+        sources: registry.sources.iter().map(SourceView::from).collect(),
+        allowlist: registry.allowlist(),
     }
 }
 
-/// 刷新模块目录。
-///
-/// `catalog_url` 留空即用内置源；设置页想临时换源时才传地址。
-/// 第二源只在显式配置（内置镜像默认参与）时加入，单源裁决照样成立。
-#[tauri::command]
-pub fn refresh_catalog(state: State<'_, AppStateV2>, catalog_url: String) -> CatalogResponse {
-    let allowlist = crate::state_v2::allowed_hosts();
-    let fetcher = match ReqwestCatalogFetcher::new() {
-        Ok(client) => client,
-        Err(error) => return unavailable(&allowlist, error),
-    };
-    let k5 = state.k5_pubkey();
-
-    let primary = {
-        let typed = catalog_url.trim();
-        if typed.is_empty() {
-            std::env::var("DOUNAI_CATALOG_URL")
-                .ok()
-                .filter(|s| !s.trim().is_empty())
-                .unwrap_or_else(|| BUILTIN_CATALOG_BASE.to_string())
-        } else {
-            typed.to_string()
-        }
-    };
-    let mirror = std::env::var("DOUNAI_CATALOG_MIRROR")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| BUILTIN_CATALOG_MIRROR.to_string());
-
-    let mut candidates: Vec<(u32, Result<_, _>)> = Vec::new();
-    match catalog_adapter("primary", &primary, 1, &k5, &fetcher).fetch_catalog() {
-        Ok(Some(doc)) => candidates.push((1, Ok(doc))),
-        Ok(None) => {}
-        Err(error) => candidates.push((1, Err(error))),
-    }
-    if !mirror.is_empty() && mirror != primary {
-        match catalog_adapter("mirror", &mirror, 2, &k5, &fetcher).fetch_catalog() {
-            Ok(Some(doc)) => candidates.push((2, Ok(doc))),
-            Ok(None) => {}
-            Err(error) => candidates.push((2, Err(error))),
-        }
-    }
-
-    let previous = state.with_installed(|s| s.catalog_state.clone());
-    let now = AppStateV2::now();
-    match select_catalog(&candidates, &previous, &now) {
-        Ok(doc) => {
-            let entries = catalog_entries(&doc);
-            let _ = state
-                .mutate_installed(|s| s.catalog_state.observe(&doc).map_err(|e| e.to_string()));
-            state.set_cached_catalog(Some(doc));
-            CatalogResponse {
-                source: "remote".into(),
-                entries,
-                allowlist,
-                reason: None,
-            }
-        }
-        Err(error) => {
-            // 只允许回退本次会话内已验签过的 doc；不读磁盘上的旧缓存，
-            // 避免把过期/序号倒退的 catalog 当成功结果展示。
-            if let Some(doc) = state.cached_catalog() {
-                CatalogResponse {
-                    source: "cache".into(),
-                    entries: catalog_entries(&doc),
-                    allowlist,
-                    reason: Some(error.reason().to_string()),
-                }
-            } else {
-                unavailable(&allowlist, error.reason().to_string())
-            }
-        }
+fn source_status(source: &SourceEntry, state: &str, reason: Option<String>) -> SourceStatusView {
+    SourceStatusView {
+        id: source.id.clone(),
+        name: source.name.clone(),
+        state: state.to_string(),
+        reason,
     }
 }
 
-fn catalog_entries(doc: &launcher_core::m2::catalog::CatalogDocument) -> Vec<CatalogEntryView> {
-    doc.modules
+/// 把一份已验签的 catalog 展开成会话缓存条目，键含来源、变体与版本。
+fn collect_entries(
+    registry: &SourceRegistry,
+    source: &SourceEntry,
+    doc: &launcher_core::m2::catalog::CatalogDocument,
+    out: &mut BTreeMap<String, CachedEntry>,
+) {
+    let group_ids = registry.group_ids(&source.id);
+    for entry in &doc.modules {
+        let cached = CachedEntry::new(source, group_ids.clone(), doc, entry);
+        out.insert(cached.key.clone(), cached);
+    }
+}
+
+/// 版本与兼容性判定。`installed_version` 为 None 表示首次安装，
+/// 不检查只针对更新链路的 `min_version`，但仍查版本回退与撤销列表。
+fn entry_installability(
+    cached: &CachedEntry,
+    installed_version: Option<&str>,
+    catalog_state: &launcher_core::m2::catalog::CatalogState,
+) -> Result<String, String> {
+    let entry = &cached.entry;
+    let key = version_key(&entry.publisher_fp, &entry.module_id, &entry.variant);
+    if let Some(seen) = catalog_state.last_seen_version.get(&key) {
+        if semver_cmp(&entry.version, seen).map_err(|e| e.to_string())? == std::cmp::Ordering::Less {
+            return Ok("downgrade".into());
+        }
+    }
+    if let Some(min_launcher) = &entry.min_launcher {
+        let current = env!("CARGO_PKG_VERSION");
+        if semver_cmp(current, min_launcher).map_err(|e| e.to_string())? == std::cmp::Ordering::Less {
+            return Ok("incompatible".into());
+        }
+    }
+    if let Some(local) = installed_version {
+        check_update_allowed(&cached.doc, catalog_state, entry, local)
+            .map_err(|e| e.reason().to_string())?;
+        return Ok(match semver_cmp(&entry.version, local).map_err(|e| e.to_string())? {
+            std::cmp::Ordering::Greater => "upgrade".into(),
+            std::cmp::Ordering::Equal => "installed".into(),
+            std::cmp::Ordering::Less => "downgrade".into(),
+        });
+    }
+    let revoked = cached
+        .doc
+        .revoked
         .iter()
-        .map(|entry| CatalogEntryView {
-            module_id: entry.module_id.clone(),
-            variant: entry.variant.clone(),
-            name: entry.name.clone(),
-            version: entry.version.clone(),
-            role: entry.role,
-            sha256: entry.sha256.clone(),
-            size: entry.size,
-            download_url: entry
+        .any(|r| r.id == entry.version || r.id == entry.sha256)
+        || entry
+            .revoked
+            .iter()
+            .any(|id| id == &entry.version || id == &entry.sha256);
+    Ok(if revoked { "downgrade" } else { "available" }.into())
+}
+
+/// 按 sources.json 里已启用的源刷新目录。
+///
+/// 官方主源与镜像是同一份 catalog 的两个副本，走二选一裁决；不同发布者的
+/// 社区源各自独立验签、独立记水位，成功条目并列合并。任何一个源失败都不
+/// 影响其它源，也不提供「仍然继续 / 跳过验签」。
+#[tauri::command]
+pub fn refresh_catalog(state: State<'_, AppStateV2>) -> CatalogResponse {
+    let registry = state.sources();
+    let allowlist = registry.allowlist();
+    let enabled: Vec<SourceEntry> = registry.enabled().into_iter().cloned().collect();
+    if enabled.is_empty() {
+        return CatalogResponse {
+            source: "unavailable".into(),
+            entries: Vec::new(),
+            sources: registry
                 .sources
-                .first()
+                .iter()
+                .map(|s| source_status(s, "disabled", None))
+                .collect(),
+            allowlist,
+            reason: Some("没有启用的下载源，未发出任何远程请求".into()),
+        };
+    }
+
+    let now = AppStateV2::now();
+    let mut statuses: Vec<SourceStatusView> = Vec::new();
+    let mut cache: BTreeMap<String, CachedEntry> = BTreeMap::new();
+    let mut observed: Vec<launcher_core::m2::catalog::CatalogDocument> = Vec::new();
+    let mut registry_next = registry.clone();
+
+    // 官方组：二选一，胜出副本决定展示用的来源名，整组水位一起推进。
+    let official: Vec<&SourceEntry> = enabled
+        .iter()
+        .filter(|s| s.kind == SourceClass::Official && s.group_id() == OFFICIAL_GROUP)
+        .collect();
+    if !official.is_empty() {
+        let previous = registry.watermark(OFFICIAL_GROUP);
+        let mut candidates: Vec<(u32, Result<_, SourceError>)> = Vec::new();
+        for source in &official {
+            match ReqwestCatalogFetcher::new(source.host_suffixes.clone()) {
+                Ok(fetcher) => {
+                    let result = match source_adapter(source, &registry, &fetcher).fetch_catalog() {
+                        Ok(Some(doc)) => Ok(doc),
+                        Ok(None) => Err(SourceError::Unavailable {
+                            source_id: source.id.clone(),
+                            reason: "该源没有返回 catalog".into(),
+                        }),
+                        Err(error) => Err(error),
+                    };
+                    candidates.push((source.priority.unwrap_or(1), result));
+                }
+                Err(error) => candidates.push((
+                    source.priority.unwrap_or(1),
+                    Err(SourceError::Unavailable {
+                        source_id: source.id.clone(),
+                        reason: error,
+                    }),
+                )),
+            }
+        }
+        match select_catalog_entry(&candidates, &previous, &now) {
+            Ok((priority, doc)) => {
+                let winner = official
+                    .iter()
+                    .find(|s| s.priority.unwrap_or(1) == priority)
+                    .copied()
+                    .unwrap_or(official[0]);
+                collect_entries(&registry, winner, &doc, &mut cache);
+                registry_next.advance(OFFICIAL_GROUP, doc.sequence, &doc.expires);
+                observed.push(doc);
+                for source in &official {
+                    statuses.push(source_status(source, "ok", None));
+                }
+            }
+            Err(error) => {
+                for source in &official {
+                    statuses.push(source_status(
+                        source,
+                        "invalid",
+                        Some(error.reason().to_string()),
+                    ));
+                }
+            }
+        }
+    }
+
+    // 社区源：每个发布者各自验签、各自裁决，不用官方组的序号压自己。
+    for source in enabled.iter().filter(|s| s.kind != SourceClass::Official) {
+        let fetcher = match ReqwestCatalogFetcher::new(source.host_suffixes.clone()) {
+            Ok(client) => client,
+            Err(error) => {
+                statuses.push(source_status(source, "unavailable", Some(error)));
+                continue;
+            }
+        };
+        let fetched = source_adapter(source, &registry, &fetcher).fetch_catalog();
+        match fetched {
+            Ok(Some(doc)) => match doc.validate(&registry.watermark(&source.id), &now) {
+                Ok(()) => {
+                    collect_entries(&registry, source, &doc, &mut cache);
+                    registry_next.advance(&source.id, doc.sequence, &doc.expires);
+                    observed.push(doc);
+                    statuses.push(source_status(source, "ok", None));
+                }
+                Err(error) => statuses.push(source_status(
+                    source,
+                    "invalid",
+                    Some(error.reason().to_string()),
+                )),
+            },
+            Ok(None) => statuses.push(source_status(
+                source,
+                "invalid",
+                Some("该源没有返回 catalog".into()),
+            )),
+            Err(error) => statuses.push(source_status(
+                source,
+                if matches!(error, SourceError::Unavailable { .. }) {
+                    "unavailable"
+                } else {
+                    "invalid"
+                },
+                Some(error.reason().to_string()),
+            )),
+        }
+    }
+
+    let failed = !statuses.is_empty() && statuses.iter().all(|s| s.state != "ok");
+    if !failed {
+        let next = registry_next.clone();
+        if let Err(error) = state.mutate_sources(|current| {
+            *current = next;
+            Ok(())
+        }) {
+            return unavailable(&allowlist, format!("保存源水位失败：{error}"));
+        }
+        if let Err(error) = state.mutate_installed(|installed| {
+            for doc in &observed {
+                installed
+                    .catalog_state
+                    .observe(doc)
+                    .map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        }) {
+            return unavailable(&allowlist, format!("保存版本水位失败：{error}"));
+        }
+        state.replace_cached_entries(cache.clone());
+        let partial = statuses.iter().any(|s| s.state != "ok");
+        return CatalogResponse {
+            source: if partial { "partial" } else { "remote" }.into(),
+            entries: catalog_entries(&state, &cache),
+            sources: statuses,
+            allowlist,
+            reason: partial.then(|| "部分源不可用，只展示已验签来源的条目".into()),
+        };
+    }
+
+    // 只允许回退本次会话内已验签过的条目；不读磁盘上的旧 catalog。
+    let cached = state.cached_entries();
+    if cached.is_empty() {
+        unavailable(
+            &allowlist,
+            statuses
+                .iter()
+                .filter_map(|s| s.reason.as_ref().map(|r| format!("{}：{r}", s.name)))
+                .collect::<Vec<_>>()
+                .join("；"),
+        )
+    } else {
+        CatalogResponse {
+            source: "cache".into(),
+            entries: catalog_entries(&state, &cached),
+            sources: statuses,
+            allowlist,
+            reason: Some("在线源不可用，以下是本次会话内已验签的目录".into()),
+        }
+    }
+}
+
+/// 缓存条目 → 界面行。安装目标由用户点选的那一行决定，不做隐式优选。
+fn catalog_entries(
+    state: &AppStateV2,
+    cache: &BTreeMap<String, CachedEntry>,
+) -> Vec<CatalogEntryView> {
+    let installed = state.with_installed(|s| s.clone());
+    let registry = state.sources();
+    cache
+        .values()
+        .map(|cached| {
+            let entry = &cached.entry;
+            let same_source = installed.instances.values().find(|i| {
+                i.module_id == entry.module_id
+                    && i.variant == entry.variant
+                    && (i.source_id.as_deref() == Some(cached.source_id.as_str())
+                        || (cached.source_kind == SourceClass::Official && i.source_id.is_none()))
+            });
+            let (installed_state, note) = match entry_installability(
+                cached,
+                same_source.map(|i| i.version.as_str()),
+                &installed.catalog_state,
+            ) {
+                Ok(kind) => (kind, None),
+                Err(reason) => ("incompatible".into(), Some(reason)),
+            };
+            let revoked = cached
+                .doc
+                .revoked
+                .iter()
+                .any(|r| r.id == entry.version || r.id == entry.sha256)
+                || entry
+                    .revoked
+                    .iter()
+                    .any(|id| id == &entry.version || id == &entry.sha256);
+            let download_url = entry
+                .sources
+                .iter()
+                .find(|s| cached.group_ids.contains(&s.source_id))
                 .map(|s| s.url.clone())
-                .unwrap_or_default(),
-            signature_required: entry.signature_required,
+                .unwrap_or_default();
+            CatalogEntryView {
+                entry_key: cached.key.clone(),
+                source_id: cached.source_id.clone(),
+                source_name: cached.source_name.clone(),
+                source_kind: cached.source_kind,
+                catalog_fingerprint: cached.catalog_fingerprint.clone(),
+                module_id: entry.module_id.clone(),
+                variant: entry.variant.clone(),
+                name: entry.name.clone(),
+                version: entry.version.clone(),
+                role: entry.role,
+                sha256: entry.sha256.clone(),
+                size: entry.size,
+                download_url,
+                signature_required: entry.signature_required,
+                publisher_fp: entry.publisher_fp.clone(),
+                min_launcher: entry.min_launcher.clone(),
+                min_version: entry.min_version.clone(),
+                expires: entry.expires.clone(),
+                revoked,
+                installed_state,
+                auto_update: cached.auto_update,
+                source_revoked: registry
+                    .find(&cached.source_id)
+                    .is_some_and(SourceEntry::is_revoked),
+                note,
+            }
         })
         .collect()
 }
@@ -1680,20 +2046,166 @@ fn unavailable(allowlist: &[String], reason: String) -> CatalogResponse {
     CatalogResponse {
         source: "unavailable".into(),
         entries: Vec::new(),
+        sources: Vec::new(),
         allowlist: allowlist.to_vec(),
         reason: Some(reason),
     }
 }
 
+/// 源与公钥的只读快照。界面据此渲染「下载」页的来源列表。
 #[tauri::command]
-pub fn set_k5_pubkey(pubkey_b64: String, state: State<'_, AppStateV2>) -> Result<KeyInfo, String> {
-    let fp = launcher_core::m2::fingerprint(&pubkey_b64).map_err(|e| e.to_string())?;
-    state.set_k5_pubkey(pubkey_b64);
-    Ok(KeyInfo {
-        fingerprint: fp,
-        accepted: true,
-        note: "K5 公钥仅本次会话有效，重启回落到内置公钥。".into(),
+pub fn list_sources(state: State<'_, AppStateV2>) -> SourcesView {
+    sources_view(&state.sources())
+}
+
+/// 添加源第一步：算完整指纹、派生白名单。此命令不写任何文件。
+#[tauri::command]
+pub fn inspect_source(request: InspectSourceRequest) -> Result<SourcePreview, String> {
+    let base_url = request.base_url.trim().trim_end_matches('/').to_string();
+    let pubkey = request.catalog_pubkey.trim().to_string();
+    let fingerprint = launcher_core::m2::fingerprint(&pubkey).map_err(|e| e.to_string())?;
+    let (host_suffixes, derived) = match request.host_suffixes {
+        Some(list) if !list.is_empty() => (list, false),
+        _ => (derive_host_suffixes(&base_url).map_err(|e| e.to_string())?, true),
+    };
+    for suffix in &host_suffixes {
+        validate_suffix(suffix)?;
+    }
+    let host = launcher_core::m2::source::url_host(&base_url)
+        .ok_or_else(|| "源地址必须是 https".to_string())?;
+    let suffixes: Vec<&str> = host_suffixes.iter().map(String::as_str).collect();
+    if !launcher_core::m2::source::host_allowed(host, &suffixes) {
+        return Err(format!("源地址主机 {host} 不在你确认的白名单内"));
+    }
+    let id = host
+        .split('.')
+        .rev()
+        .nth(1)
+        .unwrap_or(host)
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_lowercase() || c.is_ascii_digit() { c } else { '-' })
+        .collect::<String>();
+    Ok(SourcePreview {
+        name: host.to_string(),
+        id,
+        base_url,
+        catalog_pubkey: pubkey,
+        catalog_fingerprint: fingerprint,
+        host_suffixes,
+        derived,
+        note: "下一步会展示完整指纹并请你确认；确认前不会写入 sources.json，也不会写 trust.json。".into(),
     })
+}
+
+/// 添加源第二步。只有 confirm=true 才落盘，且只写 sources.json。
+#[tauri::command]
+pub fn add_source(
+    state: State<'_, AppStateV2>,
+    request: AddSourceRequest,
+) -> Result<SourcesView, String> {
+    if !request.confirm {
+        return Err("添加源必须先看完整指纹并显式确认；未写入任何文件".into());
+    }
+    if !valid_id(&request.id) {
+        return Err("源 id 只能用 1-32 位小写字母、数字与连字符".into());
+    }
+    let base_url = request.base_url.trim().trim_end_matches('/').to_string();
+    let pubkey = request.catalog_pubkey.trim().to_string();
+    let fingerprint = launcher_core::m2::fingerprint(&pubkey).map_err(|e| e.to_string())?;
+    for suffix in &request.host_suffixes {
+        validate_suffix(suffix)?;
+    }
+    let entry = SourceEntry {
+        id: request.id,
+        name: request.name,
+        kind: SourceClass::Community,
+        base_url,
+        catalog_pubkey: pubkey,
+        catalog_fingerprint: fingerprint,
+        host_suffixes: request.host_suffixes,
+        enabled: true,
+        deletable: true,
+        // 拍板 3：社区源只提示有新版，不自动装。
+        auto_update: false,
+        group: None,
+        sequence: None,
+        expires: None,
+        priority: Some(10),
+        added_at: Some(AppStateV2::now()),
+        revoked_at: None,
+        note: None,
+    };
+    state.mutate_sources(|registry| {
+        registry.add(entry).map_err(|e| e.to_string())?;
+        Ok(())
+    })?;
+    Ok(sources_view(&state.sources()))
+}
+
+/// 启用 / 禁用源。内置官方源可禁用不可删除；已撤销的源不能重新启用。
+#[tauri::command]
+pub fn set_source_enabled(
+    state: State<'_, AppStateV2>,
+    request: SourceIdRequest,
+) -> Result<SourcesView, String> {
+    let enabled = request
+        .enabled
+        .ok_or_else(|| "缺少 enabled 参数".to_string())?;
+    state.mutate_sources(|registry| {
+        registry
+            .set_enabled(&request.id, enabled)
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    })?;
+    Ok(sources_view(&state.sources()))
+}
+
+/// 撤销 catalog 公钥：停用该源，已装实例不卸载、不自动更新。
+/// 全程不写 trust.json——包的四级判定根本读不到这把钥匙。
+#[tauri::command]
+pub fn revoke_source(
+    state: State<'_, AppStateV2>,
+    request: SourceIdRequest,
+) -> Result<RevokeSourceResult, String> {
+    let affected = state.with_installed(|installed| {
+        installed
+            .instances
+            .values()
+            .filter(|i| i.source_id.as_deref() == Some(request.id.as_str()))
+            .map(|i| i.instance_id.clone())
+            .collect::<Vec<_>>()
+    });
+    state.mutate_sources(|registry| {
+        registry
+            .revoke(&request.id, &AppStateV2::now())
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    })?;
+    // 撤销后该源的条目不能继续出现在可安装列表里。
+    let mut cache = state.cached_entries();
+    cache.retain(|_, cached| cached.source_id != request.id);
+    state.replace_cached_entries(cache);
+    Ok(RevokeSourceResult {
+        sources: sources_view(&state.sources()),
+        affected,
+    })
+}
+
+/// 删除社区源。内置源一律拒绝。
+#[tauri::command]
+pub fn remove_source(
+    state: State<'_, AppStateV2>,
+    request: SourceIdRequest,
+) -> Result<SourcesView, String> {
+    state.mutate_sources(|registry| {
+        registry.remove(&request.id).map_err(|e| e.to_string())?;
+        Ok(())
+    })?;
+    let mut cache = state.cached_entries();
+    cache.retain(|_, cached| cached.source_id != request.id);
+    state.replace_cached_entries(cache);
+    Ok(sources_view(&state.sources()))
 }
 
 #[tauri::command]
@@ -1929,6 +2441,7 @@ fn add_local_dir(state: &AppStateV2, raw_path: &str) -> Result<ModuleView, Strin
         installed_at: now,
         source_kind: InstanceSourceKind::Dir,
         source_path: Some(canonical.to_string_lossy().into_owned()),
+        source_id: None,
         git: Some(observed.to_git_observation()),
         pinned: true,
         auto_update: false,
@@ -2350,86 +2863,139 @@ pub async fn admin_host_visible(
         .map_err(|e| e.to_string())
 }
 
-/// 下载目录中缓存包的文件名。模块 id 用 `_` 替掉 `/`，`is_safe_filename` 兜底。
-fn download_file_name(module_id: &str, variant: &str) -> String {
-    format!("{}@{variant}.zip", module_id.replace('/', "_"))
+/// 下载目录中缓存包的文件名。带 source_id 前缀，跨源同名不会互相覆盖。
+fn download_file_name(cached: &CachedEntry) -> String {
+    format!(
+        "{}@{}_{}.zip",
+        cached.source_id,
+        cached.entry.module_id.replace('/', "_"),
+        cached.entry.variant
+    )
 }
 
-/// 在线安装：从本次会话验签过的 catalog 里挑一个条目，下载后走同一条安装链路。
+/// 在线安装：从本次会话验签过的目录里按 entry_key 精确定位一行。
 ///
 /// 为什么不给前端「先下载再安装」两步：两步之间包可能被换掉，而安装侧的
 /// `expected_sha256` 是前端从列表里读的字符串，等于把一个信任决定交给界面。
-/// 这里目录条目、下载校验、安装校验三处用的是**同一个** sha256 与 size。
+/// 这里目录条目、下载校验、安装校验三处用的是**同一个** sha256 与 size；
+/// 下载地址只认该源组，白名单只认该源自己的后缀。
 fn install_from_catalog_impl(
     state: &AppStateV2,
-    module_id: &str,
-    variant: Option<&str>,
+    entry_key: &str,
     confirm: bool,
 ) -> Result<InstallResponse, String> {
-    let doc = state
-        .cached_catalog()
-        .ok_or_else(|| "模块目录还没刷新，请先刷新目录".to_string())?;
-    let entry = match variant {
-        Some(v) => doc.entry(module_id, v).cloned(),
-        None => doc
-            .modules
-            .iter()
-            .find(|e| e.module_id == module_id)
-            .cloned(),
+    let cached = state
+        .cached_entry(entry_key)
+        .ok_or_else(|| "模块目录还没刷新，或该条目已失效，请重新刷新目录".to_string())?;
+    let registry = state.sources();
+    let source = registry
+        .find(&cached.source_id)
+        .ok_or_else(|| format!("源 {} 已不在注册表", cached.source_id))?;
+    if !source.enabled || source.is_revoked() {
+        return Err(format!(
+            "源 {} 已停用或公钥已撤销，已装实例保留但不自动更新",
+            cached.source_id
+        ));
     }
-    .ok_or_else(|| format!("模块目录里没有 {module_id}"))?;
 
-    let sources: Vec<String> = entry.sources.iter().map(|s| s.url.clone()).collect();
+    let installed = state.with_installed(|s| s.clone());
+    let same_source = installed.instances.values().find(|i| {
+        i.module_id == cached.entry.module_id
+            && i.variant == cached.entry.variant
+            && i.source_id.as_deref() == Some(cached.source_id.as_str())
+    });
+    match entry_installability(
+        &cached,
+        same_source.map(|i| i.version.as_str()),
+        &installed.catalog_state,
+    ) {
+        Ok(kind) if kind == "downgrade" => {
+            return Err(format!(
+                "拒绝安装 {} 的旧版本 {}：版本回退或该版本已被撤销",
+                cached.entry.module_id, cached.entry.version
+            ));
+        }
+        Ok(kind) if kind == "incompatible" => {
+            return Err(format!(
+                "{} 需要更高版本的启动器（min_launcher {}）",
+                cached.entry.module_id,
+                cached.entry.min_launcher.as_deref().unwrap_or("未知")
+            ));
+        }
+        Err(reason) => return Err(reason),
+        _ => {}
+    }
+
+    let suffixes: Vec<&str> = cached.host_suffixes.iter().map(String::as_str).collect();
+    let sources: Vec<String> = cached
+        .entry
+        .sources
+        .iter()
+        .filter(|s| cached.group_ids.contains(&s.source_id))
+        .map(|s| s.url.clone())
+        .collect();
     if sources.is_empty() {
-        return Err(format!("{module_id} 在目录里没有下载地址"));
+        return Err(format!(
+            "{} 没有属于源 {} 的下载地址",
+            cached.entry.module_id, cached.source_id
+        ));
     }
-    for source in &sources {
-        validate_download_url(source, ALL_HOST_SUFFIXES)
-            .map_err(|e| format!("下载源 {source} 被拒绝：{e}"))?;
+    for source_url in &sources {
+        validate_download_url(source_url, &suffixes)
+            .map_err(|e| format!("下载源 {source_url} 被拒绝：{e}"))?;
     }
-    let file_name = download_file_name(&entry.module_id, &entry.variant);
+    let file_name = download_file_name(&cached);
     if !launcher_core::security::is_safe_filename(&file_name) {
         return Err(format!("非法的下载文件名：{file_name}"));
     }
     let dest = state.paths.data_root.join("downloads").join(&file_name);
-    let client = crate::http_client::ReqwestClient::default_client()?;
+    let client = crate::http_client::ReqwestClient::default_client(cached.host_suffixes.clone())?;
     let options = crate::download::DownloadOptions {
         retries: 2,
         backoff_ms: 150,
-        expected_sha256: Some(bare_sha256(&entry.sha256)),
+        expected_sha256: Some(bare_sha256(&cached.entry.sha256)),
     };
     let report = crate::download::download(&client, &sources, &dest, &options)
-        .map_err(|e| format!("下载 {module_id} 失败：{e}"))?;
+        .map_err(|e| format!("下载 {} 失败：{e}", cached.entry.module_id))?;
     let bytes = std::fs::read(&report.path).map_err(|e| format!("读取下载文件失败：{e}"))?;
-    if bytes.len() as u64 != entry.size {
+    if bytes.len() as u64 != cached.entry.size {
         return Err(format!(
-            "{module_id} 包大小与目录声明不一致：目录 {} 字节，实际 {} 字节",
-            entry.size,
+            "{} 包大小与目录声明不一致：目录 {} 字节，实际 {} 字节",
+            cached.entry.module_id,
+            cached.entry.size,
             bytes.len()
         ));
     }
+    let install_source = InstallSource {
+        source_id: cached.source_id.clone(),
+        source_kind: cached.source_kind,
+        auto_update: cached.auto_update,
+    };
     commit_install(
         state,
         &bytes,
-        &entry.sha256,
-        Some(&entry.module_id),
-        Some(&entry.version),
+        &cached.entry.sha256,
+        Some(&cached.entry.module_id),
+        Some(&cached.entry.version),
         confirm,
+        Some(CatalogContext {
+            source: Some(install_source),
+            entry: Some(cached.entry.clone()),
+        }),
     )
 }
 
 /// 在线安装入口。参数与 `install_local_package` 保持同一返回形状。
 #[tauri::command]
 pub async fn install_from_catalog(
-    module_id: String,
-    variant: Option<String>,
+    entry_key: String,
     confirm: bool,
     app: tauri::AppHandle,
 ) -> Result<InstallResponse, String> {
     // 下载会阻塞几秒到几十秒，放主线程会冻住窗口。
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppStateV2>();
-        install_from_catalog_impl(&state, &module_id, variant.as_deref(), confirm)
+        install_from_catalog_impl(&state, &entry_key, confirm)
     })
     .await
     .map_err(|e| format!("安装任务失败：{e}"))?
@@ -2437,8 +3003,9 @@ pub async fn install_from_catalog(
 
 /// 设置页一次读完：信任表、保留策略与两枚内置公钥的指纹。
 ///
-/// 指纹全部用编译期内嵌值或会话内 K5 重算，界面不自行拼装字符串——
-/// 指纹是必须一眼看出来的东西，不能出现「界面显示 A、判定用 B」。
+/// 指纹全部用编译期内嵌值，界面不自行拼装字符串——指纹是必须一眼看出来
+/// 的东西，不能出现「界面显示 A、判定用 B」。catalog 公钥改由「下载」页
+/// 的源列表展示，每个源各有自己的指纹。
 #[derive(Debug, Serialize)]
 pub struct SettingsSnapshot {
     pub trust: launcher_core::m2::trust::TrustStore,
@@ -2455,8 +3022,7 @@ pub struct SettingsSnapshot {
 pub fn settings_snapshot(state: State<'_, AppStateV2>) -> SettingsSnapshot {
     let trust = state.with_trust(|store| store.clone());
     let retention = state.with_retention(|policy| policy.clone());
-    let k5_fingerprint = launcher_core::m2::fingerprint(&state.k5_pubkey())
-        .unwrap_or_else(|_| crate::state_v2::BUILTIN_K5_FINGERPRINT.to_string());
+    let k5_fingerprint = crate::state_v2::BUILTIN_K5_FINGERPRINT.to_string();
     SettingsSnapshot {
         trust,
         retention,
@@ -2603,7 +3169,7 @@ pub fn purge_local_data(
                 }
             }
         }
-        state.set_cached_catalog(None);
+        state.replace_cached_entries(BTreeMap::new());
     }
 
     if request.state {
@@ -2611,7 +3177,7 @@ pub fn purge_local_data(
         // 删掉会留下孤儿包目录，比清缓存更危险。这里只重置 catalog 水位，
         // 语义差异写进 M3.5 文档，不塞进 errors 让 UI 误报成故障。
         match state.mutate_installed(|s| {
-            s.catalog_state = CatalogState::default();
+            s.catalog_state = launcher_core::m2::catalog::CatalogState::default();
             Ok(())
         }) {
             Ok(()) => state_cleared = true,
@@ -3005,18 +3571,18 @@ mod tests {
         assert!(verified.files.iter().any(|f| f.path == ".gitignore"));
 
         let sha = verified.sha256.clone();
-        let err = commit_install(&state, &bytes, &sha, None, None, false).unwrap_err();
+        let err = commit_install(&state, &bytes, &sha, None, None, false, None).unwrap_err();
         assert!(err.contains("需要用户显式确认"), "{err}");
         assert!(state.instance("dounai/demo-local@stable").is_none());
 
-        let response = commit_install(&state, &bytes, &sha, None, None, true).unwrap();
+        let response = commit_install(&state, &bytes, &sha, None, None, true, None).unwrap();
         assert_eq!(response.module_id, "dounai/demo-local");
         assert_eq!(response.files, 2);
         assert!(!response.replaced);
         assert!(state.instance("dounai/demo-local@stable").is_some());
 
         // 装第二次会覆盖：包目录已存在，返回 replaced。
-        let again = commit_install(&state, &bytes, &sha, None, None, true).unwrap();
+        let again = commit_install(&state, &bytes, &sha, None, None, true, None).unwrap();
         assert!(again.replaced);
     }
 
@@ -3027,7 +3593,7 @@ mod tests {
         let bytes = unsigned_package();
         // 检查后文件被换掉：调用方带着旧哈希来装，必须失败而不是装进去。
         let bogus = format!("sha256:{}", "0".repeat(64));
-        let err = commit_install(&state, &bytes, &bogus, None, None, true).unwrap_err();
+        let err = commit_install(&state, &bytes, &bogus, None, None, true, None).unwrap_err();
         assert!(err.contains("整包哈希不符"), "{err}");
         assert!(state.instance("dounai/demo-local@stable").is_none());
     }

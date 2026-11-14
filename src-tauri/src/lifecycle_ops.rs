@@ -424,6 +424,7 @@ mod tests {
             installed_at: "2026-01-01T00:00:00Z".into(),
             source_kind: launcher_core::m2::InstanceSourceKind::Zip,
             source_path: None,
+            source_id: None,
             git: None,
             pinned: false,
             auto_update: true,

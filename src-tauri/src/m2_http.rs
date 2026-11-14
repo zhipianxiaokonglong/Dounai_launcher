@@ -14,7 +14,8 @@ use std::time::Duration;
 use launcher_core::m2::adapters::HttpFetcher;
 use launcher_core::m2::source::{host_allowed, url_host, SourceError};
 
-/// 允许的 catalog/包下载域名后缀。与双源契约一致。
+/// 内置官方源的后缀全集，仅用于生成默认源表与测试。实际请求一律按源注入，
+/// 不让 A 源的 catalog 请求重定向到 B 源的域名。
 pub const ALL_HOST_SUFFIXES: &[&str] = &[
     "github.com",
     "githubusercontent.com",
@@ -27,10 +28,15 @@ const MAX_HOPS: usize = 5;
 
 pub struct ReqwestCatalogFetcher {
     client: reqwest::blocking::Client,
+    host_suffixes: Vec<String>,
 }
 
 impl ReqwestCatalogFetcher {
-    pub fn new() -> Result<Self, String> {
+    /// `host_suffixes` 来自 sources.json 的单个源，不含其它发布者的域名。
+    pub fn new(host_suffixes: Vec<String>) -> Result<Self, String> {
+        if host_suffixes.is_empty() {
+            return Err("该源没有出网白名单，拒绝发起请求".into());
+        }
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(10))
             .connect_timeout(Duration::from_secs(5))
@@ -39,7 +45,10 @@ impl ReqwestCatalogFetcher {
             .user_agent("dounai-launcher/0.3.1")
             .build()
             .map_err(|e| format!("创建 HTTP 客户端失败：{e}"))?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            host_suffixes,
+        })
     }
 }
 
@@ -57,7 +66,10 @@ impl HttpFetcher for ReqwestCatalogFetcher {
             let host = url_host(&current).ok_or_else(|| {
                 unavailable(&current, format!("无法解析主机名：{current}"))
             })?;
-            if !host_allowed(host, ALL_HOST_SUFFIXES) {
+            if !host_allowed(
+                host,
+                &self.host_suffixes.iter().map(String::as_str).collect::<Vec<_>>(),
+            ) {
                 return Err(unavailable(
                     &current,
                     format!("域名不在白名单内：{host}"),
@@ -105,9 +117,19 @@ mod tests {
 
     #[test]
     fn non_https_is_rejected_before_any_request() {
-        let fetcher = ReqwestCatalogFetcher::new().unwrap();
+        let fetcher = ReqwestCatalogFetcher::new(ALL_HOST_SUFFIXES.iter().map(|s| s.to_string()).collect()).unwrap();
         assert!(matches!(
             fetcher.get("http://github.com/a/catalog.json"),
+            Err(SourceError::Unavailable { .. })
+        ));
+    }
+
+    #[test]
+    fn a_source_cannot_use_another_sources_host() {
+        assert!(ReqwestCatalogFetcher::new(vec![]).is_err());
+        let sf_only = ReqwestCatalogFetcher::new(vec!["sourceforge.net".into()]).unwrap();
+        assert!(matches!(
+            sf_only.get("https://github.com/a/catalog.json"),
             Err(SourceError::Unavailable { .. })
         ));
     }
