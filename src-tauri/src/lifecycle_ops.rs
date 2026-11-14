@@ -206,7 +206,8 @@ fn prepend_python_path(env: &mut BTreeMap<String, String>, module_dir: &std::pat
     env.insert("PYTHONPATH".into(), merged);
 }
 
-fn confirm_error(error: M2Error) -> String {    format!("目录实例启动被拒：{error}")
+fn confirm_error(error: M2Error) -> String {
+    format!("目录实例启动被拒：{error}")
 }
 
 /// 只按空白切分，拒绝 shell 元字符；命令一律来自已验签 manifest。
@@ -411,7 +412,8 @@ mod tests {
         assert!(!env.contains_key("PYTHONPATH"));
     }
 
-    fn demo_instance(id: &str, role: Role) -> Instance {        Instance {
+    fn demo_instance(id: &str, role: Role) -> Instance {
+        Instance {
             instance_id: id.into(),
             module_id: "dounai/demo".into(),
             variant: "stable".into(),

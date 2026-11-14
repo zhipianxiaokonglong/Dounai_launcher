@@ -143,7 +143,9 @@ impl ChainRegistry {
 fn validate_id(id: &str) -> Result<(), ChainError> {
     let ok = !id.is_empty()
         && id.len() <= MAX_ID_LEN
-        && id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
     if ok {
         Ok(())
     } else {
@@ -194,7 +196,9 @@ fn validate_timestamp(value: &str) -> Result<(), ChainError> {
     if ok {
         Ok(())
     } else {
-        Err(ChainError::Invalid(format!("时间戳不是 UTC RFC 3339：{value}")))
+        Err(ChainError::Invalid(format!(
+            "时间戳不是 UTC RFC 3339：{value}"
+        )))
     }
 }
 
@@ -411,7 +415,10 @@ mod tests {
         r.upsert(
             "daily-chat",
             "日常对话",
-            vec!["dounai/input@stable@main".into(), "dounai/llm@stable@main".into()],
+            vec![
+                "dounai/input@stable@main".into(),
+                "dounai/llm@stable@main".into(),
+            ],
             TIME,
         )
         .unwrap();
@@ -447,11 +454,15 @@ mod tests {
         assert!(r.upsert("Daily/Chat", "x", vec!["a".into()], TIME).is_err());
         assert!(r.upsert("ok", "", vec!["a".into()], TIME).is_err());
         assert!(r.upsert("ok", "x", vec![], TIME).is_err());
-        assert!(r.upsert("ok", "x", vec!["a".into(), "a".into()], TIME).is_err());
+        assert!(r
+            .upsert("ok", "x", vec!["a".into(), "a".into()], TIME)
+            .is_err());
         assert!(r
             .upsert("ok", "x", (0..33).map(|i| format!("i-{i}")).collect(), TIME)
             .is_err());
-        assert!(r.upsert("ok", "x", vec!["a".into()], "2026-11-14 10:00").is_err());
+        assert!(r
+            .upsert("ok", "x", vec!["a".into()], "2026-11-14 10:00")
+            .is_err());
         // 失败的 upsert 不能污染注册表。
         assert_eq!(r.chains.len(), 1);
         assert_eq!(r.chains[0].id, "daily-chat");
@@ -485,7 +496,9 @@ mod tests {
     #[test]
     fn plan_marks_dangling_steps_without_rewriting_the_registry() {
         let r = registry_with_one();
-        let known: BTreeSet<String> = ["dounai/input@stable@main".to_string()].into_iter().collect();
+        let known: BTreeSet<String> = ["dounai/input@stable@main".to_string()]
+            .into_iter()
+            .collect();
         let plan = ChainPlan::from_registry(&r, "daily-chat", &known).unwrap();
         assert_eq!(plan.dangling().len(), 1);
         assert_eq!(plan.dangling()[0].instance_id, "dounai/llm@stable@main");
@@ -522,7 +535,11 @@ mod tests {
     fn external_services_are_not_part_of_rollback() {
         let plan = ChainPlan::from_default(&["a".into(), "b".into(), "c".into()]);
         let mut result = ChainRunResult::from_plan(&plan);
-        result.set(2, ChainStepState::External, Some("端口上已有外部健康服务".into()));
+        result.set(
+            2,
+            ChainStepState::External,
+            Some("端口上已有外部健康服务".into()),
+        );
         assert_eq!(result.started_ids(), vec!["a", "c"]);
     }
 

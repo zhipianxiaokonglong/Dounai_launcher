@@ -387,9 +387,9 @@ pub fn preflight_catalog(c: &Value, allowed_sources: &[&str]) -> Result<(), Rele
             )));
         }
         for s in entry_sources {
-            let source_id = s["source_id"]
-                .as_str()
-                .ok_or_else(|| ReleaseError::BadCatalog(format!("{module_id} 有条目缺 source_id")))?;
+            let source_id = s["source_id"].as_str().ok_or_else(|| {
+                ReleaseError::BadCatalog(format!("{module_id} 有条目缺 source_id"))
+            })?;
             if !ids.contains(&source_id) {
                 return Err(ReleaseError::BadCatalog(format!(
                     "{module_id} 的下载地址指向源 {source_id}，但顶层 sources 里没有它"
@@ -620,7 +620,10 @@ mod tests {
             "sources": [{ "source_id": "official-gh", "url": "https://example.com/a.zip" }]
         }]);
         let error = preflight_catalog(&c, &["official-sf", "official-gh"]).unwrap_err();
-        assert!(error.to_string().contains("顶层 sources 里没有它"), "{error}");
+        assert!(
+            error.to_string().contains("顶层 sources 里没有它"),
+            "{error}"
+        );
     }
 
     #[test]

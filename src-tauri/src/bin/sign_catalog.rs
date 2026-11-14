@@ -16,7 +16,9 @@ use std::process::ExitCode;
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
-use dounai_launcher::release::{load_signing_key, preflight_catalog, sign_catalog_doc, ReleaseError};
+use dounai_launcher::release::{
+    load_signing_key, preflight_catalog, sign_catalog_doc, ReleaseError,
+};
 use dounai_launcher::signature::verify_manifest;
 use launcher_core::m2::sources::BUILTIN_SOURCE_IDS;
 use serde_json::Value;
@@ -134,8 +136,8 @@ fn cmd_verify(args: &[String]) -> Result<(), ReleaseError> {
     let mut allowed: Vec<&str> = BUILTIN_SOURCE_IDS.to_vec();
     allowed.extend(extras.iter().map(String::as_str));
     preflight_catalog(&catalog, &allowed)?;
-    let fp = launcher_core::m2::fingerprint(&pk)
-        .map_err(|e| ReleaseError::BadCatalog(e.to_string()))?;
+    let fp =
+        launcher_core::m2::fingerprint(&pk).map_err(|e| ReleaseError::BadCatalog(e.to_string()))?;
     let signer_fp = catalog["signature"]["signer_fp"]
         .as_str()
         .ok_or_else(|| ReleaseError::BadCatalog("catalog 缺少 signer_fp".into()))?;

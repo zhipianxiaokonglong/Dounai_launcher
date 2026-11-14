@@ -375,7 +375,10 @@ fn fuzz_json_parsers_never_panic() {
         let text = String::from_utf8_lossy(&data).into_owned();
 
         let r1 = std::panic::catch_unwind(|| PackageManifest::parse(&text).is_ok());
-        assert!(r1.is_ok(), "第 {iteration} 次：PackageManifest::parse panic");
+        assert!(
+            r1.is_ok(),
+            "第 {iteration} 次：PackageManifest::parse panic"
+        );
 
         let r2 = std::panic::catch_unwind(|| {
             CatalogDocument::parse(
@@ -385,7 +388,10 @@ fn fuzz_json_parsers_never_panic() {
             )
             .is_ok()
         });
-        assert!(r2.is_ok(), "第 {iteration} 次：CatalogDocument::parse panic");
+        assert!(
+            r2.is_ok(),
+            "第 {iteration} 次：CatalogDocument::parse panic"
+        );
     }
 }
 

@@ -166,17 +166,19 @@ fn tool_signed_catalog_is_accepted_by_the_runtime() {
     // 改动条目内容后签名不再匹配，parse 必须在内容校验之前硬拒。
     let mut tampered = doc.clone();
     tampered["modules"][0]["version"] = json!("9.9.9");
-    let err = CatalogDocument::parse(&serde_json::to_string(&tampered).unwrap(), &pk, &fp)
-        .unwrap_err();
+    let err =
+        CatalogDocument::parse(&serde_json::to_string(&tampered).unwrap(), &pk, &fp).unwrap_err();
     assert!(err.to_string().contains("验签失败"), "实际错误：{err}");
 
     // 换一把钥匙签的同内容 catalog 不能靠自述 pubkey 蒙混过关。
     let other = SigningKey::from_bytes(&[42u8; 32]);
     let mut forged = unsigned_catalog();
     sign_catalog_doc(&mut forged, &other, "community-other").unwrap();
-    forged["signature"]["pubkey"] =
-        json!(B64.encode(other.verifying_key().to_bytes()));
-    let err = CatalogDocument::parse(&serde_json::to_string(&forged).unwrap(), &pk, &fp)
-        .unwrap_err();
-    assert!(err.to_string().contains("不得自述 pubkey"), "实际错误：{err}");
+    forged["signature"]["pubkey"] = json!(B64.encode(other.verifying_key().to_bytes()));
+    let err =
+        CatalogDocument::parse(&serde_json::to_string(&forged).unwrap(), &pk, &fp).unwrap_err();
+    assert!(
+        err.to_string().contains("不得自述 pubkey"),
+        "实际错误：{err}"
+    );
 }

@@ -15,8 +15,7 @@ use zip::ZipWriter;
 
 use launcher_core::m2::adapters::{HttpFetcher, LocalDirAdapter, RemoteCatalogAdapter};
 use launcher_core::m2::catalog::{
-    check_update_allowed, select_catalog, CatalogEntry, CatalogState, EntrySource,
-    SourceWatermark,
+    check_update_allowed, select_catalog, CatalogEntry, CatalogState, EntrySource, SourceWatermark,
 };
 use launcher_core::m2::contract_probe::evaluate;
 use launcher_core::m2::installed::{InstalledState, Instance};
@@ -263,11 +262,8 @@ fn one_source_down_still_installs_from_the_other() {
         &pk5,
         &fp5,
     );
-    let github = RemoteCatalogAdapter::from_source(
-        &github_source,
-        vec![github_source.id.clone()],
-        &http,
-    );
+    let github =
+        RemoteCatalogAdapter::from_source(&github_source, vec![github_source.id.clone()], &http);
     let sf = RemoteCatalogAdapter::from_source(&sf_source, vec![sf_source.id.clone()], &http);
     assert!(matches!(
         fetch(&github),
@@ -344,11 +340,8 @@ fn catalog_rollback_bad_signature_and_no_usable_source_are_all_rejected() {
         &pk5,
         &fp5,
     );
-    let github = RemoteCatalogAdapter::from_source(
-        &github_source,
-        vec![github_source.id.clone()],
-        &http,
-    );
+    let github =
+        RemoteCatalogAdapter::from_source(&github_source, vec![github_source.id.clone()], &http);
     let sf = RemoteCatalogAdapter::from_source(&sf_source, vec![sf_source.id.clone()], &http);
     let candidates = vec![(1, fetch(&github)), (2, fetch(&sf))];
     assert!(matches!(
@@ -685,18 +678,14 @@ fn community_catalog_only_verifies_with_its_own_registered_key() {
     let (community_key, community_pk, community_fp) = keypair(9);
     let text = String::from_utf8(catalog_json(&community_key, 3, &entry)).unwrap();
 
-    let doc = launcher_core::m2::catalog::CatalogDocument::parse(
-        &text,
-        &community_pk,
-        &community_fp,
-    )
-    .expect("社区源用自己登记的公钥应验通");
+    let doc =
+        launcher_core::m2::catalog::CatalogDocument::parse(&text, &community_pk, &community_fp)
+            .expect("社区源用自己登记的公钥应验通");
     assert_eq!(doc.sequence, 3);
     assert_eq!(doc.signature.signer_fp, community_fp);
 
     // 同一份内容，用官方 K5 的登记值去验：指纹不符，硬拒，不进会话缓存。
-    let err = launcher_core::m2::catalog::CatalogDocument::parse(&text, &pk5, &fp5)
-        .unwrap_err();
+    let err = launcher_core::m2::catalog::CatalogDocument::parse(&text, &pk5, &fp5).unwrap_err();
     assert!(err.to_string().contains("指纹与源登记值不符"), "{err}");
 }
 
@@ -709,11 +698,7 @@ fn catalog_cannot_smuggle_its_own_pubkey() {
     let entry = entry_for(&format!("sha256:{}", "a".repeat(64)), 1, &fp1);
     let mut doc: Value = serde_json::from_slice(&catalog_json(&k5, 1, &entry)).unwrap();
     doc["signature"]["pubkey"] = json!(pk5);
-    let err = launcher_core::m2::catalog::CatalogDocument::parse(
-        &doc.to_string(),
-        &pk5,
-        &fp5,
-    )
-    .unwrap_err();
+    let err = launcher_core::m2::catalog::CatalogDocument::parse(&doc.to_string(), &pk5, &fp5)
+        .unwrap_err();
     assert!(err.to_string().contains("不得自述 pubkey"), "{err}");
 }

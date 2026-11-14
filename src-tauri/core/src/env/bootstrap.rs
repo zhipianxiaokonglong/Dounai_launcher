@@ -24,7 +24,8 @@ pub const UV_MIN_VERSION: &str = "0.11.8";
 /// 取值来源：阿里云 PyPI 的 `uv-0.13.7-py3-none-win_amd64.whl`（wheel 本身
 /// `sha256:2835e2ab397d0db86323b9975dce75ecd76aa9cfa0d6a2aea84734aae7f8c9b3`）
 /// 内 `uv-0.13.7.data/scripts/uv.exe`，31 803 184 字节。
-pub const UV_SHA256: &str = "sha256:1791d7a9ed5b6df13ccf80f102e025c333010d96326b4ff0262aa3b578835c5a";
+pub const UV_SHA256: &str =
+    "sha256:1791d7a9ed5b6df13ccf80f102e025c333010d96326b4ff0262aa3b578835c5a";
 pub const UV_BYTES: u64 = 31_803_184;
 
 /// 首选：GitHub release 资产（官方、zip 里直接是 `uv.exe`）。
@@ -162,9 +163,7 @@ pub fn locate_uv(
                 return Err(state_error(
                     EnvErrorKind::UvMissing,
                     instance_id,
-                    format!(
-                        "程序根缺少 bin/uv.exe（期望 {expected}），当前配置不允许联网补齐"
-                    ),
+                    format!("程序根缺少 bin/uv.exe（期望 {expected}），当前配置不允许联网补齐"),
                 ));
             }
             let mut last_error: Option<EnvError> = None;

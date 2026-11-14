@@ -158,11 +158,8 @@ pub fn prepare_venv(
     // 不会把别的 generation 的环境改成本次依赖。
     if final_python.exists() {
         super::progress::emit(
-            super::progress::EnvProgress::new(
-                super::progress::EnvPhase::Sync,
-                "复用已装好的依赖",
-            )
-            .with_detail("只做离线复核，不重建 venv"),
+            super::progress::EnvProgress::new(super::progress::EnvPhase::Sync, "复用已装好的依赖")
+                .with_detail("只做离线复核，不重建 venv"),
         );
         sync_and_verify(
             paths,

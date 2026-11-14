@@ -118,7 +118,11 @@ fn manifest_files_are_valid_json_with_required_fields() {
         ] {
             assert!(json.get(field).is_some(), "{name} 缺少必填字段 {field}");
         }
-        assert_eq!(json["schema_version"], serde_json::json!(2), "{name} 必须是 v2 清单");
+        assert_eq!(
+            json["schema_version"],
+            serde_json::json!(2),
+            "{name} 必须是 v2 清单"
+        );
         // module_id 必须是 namespace/name，否则实例 id 拼不出来。
         let module_id = json["module_id"].as_str().unwrap_or_default();
         assert!(

@@ -274,8 +274,7 @@ impl InstalledState {
         if is_c && !explicit {
             return Ok(None);
         }
-        self.switch_active(path, role, &next, explicit)
-            .map(Some)
+        self.switch_active(path, role, &next, explicit).map(Some)
     }
 
     /// 非 active 实例用备用端口段，避免抢占规范端口。

@@ -246,7 +246,8 @@ fn run_child(
 }
 
 /// 从 uv 的 stderr 认出「离线缓存缺 wheel」。文案会随版本变化，这里只作分类提示。
-fn looks_like_offline_cache_miss(text: &str) -> bool {    let lower = text.to_ascii_lowercase();
+fn looks_like_offline_cache_miss(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
     lower.contains("not found in the cache")
         || lower.contains("no cached")
         || lower.contains("failed to download")

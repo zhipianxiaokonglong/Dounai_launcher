@@ -55,7 +55,12 @@ pub struct CachedEntry {
 }
 
 impl CachedEntry {
-    pub fn new(source: &SourceEntry, group_ids: Vec<String>, doc: &CatalogDocument, entry: &CatalogEntry) -> Self {
+    pub fn new(
+        source: &SourceEntry,
+        group_ids: Vec<String>,
+        doc: &CatalogDocument,
+        entry: &CatalogEntry,
+    ) -> Self {
         Self {
             key: entry_key(&source.id, &entry.module_id, &entry.variant, &entry.version),
             source_id: source.id.clone(),
@@ -185,7 +190,9 @@ impl AppStateV2 {
             SourceRegistry::builtin(BUILTIN_K5_PUBKEY_B64, BUILTIN_K5_FINGERPRINT)
                 .map_err(|e| e.to_string())
         })?;
-        let chains = load_or(&paths.state_dir().join("chains.json"), || Ok(ChainRegistry::empty()))?;
+        let chains = load_or(&paths.state_dir().join("chains.json"), || {
+            Ok(ChainRegistry::empty())
+        })?;
         chains
             .validate()
             .map_err(|e| format!("chains.json 不合法：{e}"))?;
@@ -391,11 +398,7 @@ impl AppStateV2 {
 
     /// 当前实例表里所有 instance_id。链路读取时用它与 steps 比对，只在内存里标悬空。
     pub fn known_instance_ids(&self) -> BTreeSet<String> {
-        lock(&self.installed)
-            .instances
-            .keys()
-            .cloned()
-            .collect()
+        lock(&self.installed).instances.keys().cloned().collect()
     }
 
     pub fn set_last_chain_run(&self, result: &ChainRunResult) {
@@ -423,7 +426,9 @@ impl AppStateV2 {
         let before = guard.clone();
         match f(&mut guard) {
             Ok(value) => {
-                guard.save(&self.sources_path()).map_err(|e| e.to_string())?;
+                guard
+                    .save(&self.sources_path())
+                    .map_err(|e| e.to_string())?;
                 Ok(value)
             }
             Err(error) => {

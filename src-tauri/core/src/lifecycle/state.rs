@@ -315,7 +315,9 @@ mod tests {
         state.begin_start("a", ticket).unwrap();
         state.attach_process("a", ticket, 40112).unwrap();
 
-        state.mark_probe_timeout("a", ticket, "60 秒内未通过").unwrap();
+        state
+            .mark_probe_timeout("a", ticket, "60 秒内未通过")
+            .unwrap();
         let snap = state.get("a").unwrap();
         assert_eq!(snap.phase, Phase::Failed);
         // pid 必须留着：进程还在跑，界面与停止路径都要能看见它。

@@ -32,8 +32,8 @@ fn stage_bundled_uv() {
     if same_size(&source, &target) {
         return;
     }
-    if let Err(error) =
-        std::fs::create_dir_all(&target_dir).and_then(|_| std::fs::copy(&source, &target).map(|_| ()))
+    if let Err(error) = std::fs::create_dir_all(&target_dir)
+        .and_then(|_| std::fs::copy(&source, &target).map(|_| ()))
     {
         println!(
             "cargo:warning=暂存 uv 到 {} 失败：{error}",

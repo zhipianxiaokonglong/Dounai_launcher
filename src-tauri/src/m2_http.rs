@@ -61,19 +61,22 @@ impl HttpFetcher for ReqwestCatalogFetcher {
         let mut current = url.to_string();
         for _hop in 0..=MAX_HOPS {
             if !current.starts_with("https://") {
-                return Err(unavailable(&current, format!("只允许 https 地址：{current}")));
-            }
-            let host = url_host(&current).ok_or_else(|| {
-                unavailable(&current, format!("无法解析主机名：{current}"))
-            })?;
-            if !host_allowed(
-                host,
-                &self.host_suffixes.iter().map(String::as_str).collect::<Vec<_>>(),
-            ) {
                 return Err(unavailable(
                     &current,
-                    format!("域名不在白名单内：{host}"),
+                    format!("只允许 https 地址：{current}"),
                 ));
+            }
+            let host = url_host(&current)
+                .ok_or_else(|| unavailable(&current, format!("无法解析主机名：{current}")))?;
+            if !host_allowed(
+                host,
+                &self
+                    .host_suffixes
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+            ) {
+                return Err(unavailable(&current, format!("域名不在白名单内：{host}")));
             }
 
             let response = self
@@ -94,10 +97,7 @@ impl HttpFetcher for ReqwestCatalogFetcher {
                 continue;
             }
             if !(200..300).contains(&status) {
-                return Err(unavailable(
-                    &current,
-                    format!("服务端返回状态 {status}"),
-                ));
+                return Err(unavailable(&current, format!("服务端返回状态 {status}")));
             }
             return response
                 .bytes()
@@ -117,7 +117,9 @@ mod tests {
 
     #[test]
     fn non_https_is_rejected_before_any_request() {
-        let fetcher = ReqwestCatalogFetcher::new(ALL_HOST_SUFFIXES.iter().map(|s| s.to_string()).collect()).unwrap();
+        let fetcher =
+            ReqwestCatalogFetcher::new(ALL_HOST_SUFFIXES.iter().map(|s| s.to_string()).collect())
+                .unwrap();
         assert!(matches!(
             fetcher.get("http://github.com/a/catalog.json"),
             Err(SourceError::Unavailable { .. })

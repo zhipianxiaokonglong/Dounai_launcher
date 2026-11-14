@@ -13,9 +13,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::m2::catalog::SourceWatermark;
-use crate::m2::source::{
-    host_allowed, url_host, GITHUB_HOST_SUFFIXES, SOURCEFORGE_HOST_SUFFIXES,
-};
+use crate::m2::source::{host_allowed, url_host, GITHUB_HOST_SUFFIXES, SOURCEFORGE_HOST_SUFFIXES};
 use crate::m2::{fingerprint, is_fingerprint, M2Error};
 
 pub const OFFICIAL_GROUP: &str = "official";
@@ -33,8 +31,8 @@ pub const BUILTIN_SOURCE_IDS: &[&str] = &[OFFICIAL_SF_ID, OFFICIAL_GH_ID];
 
 /// 从 base_url 派生出的后缀不能是公共后缀，否则等于「任意 https 都能拉」。
 const PUBLIC_SUFFIXES: &[&str] = &[
-    "com", "net", "org", "io", "cn", "co", "top", "xyz", "site", "online", "dev", "app",
-    "info", "biz", "me", "tv", "cc", "uk", "us", "jp", "de", "ru",
+    "com", "net", "org", "io", "cn", "co", "top", "xyz", "site", "online", "dev", "app", "info",
+    "biz", "me", "tv", "cc", "uk", "us", "jp", "de", "ru",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,8 +97,8 @@ pub struct SourceRegistry {
 impl SourceRegistry {
     /// 内置两个官方源，共用 K5 公钥，可禁用不可删除。
     pub fn builtin(k5_pubkey_b64: &str, k5_fingerprint: &str) -> Result<Self, M2Error> {
-        let common = |id: &str, name: &str, base_url: &str, hosts: &[&str], priority: u32| {
-            SourceEntry {
+        let common =
+            |id: &str, name: &str, base_url: &str, hosts: &[&str], priority: u32| SourceEntry {
                 id: id.into(),
                 name: name.into(),
                 kind: SourceClass::Official,
@@ -120,8 +118,7 @@ impl SourceRegistry {
                 note: None,
                 last_error: None,
                 last_error_at: None,
-            }
-        };
+            };
         let registry = Self {
             schema_version: 1,
             sources: vec![common(
@@ -190,7 +187,8 @@ impl SourceRegistry {
                 return Err(bad(format!("源 {} 没有出网白名单", source.id)));
             }
             for suffix in &source.host_suffixes {
-                validate_suffix(suffix).map_err(|reason| bad(format!("源 {}：{reason}", source.id)))?;
+                validate_suffix(suffix)
+                    .map_err(|reason| bad(format!("源 {}：{reason}", source.id)))?;
             }
             let suffixes: Vec<&str> = source.host_suffixes.iter().map(String::as_str).collect();
             if !host_allowed(host, &suffixes) {
@@ -206,7 +204,10 @@ impl SourceRegistry {
                 return Err(bad(format!("社区源 {} 不得自动更新", source.id)));
             }
             if source.is_revoked() && source.enabled {
-                return Err(bad(format!("源 {} 的公钥已撤销却仍处于启用状态", source.id)));
+                return Err(bad(format!(
+                    "源 {} 的公钥已撤销却仍处于启用状态",
+                    source.id
+                )));
             }
         }
         Ok(())
@@ -268,7 +269,11 @@ impl SourceRegistry {
 
     /// 一份 catalog 成功激活后推进整组水位，避免镜像的旧副本再次参与裁决。
     pub fn advance(&mut self, id: &str, sequence: u64, expires: &str) {
-        let group = self.find(id).map(SourceEntry::group_id).unwrap_or(id).to_string();
+        let group = self
+            .find(id)
+            .map(SourceEntry::group_id)
+            .unwrap_or(id)
+            .to_string();
         for source in self.sources.iter_mut().filter(|s| s.group_id() == group) {
             source.sequence = Some(source.sequence.map_or(sequence, |v| v.max(sequence)));
             let raise = source
@@ -286,7 +291,9 @@ impl SourceRegistry {
     /// 只写事实字段，不改 enabled / 水位；界面据此逐源展示失败原因。
     pub fn set_last_error(&mut self, id: &str, error: Option<(String, String)>) {
         if let Some(source) = self.find_mut(id) {
-            let (message, at) = error.map(|e| (Some(e.0), Some(e.1))).unwrap_or((None, None));
+            let (message, at) = error
+                .map(|e| (Some(e.0), Some(e.1)))
+                .unwrap_or((None, None));
             source.last_error = message;
             source.last_error_at = at;
         }
@@ -307,7 +314,9 @@ impl SourceRegistry {
             .position(|s| s.id == id)
             .ok_or_else(|| M2Error::Invalid(format!("源 {id} 不存在")))?;
         if !self.sources[index].deletable {
-            return Err(M2Error::Rejected(format!("源 {id} 是内置源，只能禁用不能删除")));
+            return Err(M2Error::Rejected(format!(
+                "源 {id} 是内置源，只能禁用不能删除"
+            )));
         }
         self.sources.remove(index);
         self.validate()
@@ -375,7 +384,10 @@ pub fn derive_host_suffixes(base_url: &str) -> Result<Vec<String>, M2Error> {
         .ok_or_else(|| M2Error::Invalid("源地址必须是 https".into()))?
         .to_ascii_lowercase();
     if host_allowed(&host, GITHUB_HOST_SUFFIXES) {
-        return Ok(GITHUB_HOST_SUFFIXES.iter().map(|s| (*s).to_string()).collect());
+        return Ok(GITHUB_HOST_SUFFIXES
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect());
     }
     if host_allowed(&host, SOURCEFORGE_HOST_SUFFIXES) {
         return Ok(SOURCEFORGE_HOST_SUFFIXES
@@ -442,7 +454,10 @@ mod tests {
         assert_eq!(builtin.sources.len(), 1);
         assert!(builtin.sources.iter().all(|s| !s.deletable && s.enabled));
         assert_eq!(builtin.group_ids(OFFICIAL_SF_ID).len(), 1);
-        assert_eq!(builtin.watermark(OFFICIAL_GH_ID), SourceWatermark::default());
+        assert_eq!(
+            builtin.watermark(OFFICIAL_GH_ID),
+            SourceWatermark::default()
+        );
         assert_eq!(builtin.allowlist().len(), 2);
         // 加载残存旧文件时，暂不下发的内置镜像被剔除；社区同名源不受影响。
         let mut stale = registry();
@@ -483,7 +498,10 @@ mod tests {
             OFFICIAL_SF_ID,
             Some(("旧格式缺 signer_fp".into(), "2026-11-14T04:00:00Z".into())),
         );
-        assert_eq!(registry.sources[0].last_error.as_deref(), Some("旧格式缺 signer_fp"));
+        assert_eq!(
+            registry.sources[0].last_error.as_deref(),
+            Some("旧格式缺 signer_fp")
+        );
         assert_eq!(
             registry.sources[0].last_error_at.as_deref(),
             Some("2026-11-14T04:00:00Z")

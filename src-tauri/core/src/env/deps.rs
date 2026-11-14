@@ -388,7 +388,8 @@ mod tests {
         let uv = "version = 1\n\n[[package]]\nname = \"fastapi\"\nversion = \"0.115.6\"\n\n[[package]]\nname = \"uvicorn\"\nversion = \"0.34.0\"\n";
         assert_eq!(lock_packages(uv), vec!["fastapi 0.115.6", "uvicorn 0.34.0"]);
 
-        let requirements = "# generated\nfastapi==0.115.6 \\\n    --hash=sha256:aa\nuvicorn==0.34.0\n";
+        let requirements =
+            "# generated\nfastapi==0.115.6 \\\n    --hash=sha256:aa\nuvicorn==0.34.0\n";
         assert_eq!(
             lock_packages(requirements),
             vec!["fastapi 0.115.6", "uvicorn 0.34.0"]

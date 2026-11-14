@@ -12,8 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::m2::manifest::valid_signature_value;
 use crate::m2::source::SourceError;
 use crate::m2::{
-    is_expired, is_fingerprint, is_hash, semver_cmp, within_catalog_window, M2Error,
-    SUPPORTED_ALGO,
+    is_expired, is_fingerprint, is_hash, semver_cmp, within_catalog_window, M2Error, SUPPORTED_ALGO,
 };
 use crate::manifest::Role;
 
@@ -118,11 +117,7 @@ impl CatalogDocument {
     /// 用 sources.json 里该源登记的公钥验签，`expected_fp` 是同一条记录的指纹。
     /// 签名覆盖剔除 `signature` 后的整份规范化 JSON；catalog 自述的 signer_fp
     /// 只用于比对，公钥绝不从文档里取。
-    pub fn parse(
-        text: &str,
-        pubkey_b64: &str,
-        expected_fp: &str,
-    ) -> Result<Self, SourceError> {
+    pub fn parse(text: &str, pubkey_b64: &str, expected_fp: &str) -> Result<Self, SourceError> {
         let bad = |reason: String| SourceError::CatalogInvalid { reason };
         let raw: serde_json::Value =
             serde_json::from_str(text).map_err(|e| bad(format!("catalog 不是合法 JSON：{e}")))?;
@@ -141,7 +136,7 @@ impl CatalogDocument {
             .is_some()
         {
             return Err(bad(
-                "catalog 不得自述 pubkey，验签公钥只来自 sources.json".into(),
+                "catalog 不得自述 pubkey，验签公钥只来自 sources.json".into()
             ));
         }
         if doc.sequence < 1 {
@@ -462,7 +457,11 @@ mod tests {
             }
         });
         let error = CatalogDocument::parse(&raw.to_string(), &pk, &registered).unwrap_err();
-        assert!(error.reason().contains("指纹与源登记值不符"), "{}", error.reason());
+        assert!(
+            error.reason().contains("指纹与源登记值不符"),
+            "{}",
+            error.reason()
+        );
     }
 
     #[test]

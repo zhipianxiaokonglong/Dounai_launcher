@@ -14,14 +14,14 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
-use launcher_core::lifecycle::{
-    activation_steps, rollback_steps, ActivationStep, Phase, ProbeState, RecoveryStep, RolesDoc,
-    Snapshot,
-};
 use launcher_core::admin_host::{AdminHost, Bounds, MountRequest};
 use launcher_core::chain::{
     ChainPlan, ChainProgress, ChainProgressPhase, ChainRegistry, ChainRunResult, ChainStepResult,
     ChainStepState, StepStatus, DEFAULT_CHAIN_ID,
+};
+use launcher_core::lifecycle::{
+    activation_steps, rollback_steps, ActivationStep, Phase, ProbeState, RecoveryStep, RolesDoc,
+    Snapshot,
 };
 use launcher_core::m2::adapters::RemoteCatalogAdapter;
 use launcher_core::m2::catalog::{
@@ -41,8 +41,8 @@ use launcher_core::m2::{semver_cmp, Category, InstanceSourceKind, Verdict, MAX_U
 use launcher_core::manifest::{ModuleManifestV2, Role};
 
 use crate::lifecycle_ops::{
-    all_instances, assign_ports, build_start_request, ordered_instances, package_dir, write_manifest,
-    MANIFEST_FILE,
+    all_instances, assign_ports, build_start_request, ordered_instances, package_dir,
+    write_manifest, MANIFEST_FILE,
 };
 use crate::lifecycle_runtime::Supervisor;
 use crate::m2_http::ReqwestCatalogFetcher;
@@ -747,7 +747,8 @@ struct EnvFacts {
 /// 卡片展示用的清单摘要。
 #[derive(Debug, Clone)]
 struct ManifestBrief {
-    name: String,    admin_ui: Option<AdminUiView>,
+    name: String,
+    admin_ui: Option<AdminUiView>,
 }
 
 /// 读模块根 manifest 取展示字段。
@@ -772,26 +773,24 @@ fn manifest_brief(state: &AppStateV2, instance: &Instance) -> ManifestBrief {
         .to_string();
     // shell 角色的管理界面不依赖实例运行，其余默认要求已在运行。
     let default_requires_running = instance.role.needs_runtime();
-    let admin_ui = raw
-        .pointer("/admin_ui/web_ui")
-        .and_then(|web| {
-            let path = web.get("path")?.as_str()?;
-            if !path.starts_with('/') {
-                return None;
-            }
-            Some(AdminUiView {
-                label: web
-                    .get("label")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("打开管理界面")
-                    .to_string(),
-                path: path.to_string(),
-                requires_running: web
-                    .get("requires_running")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(default_requires_running),
-            })
-        });
+    let admin_ui = raw.pointer("/admin_ui/web_ui").and_then(|web| {
+        let path = web.get("path")?.as_str()?;
+        if !path.starts_with('/') {
+            return None;
+        }
+        Some(AdminUiView {
+            label: web
+                .get("label")
+                .and_then(|v| v.as_str())
+                .unwrap_or("打开管理界面")
+                .to_string(),
+            path: path.to_string(),
+            requires_running: web
+                .get("requires_running")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(default_requires_running),
+        })
+    });
     ManifestBrief { name, admin_ui }
 }
 
@@ -1429,10 +1428,14 @@ fn inspect_bytes(
         max_unpacked: MAX_UNPACKED_BYTES,
     };
     let verified = verify_zip(bytes, &expectation).map_err(|e| e.to_string())?;
-    let cached_entry = state.cached_entries().values().find(|cached| {
-        cached.entry.module_id == verified.manifest.module_id
-            && cached.entry.variant == verified.manifest.variant
-    }).map(|cached| cached.entry.clone());
+    let cached_entry = state
+        .cached_entries()
+        .values()
+        .find(|cached| {
+            cached.entry.module_id == verified.manifest.module_id
+                && cached.entry.variant == verified.manifest.variant
+        })
+        .map(|cached| cached.entry.clone());
     let previous_fp = state
         .instances_for_module(&verified.manifest.module_id)
         .first()
@@ -1555,10 +1558,7 @@ pub struct EnvProgressEvent {
 ///
 /// 为什么降频：`uv -v` 在装大包时会连续刷行，每行都发一次事件会把 webview 的
 /// 消息队列排满。阶段或标题变化立即发，只有细节变化的按 150ms 合并。
-fn env_progress_sink(
-    app: &tauri::AppHandle,
-    instance_id: &str,
-) -> launcher_core::env::Sink {
+fn env_progress_sink(app: &tauri::AppHandle, instance_id: &str) -> launcher_core::env::Sink {
     use std::sync::{Arc, Mutex};
     let app = app.clone();
     let id = instance_id.to_string();
@@ -1730,24 +1730,28 @@ fn entry_installability(
     let entry = &cached.entry;
     let key = version_key(&entry.publisher_fp, &entry.module_id, &entry.variant);
     if let Some(seen) = catalog_state.last_seen_version.get(&key) {
-        if semver_cmp(&entry.version, seen).map_err(|e| e.to_string())? == std::cmp::Ordering::Less {
+        if semver_cmp(&entry.version, seen).map_err(|e| e.to_string())? == std::cmp::Ordering::Less
+        {
             return Ok("downgrade".into());
         }
     }
     if let Some(min_launcher) = &entry.min_launcher {
         let current = env!("CARGO_PKG_VERSION");
-        if semver_cmp(current, min_launcher).map_err(|e| e.to_string())? == std::cmp::Ordering::Less {
+        if semver_cmp(current, min_launcher).map_err(|e| e.to_string())? == std::cmp::Ordering::Less
+        {
             return Ok("incompatible".into());
         }
     }
     if let Some(local) = installed_version {
         check_update_allowed(&cached.doc, catalog_state, entry, local)
             .map_err(|e| e.reason().to_string())?;
-        return Ok(match semver_cmp(&entry.version, local).map_err(|e| e.to_string())? {
-            std::cmp::Ordering::Greater => "upgrade".into(),
-            std::cmp::Ordering::Equal => "installed".into(),
-            std::cmp::Ordering::Less => "downgrade".into(),
-        });
+        return Ok(
+            match semver_cmp(&entry.version, local).map_err(|e| e.to_string())? {
+                std::cmp::Ordering::Greater => "upgrade".into(),
+                std::cmp::Ordering::Equal => "installed".into(),
+                std::cmp::Ordering::Less => "downgrade".into(),
+            },
+        );
     }
     let revoked = cached
         .doc
@@ -2086,7 +2090,10 @@ pub fn inspect_source(request: InspectSourceRequest) -> Result<SourcePreview, St
     let fingerprint = launcher_core::m2::fingerprint(&pubkey).map_err(|e| e.to_string())?;
     let (host_suffixes, derived) = match request.host_suffixes {
         Some(list) if !list.is_empty() => (list, false),
-        _ => (derive_host_suffixes(&base_url).map_err(|e| e.to_string())?, true),
+        _ => (
+            derive_host_suffixes(&base_url).map_err(|e| e.to_string())?,
+            true,
+        ),
     };
     for suffix in &host_suffixes {
         validate_suffix(suffix)?;
@@ -2104,7 +2111,13 @@ pub fn inspect_source(request: InspectSourceRequest) -> Result<SourcePreview, St
         .unwrap_or(host)
         .to_ascii_lowercase()
         .chars()
-        .map(|c| if c.is_ascii_lowercase() || c.is_ascii_digit() { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_lowercase() || c.is_ascii_digit() {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect::<String>();
     Ok(SourcePreview {
         name: host.to_string(),
@@ -2114,7 +2127,8 @@ pub fn inspect_source(request: InspectSourceRequest) -> Result<SourcePreview, St
         catalog_fingerprint: fingerprint,
         host_suffixes,
         derived,
-        note: "下一步会展示完整指纹并请你确认；确认前不会写入 sources.json，也不会写 trust.json。".into(),
+        note: "下一步会展示完整指纹并请你确认；确认前不会写入 sources.json，也不会写 trust.json。"
+            .into(),
     })
 }
 
@@ -3397,10 +3411,7 @@ fn next_chain_id(registry: &ChainRegistry) -> String {
 }
 
 /// 默认链路按 role 拓扑排序。抽成不依赖 Supervisor 的纯函数，便于离线断言顺序。
-fn default_ordered_ids(
-    roles: &RolesDoc,
-    instances: Vec<Instance>,
-) -> Result<Vec<String>, String> {
+fn default_ordered_ids(roles: &RolesDoc, instances: Vec<Instance>) -> Result<Vec<String>, String> {
     let ordered = ordered_instances(roles, instances)?;
     Ok(ordered.iter().map(|i| i.instance_id.clone()).collect())
 }
@@ -3545,11 +3556,9 @@ fn run_chain(
         };
         let instance = state.instance(&step.instance_id);
         let exists = instance.is_some();
-        if let Some((step_state, cause)) = precheck_step(
-            step.status,
-            exists,
-            prepared.contains(&step.instance_id),
-        ) {
+        if let Some((step_state, cause)) =
+            precheck_step(step.status, exists, prepared.contains(&step.instance_id))
+        {
             let reason = cause.to_string();
             if step_state == ChainStepState::Blocked {
                 result.missing_deps.push(step.instance_id.clone());
@@ -3608,10 +3617,7 @@ pub fn delete_chain(
 }
 
 #[tauri::command]
-pub async fn start_chain(
-    chain_id: String,
-    app: AppHandle,
-) -> Result<ChainRunResult, String> {
+pub async fn start_chain(chain_id: String, app: AppHandle) -> Result<ChainRunResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppStateV2>();
         let supervisor = app.state::<Supervisor>();

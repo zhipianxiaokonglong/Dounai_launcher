@@ -37,8 +37,7 @@ fn official_source() -> SourceEntry {
 fn builtin_catalog_verifies_with_builtin_k5() {
     let source = official_source();
     let fetcher = ReqwestCatalogFetcher::new(source.host_suffixes.clone()).unwrap();
-    let adapter =
-        RemoteCatalogAdapter::from_source(&source, vec![source.id.clone()], &fetcher);
+    let adapter = RemoteCatalogAdapter::from_source(&source, vec![source.id.clone()], &fetcher);
     let doc = adapter
         .fetch_catalog()
         .expect("线上 catalog 应可取到并验签通过")
@@ -92,8 +91,7 @@ fn builtin_catalog_verifies_with_builtin_k5() {
 fn first_catalog_package_downloads_and_matches_hash() {
     let source = official_source();
     let fetcher = ReqwestCatalogFetcher::new(source.host_suffixes.clone()).unwrap();
-    let adapter =
-        RemoteCatalogAdapter::from_source(&source, vec![source.id.clone()], &fetcher);
+    let adapter = RemoteCatalogAdapter::from_source(&source, vec![source.id.clone()], &fetcher);
     let doc: CatalogDocument = adapter.fetch_catalog().unwrap().unwrap();
     let entry = doc.modules.first().expect("目录为空");
 
@@ -104,12 +102,7 @@ fn first_catalog_package_downloads_and_matches_hash() {
     let options = DownloadOptions {
         retries: 1,
         backoff_ms: 200,
-        expected_sha256: Some(
-            entry
-                .sha256
-                .trim_start_matches("sha256:")
-                .to_string(),
-        ),
+        expected_sha256: Some(entry.sha256.trim_start_matches("sha256:").to_string()),
     };
     let report = download(
         &ReqwestClient::default_client(source.host_suffixes.clone()).unwrap(),

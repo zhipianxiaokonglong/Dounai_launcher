@@ -106,7 +106,10 @@ impl InstallState {
                 fresh.uv_sha256.clone(),
                 fresh.uv_version.clone(),
             )?;
-            return Ok((value, Some(format!("install.json 缺失，已补写：{}", path.display()))));
+            return Ok((
+                value,
+                Some(format!("install.json 缺失，已补写：{}", path.display())),
+            ));
         }
 
         match Self::load(paths) {
@@ -120,10 +123,7 @@ impl InstallState {
                 fresh.write()?;
                 let note = format!(
                     "随包 uv 从 {}（{}）换成 {}（{}），已更新 install.json",
-                    existing.uv_version,
-                    existing.uv_sha256,
-                    fresh.uv_version,
-                    fresh.uv_sha256
+                    existing.uv_version, existing.uv_sha256, fresh.uv_version, fresh.uv_sha256
                 );
                 Ok((fresh, Some(note)))
             }
@@ -363,7 +363,10 @@ mod tests {
         )
         .unwrap();
         state(&stale).write().unwrap();
-        assert!(InstallState::load(&p).is_err(), "前提：当前根的 load 必须失败");
+        assert!(
+            InstallState::load(&p).is_err(),
+            "前提：当前根的 load 必须失败"
+        );
 
         let (repaired, note) = InstallState::ensure(
             &p,

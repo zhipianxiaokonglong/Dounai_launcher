@@ -162,19 +162,15 @@ impl AdminHost for TauriAdminHost {
     }
 
     fn unmount(&self, label: &str) -> Result<(), AdminHostError> {
-        let webview = find(&self.app, label)
-            .ok_or_else(|| AdminHostError::NotMounted(label.to_string()))?;
-        webview
-            .close()
-            .map_err(|e| unavailable(&e.to_string()))
+        let webview =
+            find(&self.app, label).ok_or_else(|| AdminHostError::NotMounted(label.to_string()))?;
+        webview.close().map_err(|e| unavailable(&e.to_string()))
     }
 
     fn reload(&self, label: &str) -> Result<(), AdminHostError> {
-        let webview = find(&self.app, label)
-            .ok_or_else(|| AdminHostError::NotMounted(label.to_string()))?;
-        webview
-            .reload()
-            .map_err(|e| unavailable(&e.to_string()))
+        let webview =
+            find(&self.app, label).ok_or_else(|| AdminHostError::NotMounted(label.to_string()))?;
+        webview.reload().map_err(|e| unavailable(&e.to_string()))
     }
 }
 
@@ -279,13 +275,38 @@ mod tests {
     #[test]
     fn resize_rejects_bad_bounds() {
         for bad in [
-            Bounds { x: -1.0, y: 0.0, width: 10.0, height: 10.0 },
-            Bounds { x: 0.0, y: 0.0, width: 0.0, height: 10.0 },
-            Bounds { x: f64::NAN, y: 0.0, width: 10.0, height: 10.0 },
-            Bounds { x: f64::INFINITY, y: 0.0, width: 10.0, height: 10.0 },
+            Bounds {
+                x: -1.0,
+                y: 0.0,
+                width: 10.0,
+                height: 10.0,
+            },
+            Bounds {
+                x: 0.0,
+                y: 0.0,
+                width: 0.0,
+                height: 10.0,
+            },
+            Bounds {
+                x: f64::NAN,
+                y: 0.0,
+                width: 10.0,
+                height: 10.0,
+            },
+            Bounds {
+                x: f64::INFINITY,
+                y: 0.0,
+                width: 10.0,
+                height: 10.0,
+            },
         ] {
             assert!(!valid_bounds(bad), "非法尺寸必须挡住：{bad:?}");
         }
-        assert!(valid_bounds(Bounds { x: 0.0, y: 0.0, width: 1.0, height: 1.0 }));
+        assert!(valid_bounds(Bounds {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0
+        }));
     }
 }

@@ -87,10 +87,8 @@ impl SourceAdapter for RemoteCatalogAdapter<'_> {
 
     fn fetch_catalog(&self) -> Result<Option<CatalogDocument>, SourceError> {
         let url = format!("{}/catalog.json", self.base_url.trim_end_matches('/'));
-        validate_download_url(&url, &self.suffixes()).map_err(|e| {
-            SourceError::CatalogInvalid {
-                reason: e.reason().to_string(),
-            }
+        validate_download_url(&url, &self.suffixes()).map_err(|e| SourceError::CatalogInvalid {
+            reason: e.reason().to_string(),
         })?;
         let bytes = self.http.get(&url)?;
         let text = std::str::from_utf8(&bytes).map_err(|e| SourceError::CatalogInvalid {

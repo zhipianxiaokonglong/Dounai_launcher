@@ -19,8 +19,8 @@ pub mod time;
 pub use admin_host::{AdminHost, AdminHostError, HostEvent, MountRequest, RecordingAdminHost};
 pub use chain::{
     Chain, ChainError, ChainPlan, ChainProgress, ChainProgressPhase, ChainRegistry, ChainRunResult,
-    ChainStepResult, ChainStepState, PlannedStep, StepStatus, DEFAULT_CHAIN_ID,
-    DEFAULT_CHAIN_NAME, MAX_STEPS,
+    ChainStepResult, ChainStepState, PlannedStep, StepStatus, DEFAULT_CHAIN_ID, DEFAULT_CHAIN_NAME,
+    MAX_STEPS,
 };
 pub use env::{
     cache_usage, dir_usage, prepare_instance, prepare_instance_with, runtime_usage,

@@ -25,7 +25,9 @@ impl UvFetcher for NoFetch {
 }
 
 fn bundled_binary() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("bin").join("uv.exe")
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("bin")
+        .join("uv.exe")
 }
 
 #[test]

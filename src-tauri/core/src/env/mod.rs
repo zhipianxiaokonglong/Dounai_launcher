@@ -390,12 +390,8 @@ pub fn prepare_instance_with(
             },
         );
         progress::emit(
-            EnvProgress::new(EnvPhase::Done, "依赖已就绪").with_detail(
-                prepared
-                    .venv_python
-                    .to_string_lossy()
-                    .into_owned(),
-            ),
+            EnvProgress::new(EnvPhase::Done, "依赖已就绪")
+                .with_detail(prepared.venv_python.to_string_lossy().into_owned()),
         );
         Ok((prepared, runtime))
     })();
@@ -446,7 +442,8 @@ pub fn instance_snapshot_pinned(paths: &Paths, instance_id: &str) -> Option<bool
 }
 
 /// 生产入口：只读状态，比对哈希与安装根，不启动任何子进程。
-pub fn verify_instance(paths: &Paths, instance_id: &str) -> Result<PreparedEnv, EnvError> {    let install = InstallState::load(paths).map_err(|e| {
+pub fn verify_instance(paths: &Paths, instance_id: &str) -> Result<PreparedEnv, EnvError> {
+    let install = InstallState::load(paths).map_err(|e| {
         EnvError::new(
             EnvErrorKind::RootMismatch,
             instance_id,
