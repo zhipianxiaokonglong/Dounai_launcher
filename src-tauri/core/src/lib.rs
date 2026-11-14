@@ -4,6 +4,7 @@
 //! 命令面负责校验参数与转换结果，业务逻辑逐步迁入本层。
 
 pub mod admin_host;
+pub mod chain;
 pub mod env;
 pub mod install;
 pub mod lifecycle;
@@ -16,6 +17,11 @@ pub mod state;
 pub mod time;
 
 pub use admin_host::{AdminHost, AdminHostError, HostEvent, MountRequest, RecordingAdminHost};
+pub use chain::{
+    Chain, ChainError, ChainPlan, ChainProgress, ChainProgressPhase, ChainRegistry, ChainRunResult,
+    ChainStepResult, ChainStepState, PlannedStep, StepStatus, DEFAULT_CHAIN_ID,
+    DEFAULT_CHAIN_NAME, MAX_STEPS,
+};
 pub use env::{
     cache_usage, dir_usage, prepare_instance, prepare_instance_with, runtime_usage,
     verify_instance, verify_instance_with, CacheUsage, EnvContext, EnvError, EnvErrorKind,
