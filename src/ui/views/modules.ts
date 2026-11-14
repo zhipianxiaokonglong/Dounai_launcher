@@ -29,6 +29,7 @@ import {
   openModal,
   toast,
 } from "../dom.js";
+import { formatChainResult, setLastChainRun } from "./chains.js";
 import { icon } from "../icons.js";
 import {
   beginEnvJob,
@@ -84,7 +85,7 @@ function renderHead(head: HTMLElement): void {
     <div class="sp">
       <button class="btn btn--sm" type="button" data-act="catalog">下载中心</button>
       <button class="btn btn--sm" type="button" data-act="stop-all">停止全部</button>
-      <button class="btn btn--primary btn--sm" type="button" data-act="start-all">一键启动</button>
+      <button class="btn btn--primary btn--sm" type="button" data-act="start-all" title="启动隐式默认链路，逐步骤结果见「链路」页">一键启动</button>
     </div>
   `;
 
@@ -647,20 +648,25 @@ async function restartOne(instanceId: string): Promise<void> {
 async function startEverything(): Promise<void> {
   await runBulk("一键启动", async () => {
     try {
-      toast("正在按拓扑顺序启动…");
-      const results = await startAll();
-      // 启动返回时实例通常还在 Starting，等健康检查才转 Running。
-      // 只数 running 会报「已启动 0 个」，把正在起的也算上，另说清有几个在等。
-      const started = results.filter((r) => r.run === "running" || r.run === "starting").length;
-      const waiting = results.filter((r) => r.run === "starting").length;
-      const failed = results.filter((r) => r.run === "failed");
-      if (failed.length === 0) {
-        const tail = waiting > 0 ? `，其中 ${waiting} 个正在等健康检查` : "";
-        toast(`已启动 ${started} / ${results.length} 个实例${tail}`, "ok");
+      toast("正在按默认链路批量提交启动…");
+      const result = await startAll();
+      // 一键启动与链路页共用同一份结果：这里汇总 toast，逐步状态点交给链路页。
+      setLastChainRun(result);
+      const summary = formatChainResult(result);
+      const problems = result.steps.filter(
+        (step) =>
+          step.state === "failed" ||
+          step.state === "blocked" ||
+          step.state === "dangling",
+      );
+      const submitted = summary.started + summary.external;
+      if (problems.length === 0) {
+        const tail = summary.external > 0 ? `，其中 ${summary.external} 个是外部服务` : "";
+        toast(`默认链路已提交 ${submitted} / ${summary.total} 步${tail}；步骤见「链路」页`, "ok");
       } else {
         toast(
-          `启动 ${started} / ${results.length}，失败：${failed
-            .map((r) => `${r.module_id}（${r.last_error ?? "未知原因"}）`)
+          `默认链路提交 ${submitted} / ${summary.total} 步，需注意：${problems
+            .map((step) => `第 ${step.index} 步 ${step.instance_id}（${step.reason ?? "未说明"}）`)
             .join("；")}`,
           "error",
         );

@@ -61,14 +61,27 @@ describe("启停桥接", () => {
     expect(v.run).toBe("stopped");
   });
 
-  it("start_all 不带参数并返回多个快照", async () => {
+  it("start_all 不带参数并返回默认链路的逐步骤结果", async () => {
     const calls: Call[] = [];
-    installTauri([runView, { ...runView, module_id: "moodvoice", run: "failed" }], calls);
-    const list = await startAll();
+    installTauri(
+      {
+        chain_id: "default",
+        is_default: true,
+        steps: [
+          { index: 1, instance_id: "a@stable", state: "started", reason: null },
+          { index: 2, instance_id: "b@stable", state: "failed", reason: "端口被占" },
+        ],
+        missing_deps: [],
+      },
+      calls,
+    );
+    const result = await startAll();
     expect(calls[0]?.cmd).toBe("start_all");
     expect(calls[0]?.args).toBeUndefined();
-    expect(list).toHaveLength(2);
-    expect(list[1]?.run).toBe("failed");
+    expect(result.is_default).toBe(true);
+    expect(result.steps).toHaveLength(2);
+    expect(result.steps[1]?.state).toBe("failed");
+    expect(result.steps[1]?.reason).toBe("端口被占");
   });
 
   it("stop_all 不带参数", async () => {

@@ -221,14 +221,116 @@ export async function stopModule(moduleId: string): Promise<RunView> {
   return call<RunView>("stop_module", { moduleId });
 }
 
-/** 一键启动：按依赖顺序拉起所有已启用模块。 */
-export async function startAll(): Promise<RunView[]> {
-  return call<RunView[]>("start_all");
+/** 一键启动 = 启动隐式默认链路，返回按步骤的结果（M6 起）。 */
+export async function startAll(): Promise<ChainRunResult> {
+  return call<ChainRunResult>("start_all");
 }
 
-/** 全部停止。 */
+/** 全部停止。这是全局逆序停全部托管实例，不是 stop_chain。 */
 export async function stopAll(): Promise<RunView[]> {
   return call<RunView[]>("stop_all");
+}
+
+/* ------------------------------------------------------------------ */
+/* M6 链路                                                             */
+/* ------------------------------------------------------------------ */
+
+/** 默认链路的保留 id：不落盘，由实例表按 role 拓扑即时生成。 */
+export const DEFAULT_CHAIN_ID = "default";
+
+export type ChainStepState = "started" | "external" | "failed" | "blocked" | "dangling";
+export type ChainProgressPhase = "submitting" | "finished";
+
+export interface ChainStepView {
+  index: number;
+  instance_id: string;
+  name: string;
+  exists: boolean;
+}
+
+export interface ChainView {
+  id: string;
+  name: string;
+  steps: ChainStepView[];
+  missing_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChainsView {
+  chains: ChainView[];
+  /** 隐式默认链路的步骤，只用于预览，不落盘。 */
+  default_steps: string[];
+}
+
+export interface ChainStepResult {
+  index: number;
+  instance_id: string;
+  state: ChainStepState;
+  reason: string | null;
+}
+
+export interface ChainRunResult {
+  chain_id: string;
+  is_default: boolean;
+  steps: ChainStepResult[];
+  /** 依赖未准备、被跳过的实例，供界面「一键补装」。 */
+  missing_deps: string[];
+}
+
+/** Rust 侧 ChainProgress 没加 rename_all，字段名保持 snake_case。 */
+export interface ChainProgressEvent {
+  chain_id: string;
+  index: number;
+  total: number;
+  instance_id: string;
+  phase: ChainProgressPhase;
+  state: ChainStepState | null;
+  reason: string | null;
+}
+
+export interface ChainStopResult {
+  chain_id: string;
+  stopped: string[];
+  failed: ChainStepResult[];
+}
+
+export interface SaveChainRequest {
+  /** 空或 null 表示新建，后端生成 chain-N。 */
+  id?: string | null;
+  name: string;
+  steps: string[];
+}
+
+export async function listChains(): Promise<ChainsView> {
+  return call<ChainsView>("list_chains");
+}
+
+export async function saveChain(request: SaveChainRequest): Promise<ChainsView> {
+  return call<ChainsView>("save_chain", { request });
+}
+
+export async function deleteChain(id: string): Promise<ChainsView> {
+  return call<ChainsView>("delete_chain", { id });
+}
+
+export async function startChain(chainId: string): Promise<ChainRunResult> {
+  return call<ChainRunResult>("start_chain", { chainId });
+}
+
+/** onlyStarted 为真时只停本次链路拉起的实例，用于失败态的「回滚停止」。 */
+export async function stopChain(
+  chainId: string,
+  onlyStarted = false,
+): Promise<ChainStopResult> {
+  return call<ChainStopResult>("stop_chain", { chainId, onlyStarted });
+}
+
+/** 订阅链路进度。浏览器模式返回不做事的退订函数。 */
+export function onChainProgress(handler: (event: ChainProgressEvent) => void): () => void {
+  return listenEvent<ChainProgressEvent>("chain-progress", (payload) => {
+    if (payload && typeof payload.instance_id === "string") handler(payload);
+  });
 }
 
 /* ------------------------------------------------------------------ */

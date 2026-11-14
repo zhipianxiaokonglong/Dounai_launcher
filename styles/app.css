@@ -1580,6 +1580,165 @@ select.input:focus-visible {
   margin-bottom: 6px;
 }
 
+/* ---------------- 链路（M6） ---------------- */
+
+.chain-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.chain-card .card-top > div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.chain-card .ctl--row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chain-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.chain-steps li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
+  background: var(--panel-2);
+  font-size: 12px;
+}
+
+.chain-steps li.cap {
+  color: var(--fg-2);
+}
+
+.chain-idx {
+  flex: 0 0 20px;
+  color: var(--fg-3);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.chain-step__name {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chain-steps .fp {
+  overflow: hidden;
+  color: var(--fg-2);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chain-step .sp {
+  flex: 1;
+}
+
+.chain-dot {
+  flex: 0 0 8px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--stop-weak);
+}
+
+.chain-dot--ok { background: var(--run); }
+.chain-dot--fail { background: var(--danger); }
+.chain-dot--warn { background: var(--warn); }
+.chain-dot--idle { background: var(--stop-weak); }
+
+.chain-result { border-left: 3px solid var(--run); }
+.chain-result--bad { border-left-color: var(--danger); }
+.chain-result .chain-steps li {
+  padding: 2px 0;
+  border: none;
+  background: transparent;
+}
+
+.chain-deps {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--r-s);
+  background: var(--accent-soft);
+  font-size: 12px;
+}
+
+.chain-editor__list,
+.chain-editor__candidates {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.chain-editor__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
+  background: var(--panel-2);
+  font-size: 12px;
+}
+
+.chain-editor__row .sp { flex: 1; }
+.chain-editor__name {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chain-editor__row .fp {
+  max-width: 240px;
+  overflow: hidden;
+  color: var(--fg-2);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chain-editor__cand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: var(--r-s);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.chain-editor__cand:hover { background: var(--panel-2); }
+.chain-editor__cand .fp {
+  margin-left: auto;
+  color: var(--fg-2);
+  font-size: 10.5px;
+}
+
 /* ---------------- 空态 / 提示 ---------------- */
 
 .empty {
