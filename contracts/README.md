@@ -1,6 +1,8 @@
-# M0 契约冻结文件
+# 契约文件
 
 启动器 v2 的角色、包格式与本地状态以本目录为单一真源。Rust 侧类型定义、跨仓一致性 CI 与发布工具都以这里的文件为准。修改任一文件后，先运行校验，再同步依赖这些文件的代码与样例。
+
+**契约在正式完工前不冻结。** M0 那次「先冻结再实现」让后续每个阶段都在为早期形状擦屁股；现在按需要直接改字段，不叠加兼容分支、不为改一个字段升文件名版本号。文件名里的 `v1`/`v2` 只标识格式代次，不表示已冻结。唯一约束是改完必须同步校验器、CI、样例、Rust 类型与文档，不允许只改一半。
 
 ## 文件
 
@@ -8,9 +10,10 @@
 |---|---|---|
 | `roles-v1.json` | 五值封闭枚举、规范端口、health 路径、契约探测路径 | 启动器仓，编译期内嵌 |
 | `module-v2.schema.json` | zip 包与 dir 目录实例共用的 manifest | 发布者，`pack` 工具生成 |
-| `catalog-v2.schema.json` | K5 签名的索引、版本单调性与新鲜度 | 官方发布流水线 |
+| `catalog-v2.schema.json` | 由各源登记公钥签名的索引、版本单调性与新鲜度 | 该源的发布流水线 |
 | `source-v1.schema.json` | `state/installed.json` 的实例记录、来源与 active 槽 | 启动器 |
-| `trust-v1.schema.json` | `state/trust.json` 的公钥信任列表 | 启动器 |
+| `sources-v1.schema.json` | `state/sources.json` 的源注册表、catalog 公钥与每源水位 | 启动器 |
+| `trust-v1.schema.json` | `state/trust.json` 的公钥信任列表（只管包签名） | 启动器 |
 | `retention-v1.schema.json` | `state/retention.json` 的旧版保留策略 | 启动器 |
 | `install-v1.schema.json` | `state/install.json` 的双根、安装模式与 uv 定位 | M5 安装器写，M1 夹具可写 |
 | `deps-v1.schema.json` | `state/deps/<instance_key>/<sha256>.json` 的 generation 元数据 | 环境引擎 |
@@ -18,7 +21,7 @@
 | `validate.mjs` | 零依赖契约校验器 | 启动器仓 |
 | `check-upstreams.mjs` | 核对角色声明与五个仓源码是否一致 | 启动器仓 |
 | `examples/*.v2.json` | 五个角色的 schema 校验样例 | 启动器仓 |
-| `examples/state/*.json` | `install.json` 与 `deps.json` 的状态数据样例 | 启动器仓 |
+| `examples/state/*.json` | `install.json`、`deps.json` 与 `sources.json` 的状态数据样例 | 启动器仓 |
 
 ## 五个角色
 
@@ -81,15 +84,15 @@ node contracts/validate.mjs
 node contracts/check-upstreams.mjs
 ```
 
-`validate.mjs` 零依赖，按 `module-v2.schema.json` 校验五份样例与两份状态样例，并核对角色枚举与样例的端口、health、依赖。当前 109 项断言全部通过。CI 另用 ajv 编译六份状态 schema，并对 manifest 与状态样例做数据级校验。
+`validate.mjs` 零依赖，按 `module-v2.schema.json` 校验五份样例与三份状态样例，并核对角色枚举与样例的端口、health、依赖。当前 129 项断言全部通过。CI 另用 ajv 编译七份状态 schema，并对 manifest 与状态样例做数据级校验。
 
-负例覆盖未知 role、路径穿越、缺 `pubkey` 与未验证实例自动更新。M1 新增的负例覆盖相对路径、哈希格式与未知 `kind`。
+负例覆盖未知 role、路径穿越、缺 `pubkey` 与未验证实例自动更新。M1 新增的负例覆盖相对路径、哈希格式与未知 `kind`。M8 新增的负例覆盖 catalog 自述 `pubkey`、缺 `signer_fp`、源条目缺指纹、内置源可删除、社区源可自动更新、公共后缀白名单与撤销后仍启用。
 
 `check-upstreams.mjs` 从组装层与三个上游的源码解析 GET 路由和端口，逐项比对 `roles-v1.json`。默认读取工作区根目录下的五个仓；用 `--root` 指向别的检出布局，用 `--roles` 指向另一份角色契约做负例测试。源码缺失、路径不一致或正则零匹配都判失败，不把检查不适用当成通过。
 
-[contracts.yml](../.github/workflows/contracts.yml) 在每次 push 与 PR 检出四个上游仓。job 依次运行两份校验器。ajv 接着编译六份状态 schema，校验五份 manifest 样例与两份状态样例。workflow 不设跳过条件，也不使用 `continue-on-error`。
+[contracts.yml](../.github/workflows/contracts.yml) 在每次 push 与 PR 检出四个上游仓。job 依次运行两份校验器。ajv 接着编译七份状态 schema，校验五份 manifest 样例与三份状态样例。workflow 不设跳过条件，也不使用 `continue-on-error`。
 
-`validate.mjs` 不校验 `format` 关键字。draft 2020-12 把 `format` 当注释，所以时间字段另用 `pattern` 断言 UTC 格式。CI 的 ajv 带 `-c ajv-formats` 编译六份状态 schema，对五份 manifest 样例与两份状态样例做数据级校验，`date-time` 在 CI 生效。本地复核命令见 workflow，需装 `ajv-cli@5` 与 `ajv-formats@3`。
+`validate.mjs` 不校验 `format` 关键字。draft 2020-12 把 `format` 当注释，所以时间字段另用 `pattern` 断言 UTC 格式。CI 的 ajv 带 `-c ajv-formats` 编译七份状态 schema，对五份 manifest 样例与三份状态样例做数据级校验，`date-time` 在 CI 生效。本地复核命令见 workflow，需装 `ajv-cli@5` 与 `ajv-formats@3`。
 
 ## 发布工具
 
@@ -118,7 +121,7 @@ cargo run --bin sign_catalog -- verify --pubkey k5.pub --catalog signed.json
 3. `model_packs` 设为可选字段。字段沿用 v1，待后续细化。
 4. v1 的 `reserved` 段未纳入 v2。默认禁用等语义改由 `category: reserved` 与验签结果裁定。
 5. `active` 对象不含 `auxiliary` 键。该角色没有 active 上限，用槽位表达会产生假的单选约束。
-6. `last_seen_version` 放在 `installed.json` 的 `catalog_state`，不新增状态文件。
+6. `last_seen_version` 放在 `installed.json` 的 `catalog_state`，按 `publisher_fp/module_id/variant` 天然隔离，不按源再拆。M8 把每源的 `sequence` / `expires` 水位移到 `state/sources.json`，`catalog_state` 只保留 `last_seen_version`。
 7. 三个契约端点的返回结构不同，`required_contract.expect.shape` 分别为 `json_schema`、`contract_manifest`、`contract_document`。本版不做统一 schema 化。
 8. 官方 `module_id` 采用 `dounai/` 加 v1 标识。namespace 只是命名，不表示信任；“官方”标签只由内置 K1 指纹验通授予。
 9. `roles.json` 定名为 `roles-v1.json`，文件名带版本，便于后续不兼容升级。
@@ -128,7 +131,8 @@ cargo run --bin sign_catalog -- verify --pubkey k5.pub --catalog signed.json
 ## 变更规则
 
 - `roles-v1.json` 增加或删除 `role` 时，同步改 `module-v2.schema.json` 的 `role` 枚举、`source-v1.schema.json` 的 `active` 键集合、`catalog-v2.schema.json` 的条目枚举与五份样例。
-- 字段语义不兼容时升文件名版本号，不在原文件里叠加兼容分支。
+- 字段语义不兼容时直接改本份契约并同步所有消费者，不叠加兼容分支。只有存在**已分发制品**且需要同时读新旧两代格式时才升文件名版本号；正式完工前没有这种制品。
+- M8 直接改 `catalog-v2` 与 `source-v1`：`signature.key_id` 从 `K5` 常量放开为展示用字符串，新增必填 `signature.signer_fp`；`catalog_state.sequence/expires` 从必填改为「M8 起停止写入」的废弃字段，实例新增可选 `source_id`。新增 `sources-v1.schema.json` 与 `examples/state/sources.json`。官方 catalog 尚未签发，没有已分发制品，因此不升文件名版本号、不写读取旧 catalog 的兼容分支；旧 `installed.json` 里残留的 `sequence/expires` 只读不判。
 - 签名算法标识由 `SHA-256 + Ed25519` 改为 `Ed25519`。改动发生在任何包或 catalog 对外发布之前，没有已分发制品，不升文件名版本号；`validate.mjs` 用负例断言拒收旧值。发布后如需再改，必须升版本。
 - `validate.mjs` 的失败项不得通过放宽 schema 消除。允许例外时，在断言里写明理由。
 - M1 新增 `install-v1.schema.json` 与 `deps-v1.schema.json`。`module-v2.schema.json` 只改 `runtime.deps` 与 `runtime.snapshot_sha256` 的 `description`，字段类型、必填与取值未变，不升文件名版本号。

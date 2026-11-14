@@ -126,6 +126,7 @@ const roles = read('roles-v1.json');
 const moduleSchema = read('module-v2.schema.json');
 const catalogSchema = read('catalog-v2.schema.json');
 const sourceSchema = read('source-v1.schema.json');
+const sourcesSchema = read('sources-v1.schema.json');
 const trustSchema = read('trust-v1.schema.json');
 const retentionSchema = read('retention-v1.schema.json');
 const installSchema = read('install-v1.schema.json');
@@ -197,7 +198,10 @@ validates('shell 不带 runtime 仍通过', samples[3].data, moduleSchema);
 validates('dir 实例 files 为 {} 仍通过', clone({ files: {} }), moduleSchema);
 
 report.push('== 其余四份 schema 的可用性 ==');
-validates('catalog-v2.schema.json 接受最小合法 catalog', {
+const catalogSig = (patch = {}) => ({
+  algo: 'Ed25519', key_id: 'K5', signer_fp: FP, signed_at: TIME, value: SIG, ...patch
+});
+const minCatalog = (patch = {}) => ({
   schema_version: 2, sequence: 1, generated_at: TIME, expires: TIME,
   sources: [{ id: 'github', kind: 'github', base_url: 'https://example.com', priority: 1 }],
   modules: [{
@@ -207,20 +211,18 @@ validates('catalog-v2.schema.json 接受最小合法 catalog', {
     signature_required: true, expires: TIME
   }],
   revoked: [],
-  signature: { algo: 'Ed25519', key_id: 'K5', signed_at: TIME, value: SIG }
-}, catalogSchema);
-rejects('catalog 含未注册 role 被拒', {
-  schema_version: 2, sequence: 1, generated_at: TIME, expires: TIME,
-  sources: [{ id: 'github', kind: 'github', base_url: 'https://example.com', priority: 1 }],
+  signature: catalogSig(),
+  ...patch
+});
+validates('catalog-v2.schema.json 接受最小合法 catalog', minCatalog(), catalogSchema);
+rejects('catalog 含未注册 role 被拒', minCatalog({
   modules: [{
     module_id: 'dounai/omninexus', variant: 'stable', version: '0.3.3', role: 'planner',
     name: 'OmniNexus', publisher_fp: FP, sha256: FP, size: 1024,
     sources: [{ source_id: 'github', url: 'https://example.com/a.zip' }],
     signature_required: true, expires: TIME
-  }],
-  revoked: [],
-  signature: { algo: 'Ed25519', key_id: 'K5', signed_at: TIME, value: SIG }
-}, catalogSchema);
+  }]
+}), catalogSchema);
 
 const installed = {
   schema_version: 1,
@@ -363,8 +365,88 @@ for (const [name, file, schema] of [
   validates(`${name} 通过 ${schema.$id.split('/').pop()}`, read(file), schema);
 }
 
+report.push('== M8 多源契约 ==');
+const sourcesExample = read('examples/state/sources.json');
+const communitySource = {
+  id: 'community-demo',
+  name: 'Demo Community',
+  kind: 'community',
+  base_url: 'https://example.org/catalog',
+  catalog_pubkey: `${'A'.repeat(43)}=`,
+  catalog_fingerprint: FP,
+  host_suffixes: ['example.org'],
+  enabled: true,
+  deletable: true,
+  auto_update: false,
+  group: 'community-demo',
+  sequence: null,
+  expires: null,
+  priority: 3,
+  added_at: TIME,
+  revoked_at: null
+};
+const withSources = (list) => ({ schema_version: 1, sources: list });
+const patchSource = (patch, index = 0) => {
+  const list = sourcesExample.sources.map((s) => ({ ...s }));
+  Object.assign(list[index], patch);
+  return withSources(list);
+};
+const patchCommunity = (patch) => withSources([
+  ...sourcesExample.sources.map((s) => ({ ...s })),
+  { ...communitySource, ...patch }
+]);
+
+validates('catalog-v2 接受社区源自己的 key_id 与 signer_fp',
+  minCatalog({ signature: catalogSig({ key_id: 'community-k1' }) }), catalogSchema);
+rejects('catalog-v2 拒绝缺 signer_fp',
+  minCatalog({ signature: { algo: 'Ed25519', key_id: 'K5', signed_at: TIME, value: SIG } }), catalogSchema);
+rejects('catalog-v2 拒绝非法 signer_fp',
+  minCatalog({ signature: catalogSig({ signer_fp: 'sha256:xyz' }) }), catalogSchema);
+rejects('catalog-v2 拒绝 catalog 自述 pubkey',
+  minCatalog({ signature: catalogSig({ pubkey: `${'A'.repeat(43)}=` }) }), catalogSchema);
+expect('catalog-v2 的 key_id 已不再冻结为 K5',
+  catalogSchema.properties.signature.properties.key_id.const === undefined
+  && catalogSchema.properties.signature.required.includes('signer_fp'));
+
+const installedWithSource = JSON.parse(JSON.stringify(installed));
+installedWithSource.instances['dounai/omninexus@stable@main'].source_id = 'official-sf';
+validates('source-v1 接受带 source_id 的实例', installedWithSource, sourceSchema);
+validates('source-v1 接受不再写 sequence / expires 的 catalog_state', {
+  ...installed, catalog_state: { last_seen_version: {} }
+}, sourceSchema);
+
+validates('sources-v1 接受内置源注册表样例', sourcesExample, sourcesSchema);
+validates('sources-v1 接受社区源条目', patchCommunity({}), sourcesSchema);
+rejects('sources-v1 拒绝源条目缺 catalog_fingerprint', (() => {
+  const doc = patchCommunity({});
+  delete doc.sources[2].catalog_fingerprint;
+  return doc;
+})(), sourcesSchema);
+rejects('sources-v1 拒绝内置源 deletable: true', patchSource({ deletable: true }), sourcesSchema);
+rejects('sources-v1 拒绝社区源 auto_update: true', patchCommunity({ auto_update: true }), sourcesSchema);
+rejects('sources-v1 拒绝源条目自述 pubkey', patchCommunity({ pubkey: `${'A'.repeat(43)}=` }), sourcesSchema);
+rejects('sources-v1 拒绝空 host_suffixes', patchCommunity({ host_suffixes: [] }), sourcesSchema);
+rejects('sources-v1 拒绝公共后缀 com', patchCommunity({ host_suffixes: ['com'] }), sourcesSchema);
+rejects('sources-v1 拒绝非 https base_url', patchCommunity({ base_url: 'http://example.org/catalog' }), sourcesSchema);
+rejects('sources-v1 拒绝撤销公钥后仍启用的源',
+  patchCommunity({ revoked_at: TIME }), sourcesSchema);
+expect('源 id 唯一，官方主源与镜像共享 official 水位组',
+  new Set(sourcesExample.sources.map((s) => s.id)).size === sourcesExample.sources.length
+  && sourcesExample.sources.filter((s) => s.kind === 'official').every((s) => s.group === 'official'));
+expect('allowlist 只由已启用源的 host 后缀派生', (() => {
+  const enabled = sourcesExample.sources.filter((s) => s.enabled);
+  const list = [...new Set(enabled.flatMap((s) => s.host_suffixes))].sort();
+  return list.length === 4 && !list.includes('com') && list.includes('sourceforge.net');
+})());
+expect('样例源表公钥与 Rust 内嵌 K5 一致', (() => {
+  const rust = readFileSync(join(here, '../src-tauri/src/state_v2.rs'), 'utf8');
+  const pubkey = /BUILTIN_K5_PUBKEY_B64:\s*&str\s*=\s*"([^"]+)"/.exec(rust)?.[1];
+  const fp = /BUILTIN_K5_FINGERPRINT:\s*&str\s*=\s*"([^"]+)"/.exec(rust)?.[1];
+  return sourcesExample.sources.every((s) => s.catalog_pubkey === pubkey && s.catalog_fingerprint === fp);
+})());
+
 // 断言数量固定。误删或跳过断言时，不能只靠 failed 判绿。
-const EXPECTED_ASSERTIONS = 109;
+const EXPECTED_ASSERTIONS = 129;
 const count = report.filter((x) => x.startsWith('通过') || x.startsWith('失败')).length;
 console.log(report.join('\n'));
 console.log('');

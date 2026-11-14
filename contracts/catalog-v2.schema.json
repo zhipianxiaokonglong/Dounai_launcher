@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://dounai.local/contracts/catalog-v2.schema.json",
   "title": "Dounai catalog v2",
-  "description": "由内置 K5 签名，提供索引、版本单调性与新鲜度。包自身的完整性由包内签名负责。",
+  "description": "由 sources.json 中该源登记的 catalog 签名公钥签名，提供索引、版本单调性与新鲜度。包自身的完整性由包内签名负责。key_id 只是展示用的槽位标识，判定只认 signature.signer_fp 与本地源表登记的指纹。",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "sequence", "generated_at", "expires", "sources", "modules", "revoked", "signature"],
@@ -11,13 +11,13 @@
     "sequence": {
       "type": "integer",
       "minimum": 1,
-      "description": "单调序号。两源 catalog 按签名有效、序号不倒退、时间不倒退裁决。"
+      "description": "同一源内的单调序号。官方主源与镜像是同一份 catalog 的两个副本，才按序号裁决；不同发布者的源各自独立，互不比较。"
     },
     "generated_at": { "type": "string", "format": "date-time" },
     "expires": {
       "type": "string",
       "format": "date-time",
-      "description": "过期后阻断自动更新。K5 泄露时靠短过期窗口加带外公告与强制升级 exe。"
+      "description": "过期后阻断自动更新。catalog 签名钥泄露时靠短过期窗口加带外公告与强制升级 exe。"
     },
     "min_launcher": { "type": "string", "description": "最低启动器版本。" },
     "requires_roles": {
@@ -41,13 +41,21 @@
     "signature": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["algo", "key_id", "signed_at", "value"],
+      "required": ["algo", "key_id", "signer_fp", "signed_at", "value"],
       "properties": {
         "algo": {
           "const": "Ed25519",
           "description": "签名算法标识。对剔除 signature 后的规范化 JSON 字节直接做 Ed25519 签名，算法内部用 SHA-512。SHA-256 只用于 files 逐文件哈希与公钥指纹，不属于签名算法。"
         },
-        "key_id": { "const": "K5", "description": "catalog 签名钥与包签名钥 K1 分离。" },
+        "key_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,32}$",
+          "description": "展示用标识，不参与判定。官方源写 K5，社区源可写自己的标识；判定只比对 signer_fp 与 sources.json 登记的指纹。"
+        },
+        "signer_fp": {
+          "$ref": "#/$defs/fingerprint",
+          "description": "签名者公钥指纹。启动器拿本地 sources.json 里该源登记的公钥验签，并要求本字段与之相等；不采信 catalog 自述的公钥。"
+        },
         "signed_at": { "type": "string", "format": "date-time" },
         "value": { "type": "string", "pattern": "^[A-Za-z0-9+/]{86}==$" }
       }
@@ -57,7 +65,7 @@
     "fingerprint": {
       "type": "string",
       "pattern": "^sha256:[0-9a-f]{64}$",
-      "description": "Ed25519 公钥原始 32 字节的 SHA-256，小写十六进制，带 sha256: 前缀。key_id 只作展示，不参与判定。"
+      "description": "Ed25519 公钥原始 32 字节的 SHA-256，小写十六进制，带 sha256: 前缀。key_id 只作展示；判定以本指纹与 sources.json 登记值的一致性为准。"
     },
     "source": {
       "type": "object",
@@ -103,7 +111,11 @@
             "additionalProperties": false,
             "required": ["source_id", "url"],
             "properties": {
-              "source_id": { "type": "string" },
+              "source_id": {
+                "type": "string",
+                "pattern": "^[a-z0-9-]{1,32}$",
+                "description": "必须等于 sources.json 中提供本 catalog 的源 id（官方主/镜像两个内置 id 均可）。包下载只认本源所在的组，不跨发布者回落。"
+              },
               "url": { "type": "string", "pattern": "^https://" }
             }
           }

@@ -22,10 +22,17 @@
     "catalog_state": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["sequence", "last_seen_version"],
+      "required": ["last_seen_version"],
       "properties": {
-        "sequence": { "type": ["integer", "null"], "minimum": 1 },
-        "expires": { "type": ["string", "null"] },
+        "sequence": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "description": "M8 起停止写入。每源独立水位在 state/sources.json；旧文件里残留的值不参与任何判定。"
+        },
+        "expires": {
+          "type": ["string", "null"],
+          "description": "M8 起停止写入。语义同 sequence。"
+        },
         "last_seen_version": {
           "type": "object",
           "additionalProperties": { "type": "string" },
@@ -84,6 +91,11 @@
         "source_path": {
           "type": ["string", "null"],
           "description": "dir 实例为源码目录绝对路径；zip 实例为本地导入时的 zip 路径，远端下载时为 null。"
+        },
+        "source_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9-]{1,32}$",
+          "description": "从 catalog 源安装的实例记录来源 id，撤销该源公钥时据此标「发布者已不再受信任」。本地 zip / dir 导入不写此字段。"
         },
         "zip_sha256": {
           "oneOf": [{ "type": "null" }, { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }]
