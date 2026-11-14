@@ -28,6 +28,7 @@ import { adminLifecycleChanged, disposeAdmin, renderAdmin } from "./views/admin.
 import { renderChains } from "./views/chains.js";
 import { renderEnv } from "./views/env.js";
 import { renderDownload } from "./views/download.js";
+import { refreshHome, renderHome } from "./views/home.js";
 import { renderImport } from "./views/import.js";
 import { disposeLogs, focusInstance, renderLogs } from "./views/logs.js";
 import { patchEnvJob, refreshModules, renderModules } from "./views/modules.js";
@@ -35,6 +36,7 @@ import { renderSettings } from "./views/settings.js";
 import { startTour } from "./tour.js";
 
 type ViewId =
+  | "home"
   | "modules"
   | "download"
   | "chains"
@@ -45,6 +47,7 @@ type ViewId =
   | "admin";
 
 const VIEWS: ViewId[] = [
+  "home",
   "modules",
   "download",
   "chains",
@@ -55,7 +58,7 @@ const VIEWS: ViewId[] = [
   "admin",
 ];
 
-let current: ViewId = "modules";
+let current: ViewId = "home";
 
 const slots = {
   head: must<HTMLElement>("phead"),
@@ -79,6 +82,16 @@ async function renderView(view: ViewId, arg?: string): Promise<void> {
 
   try {
     switch (view) {
+      case "home":
+        // 概览与模块页读同一份实例表。进页先拉一次的理由和模块页一样：
+        // 安装 / 卸载不保证触发生命周期推送。
+        try {
+          await refreshViews();
+        } catch (error) {
+          toast(`读取实例状态失败：${describeError(error)}`, "error");
+        }
+        renderHome(slots);
+        break;
       case "modules":
         // 实例表会被「安装 / 卸载 / 启用停用」改写，而这些动作不保证触发
         // 生命周期推送。进页先拉一次，否则看到的是启动时那份快照——
@@ -214,8 +227,8 @@ async function boot(): Promise<void> {
   // 期间界面必须已经能点、能切页，否则等数据回来之前就是一块死界面。
   wireNav();
   wireEvents();
-  // 首屏这一下已经把实例表拉回来了（模块页进页自读）。
-  await renderView("modules");
+  // 首屏这一下已经把实例表拉回来了（概览页进页自读）。
+  await renderView("home");
 
   // 其余三组事实并行拉取：任何一组失败都不该挡住界面，只在状态栏与页面上体现。
   // 实例表不在这批里——环境探测要 spawn 子进程（PowerShell / WMI / nvidia-smi），
@@ -226,9 +239,11 @@ async function boot(): Promise<void> {
   if (failure) {
     toast(`部分状态没有读到：${describeError(failure.reason)}`, "error");
   }
-  // 模块页刚带着数据渲染过，不必为它再拉一次实例表；其它页要拿到新的
-  // 设置 / 环境事实才重绘。两种情况都更新一次外壳计数。
-  if (current === "modules") {
+  // 概览页要拿环境事实（数据盘、Python / uv、待处理项）才算完整，所以环境
+  // 回来之后重绘一次；模块页不依赖环境，只更新外壳计数。
+  if (current === "home") {
+    await renderView("home");
+  } else if (current === "modules") {
     updateChrome();
   } else {
     await renderView(current);
@@ -260,6 +275,8 @@ function scheduleRefresh(): void {
     void (async () => {
       if (current === "modules") {
         await refreshModules();
+      } else if (current === "home") {
+        await refreshHome();
       } else {
         try {
           await refreshViews();

@@ -33,14 +33,35 @@
 
   --run: #22c55e;
   --run-fg: #86efac;
+  --run-soft: rgba(34, 197, 94, 0.12);
   --warn: #f59e0b;
   --warn-fg: #fcd34d;
+  --warn-soft: rgba(245, 158, 11, 0.12);
   --danger: #ef4444;
   --danger-fg: #fca5a5;
+  --danger-soft: rgba(239, 68, 68, 0.12);
   --stop: #94a3b8;
   --stop-weak: #475569;
   --knob: #e2e8f0;
   --log-fg: #cbd5e1;
+
+  /*
+   * 角色识别色：只标识身份，不表示状态。状态仍然只有 run / warn / danger
+   * 三个令牌。四色都取低饱和，深色主题下提亮到能压在 panel 上看清。
+   */
+  --role-input: #60a5fa;
+  --role-input-soft: rgba(96, 165, 250, 0.14);
+  --role-llm: #a78bfa;
+  --role-llm-soft: rgba(167, 139, 250, 0.14);
+  --role-output: #2dd4bf;
+  --role-output-soft: rgba(45, 212, 191, 0.14);
+  --role-shell: #9aa8bd;
+  --role-shell-soft: rgba(154, 168, 189, 0.14);
+  --role-aux: #94a3b8;
+  --role-aux-soft: rgba(148, 163, 184, 0.14);
+
+  /* 概览页区块间距随视口高度收缩，避免矮窗里被逼出滚动条。 */
+  --gap-sec: clamp(10px, 1.9vh, 22px);
 
   --sans: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
   --mono: "Cascadia Mono", "Consolas", "JetBrains Mono", ui-monospace, monospace;
@@ -74,14 +95,28 @@
 
   --run: #15803d;
   --run-fg: #15803d;
+  --run-soft: rgba(22, 163, 74, 0.1);
   --warn: #b45309;
   --warn-fg: #92400e;
+  --warn-soft: rgba(180, 83, 9, 0.1);
   --danger: #dc2626;
   --danger-fg: #b91c1c;
+  --danger-soft: rgba(220, 38, 38, 0.1);
   --stop: #7b8698;
   --stop-weak: #b6becc;
   --knob: #ffffff;
   --log-fg: #334155;
+
+  --role-input: #2563eb;
+  --role-input-soft: rgba(37, 99, 235, 0.1);
+  --role-llm: #7c3aed;
+  --role-llm-soft: rgba(124, 58, 237, 0.1);
+  --role-output: #0f766e;
+  --role-output-soft: rgba(15, 118, 110, 0.1);
+  --role-shell: #475569;
+  --role-shell-soft: rgba(71, 85, 105, 0.1);
+  --role-aux: #64748b;
+  --role-aux-soft: rgba(100, 116, 139, 0.1);
 }
 
 * {
@@ -2257,4 +2292,917 @@ select.input:focus-visible {
   margin: 0;
   max-width: 420px;
   font: 400 12px/1.7 var(--sans);
+}
+
+/* ================================================================
+   角色徽标
+   ----------------------------------------------------------------
+   色只标识身份，不表示状态——状态仍然只有 run / warn / danger。
+   ================================================================ */
+
+.role {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  padding: 3px 7px;
+  border-radius: 5px;
+  white-space: nowrap;
+  color: var(--fg-2);
+  background: var(--panel-2);
+}
+
+.role i {
+  width: 5px;
+  height: 5px;
+  border-radius: 2px;
+  background: currentColor;
+}
+
+.role[data-role="input"] {
+  color: var(--role-input);
+  background: var(--role-input-soft);
+}
+
+.role[data-role="llm"] {
+  color: var(--role-llm);
+  background: var(--role-llm-soft);
+}
+
+.role[data-role="output"] {
+  color: var(--role-output);
+  background: var(--role-output-soft);
+}
+
+.role[data-role="shell"] {
+  color: var(--role-shell);
+  background: var(--role-shell-soft);
+}
+
+.role[data-role="auxiliary"] {
+  color: var(--role-aux);
+  background: var(--role-aux-soft);
+}
+
+/* ================================================================
+   概览页
+   ----------------------------------------------------------------
+   一屏优先：内容纵向四段（hero / 链路 / 资源 / 环境与活动）。
+   密度全部用 clamp 跟着视口高度收缩，档位统一放在文件末尾。
+   ================================================================ */
+
+.pbody[data-view="home"] {
+  padding: clamp(12px, 1.9vh, 18px) 22px clamp(14px, 2.2vh, 26px);
+}
+
+.hero {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: clamp(12px, 1.8vh, 20px) 20px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-l);
+  background: var(--panel);
+}
+
+.hero-kicker {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--fg-3);
+}
+
+.hero h2 {
+  margin: 4px 0 0;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+}
+
+.hero p {
+  margin: 4px 0 0;
+  font-size: 11.5px;
+  color: var(--fg-2);
+  max-width: 54ch;
+  line-height: 1.5;
+}
+
+.hero-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: clamp(8px, 1.3vh, 14px);
+  flex-wrap: wrap;
+}
+
+.hero-facts {
+  margin-left: auto;
+  display: grid;
+  gap: clamp(5px, 0.9vh, 10px);
+  padding-left: 20px;
+  border-left: 1px solid var(--line);
+  min-width: 200px;
+  align-content: center;
+}
+
+.fact {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--fg-2);
+}
+
+.fact b {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--fg);
+  min-width: 34px;
+}
+
+.fact span {
+  color: var(--fg-3);
+}
+
+.fact b.warn {
+  color: var(--warn-fg);
+}
+
+.fact b.fail {
+  color: var(--danger-fg);
+}
+
+.sec {
+  margin-top: var(--gap-sec);
+}
+
+.sec-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: clamp(6px, 1vh, 10px);
+}
+
+.sec-head h3 {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.sec-head .hint {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--fg-3);
+}
+
+.sec-head .line {
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+
+/* 链路：节点按数据流排开，缺的角色画成虚线占位 */
+.pipe {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.node {
+  flex: 1 1 0;
+  min-width: 148px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-m);
+  background: var(--panel);
+  padding: 11px 13px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  position: relative;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  transition: border-color 0.14s ease;
+}
+
+.node:hover {
+  border-color: var(--line-2);
+}
+
+.node:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.node--run {
+  border-color: rgba(34, 197, 94, 0.35);
+}
+
+.node--run:hover {
+  border-color: rgba(34, 197, 94, 0.55);
+}
+
+.node--off {
+  background: var(--panel-2);
+}
+
+.node--fail {
+  border-color: rgba(239, 68, 68, 0.35);
+}
+
+.node--miss {
+  border-style: dashed;
+  background: transparent;
+}
+
+.node-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.node-top .chip {
+  margin-left: auto;
+  font-size: 9.5px;
+  padding: 2.5px 6px;
+}
+
+.node-name {
+  font-size: 12.5px;
+  font-weight: 500;
+  margin-top: 5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.node-meta {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-3);
+}
+
+.node--miss .node-name {
+  color: var(--fg-3);
+  font-weight: 400;
+}
+
+.link {
+  width: 26px;
+  display: grid;
+  place-items: center;
+  color: var(--stop-weak);
+  flex: 0 0 26px;
+}
+
+/* 下半区：宽够就把资源表与右侧两卡并排 */
+.lower {
+  margin-top: var(--gap-sec);
+}
+
+.side {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.tile {
+  border: 1px solid var(--line);
+  border-radius: var(--r-m);
+  background: var(--panel);
+  padding: 14px 15px;
+  min-width: 0;
+}
+
+.tile-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: clamp(6px, 1vh, 10px);
+}
+
+.tile-head h4 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.kv {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: clamp(3px, 0.7vh, 5px) 0;
+  font-size: 11.5px;
+}
+
+.kv + .kv {
+  border-top: 1px solid var(--line);
+}
+
+.kv span {
+  color: var(--fg-3);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kv b {
+  font-weight: 500;
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.kv b.ok {
+  color: var(--run-fg);
+}
+
+.kv b.warn {
+  color: var(--warn-fg);
+}
+
+.kv b.fail {
+  color: var(--danger-fg);
+}
+
+.feed {
+  display: grid;
+}
+
+.feed-item {
+  display: flex;
+  gap: 10px;
+  padding: clamp(4px, 0.9vh, 7px) 0;
+  font-size: 11.5px;
+  align-items: baseline;
+}
+
+.feed-item + .feed-item {
+  border-top: 1px solid var(--line);
+}
+
+.feed-item time {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-3);
+  flex: 0 0 40px;
+}
+
+.feed-item .txt {
+  color: var(--fg-2);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.feed-item .txt b {
+  color: var(--fg);
+  font-weight: 500;
+}
+
+/* 资源占用：列宽固定，CPU / 内存两列等接入采样后填数 */
+.res {
+  border: 1px solid var(--line);
+  border-radius: var(--r-m);
+  background: var(--panel);
+  overflow: hidden;
+}
+
+.res-head,
+.res-row {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) 54px minmax(0, 0.55fr) minmax(0, 0.75fr) 50px;
+  gap: 12px;
+  align-items: center;
+  padding: 0 14px;
+}
+
+.res-head {
+  height: clamp(22px, 3vh, 27px);
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--line);
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  color: var(--fg-3);
+  text-transform: uppercase;
+}
+
+.res-head .th-r {
+  text-align: right;
+}
+
+/* 表头不换行：行高是 clamp 出来的固定值，换行会压到第一行数据上 */
+.res-head > span {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.res-row {
+  padding-top: clamp(5px, 1.1vh, 9px);
+  padding-bottom: clamp(5px, 1.1vh, 9px);
+  font-size: 11.5px;
+}
+
+.res-row + .res-row {
+  border-top: 1px solid var(--line);
+}
+
+.res-name {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.res-name .dot {
+  background: var(--role, var(--stop-weak));
+}
+
+.res-name b {
+  font-weight: 500;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.res-name .chip {
+  font-size: 9.5px;
+  padding: 2px 6px;
+  flex: 0 0 auto;
+}
+
+.res-gauge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.res-gauge .bar {
+  flex: 1;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--panel-3);
+  overflow: hidden;
+  min-width: 30px;
+}
+
+.res-gauge .bar i {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--role, var(--accent));
+  opacity: 0.72;
+}
+
+.res-gauge .val {
+  flex: 0 0 auto;
+  min-width: 54px;
+  text-align: right;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--fg-2);
+}
+
+.res-row.is-idle .res-gauge .bar i {
+  opacity: 0.32;
+}
+
+.res-row.is-idle .res-gauge .val {
+  color: var(--fg-3);
+}
+
+.res-pid {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-3);
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 采样未接入的占位格：写「—」，不留一个看着像 0% 的空条 */
+.res-na {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--stop-weak);
+}
+
+.res-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 14px;
+  border-top: 1px solid var(--line);
+  background: var(--panel-2);
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-3);
+  flex-wrap: wrap;
+}
+
+.res-foot .sp {
+  margin-left: auto;
+}
+
+.res-empty {
+  padding: 18px 14px;
+  color: var(--fg-3);
+  font-size: 11.5px;
+}
+
+/* ================================================================
+   模块页（改版）
+   ----------------------------------------------------------------
+   卡片改成两栏：左边是模块身份，右边是实例与动作。同一模块的多个实例
+   竖排在一张卡里，才看得出它们在抢同一个槽。
+   ================================================================ */
+
+.mgrp {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 18px 0 9px;
+  flex-wrap: wrap;
+}
+
+.mgrp:first-child {
+  margin-top: 0;
+}
+
+.mgrp h3 {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.mgrp .desc {
+  font-size: 11px;
+  color: var(--fg-3);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mgrp .line {
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+  min-width: 20px;
+}
+
+.mgrp .stat {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--fg-3);
+  white-space: nowrap;
+}
+
+.mcards {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+
+.mcard {
+  border: 1px solid var(--line);
+  border-radius: var(--r-m);
+  background: var(--panel);
+  padding: 14px 16px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(236px, 300px);
+  gap: 20px;
+  align-items: start;
+  position: relative;
+  overflow: hidden;
+}
+
+/* 左边一条 role 色：扫一眼就知道这张卡属于哪一层 */
+.mcard::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--role, var(--line-2));
+  opacity: 0.85;
+}
+
+.mcard--warn {
+  border-color: rgba(245, 158, 11, 0.28);
+}
+
+.mcard-left {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.mcard-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+}
+
+.mcard-ico {
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  background: var(--role-soft, var(--panel-3));
+  color: var(--role, var(--fg-2));
+}
+
+.mcard-title {
+  min-width: 0;
+  flex: 1;
+}
+
+.mcard-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.mcard-name b {
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.mcard-desc {
+  display: block;
+  margin: 3px 0 0;
+  font-size: 11.5px;
+  color: var(--fg-2);
+  line-height: 1.5;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mcard-meta {
+  margin-top: 4px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-3);
+  min-width: 0;
+}
+
+.mcard-meta em {
+  font-style: normal;
+  color: var(--stop-weak);
+}
+
+.mcard-meta .warn {
+  color: var(--warn-fg);
+}
+
+.mcard-acts {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.mcard-insts {
+  border-left: 1px solid var(--line);
+  padding-left: 16px;
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  min-width: 0;
+}
+
+.mi {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.mi + .mi {
+  border-top: 1px solid var(--line);
+  padding-top: 9px;
+}
+
+.mi-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.mi-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+
+.mi-name {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+.mi-meta {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-3);
+  white-space: nowrap;
+}
+
+/* ================================================================
+   概览页的一屏档位
+   ----------------------------------------------------------------
+   只按视口高度分档：页头 60 + 状态栏 30 是固定值，正文可用高度完全由
+   视口决定，所以媒体查询与「量 .pbody 高度」等价。先掉最近活动条数，
+   再掉「环境与目录」的次要项，最后收成 hero + 链路 + 资源三块。
+   ================================================================ */
+
+@media (min-width: 900px) {
+  .lower {
+    display: grid;
+    align-items: start;
+    grid-template-columns: minmax(0, 1.55fr) minmax(282px, 1fr);
+    gap: 12px;
+    margin-top: var(--gap-sec);
+  }
+
+  .lower .sec--res {
+    margin-top: 0;
+  }
+
+  .side {
+    gap: 10px;
+    margin-top: 0;
+  }
+}
+
+@media (max-width: 899px) {
+  .lower {
+    display: block;
+  }
+
+  .hero {
+    flex-wrap: wrap;
+  }
+
+  /* 状态事实已经写在页头 sub 与链路节点上，窄窗里不再重复 */
+  .hero-facts {
+    display: none;
+  }
+
+  .res-head,
+  .res-row {
+    grid-template-columns: minmax(116px, 1fr) 50px minmax(0, 0.5fr) minmax(0, 0.7fr) 44px;
+    gap: 10px;
+    padding: 0 10px;
+  }
+}
+
+/* 正文只剩 ~790px 时两栏会把实例列压到 236px，动作按钮开始换行；
+   这个宽度以下改成上下堆叠。断点按视口算：左侧栏固定 232px。 */
+@media (max-width: 1024px) {
+  .mcard {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+
+  .mcard-insts {
+    border-left: 0;
+    border-top: 1px solid var(--line);
+    padding: 10px 0 0;
+  }
+}
+
+/* 不足 950 高：活动只留 4 条 */
+@media (min-width: 900px) and (max-height: 949px) {
+  .tile {
+    padding: 11px 13px;
+  }
+
+  /* 只按序号裁，不按「倒数几条」：活动不足 6 条时按倒数裁会把仅有的几条也藏掉 */
+  .tile--feed .feed-item:nth-child(n + 5) {
+    display: none;
+  }
+}
+
+/* 不足 860 高：环境卡先掉两行 */
+@media (min-width: 900px) and (max-height: 859px) {
+  /* kv 的行号把 .tile-head 也算进去，所以「留 4 行」从第 6 个子元素起隐藏 */
+  .tile--env .kv:nth-child(n + 6) {
+    display: none;
+  }
+}
+
+/* 不足 790 高：卡片内边距再收一档，环境卡留三行、活动留三条 */
+@media (min-width: 900px) and (max-height: 789px) {
+  .tile {
+    padding: 9px 12px;
+  }
+
+  .tile--env .kv:nth-child(n + 5) {
+    display: none;
+  }
+
+  .tile--feed .feed-item:nth-child(n + 4) {
+    display: none;
+  }
+}
+
+/* 不足 690 高：hero 描述与 kicker 让位，活动只留两条 */
+@media (min-width: 900px) and (max-height: 689px) {
+  .hero p,
+  .hero-kicker {
+    display: none;
+  }
+
+  .tile--feed .feed-item:nth-child(n + 3) {
+    display: none;
+  }
+}
+
+/* 不足 680 高：资源表页脚、节点内边距与第四个事实让位 */
+@media (max-height: 680px) {
+  .res-foot {
+    display: none;
+  }
+
+  .node {
+    padding: 9px 12px 10px;
+  }
+
+  .hero-facts {
+    min-width: 168px;
+  }
+
+  /* 三个事实已经足够：运行数、环境待处理、数据盘 */
+  .hero-facts .fact:last-child {
+    display: none;
+  }
+}
+
+/* 最小窗：只保留 hero、链路与资源表 */
+@media (max-height: 620px) {
+  .hero p,
+  .hero-kicker {
+    display: none;
+  }
+
+  .tile--feed {
+    display: none;
+  }
+
+  .tile--env .kv:nth-child(n + 4) {
+    display: none;
+  }
+
+  .tile {
+    padding: 9px 12px;
+  }
+}
+
+/* 窄 + 矮：环境卡整块收起，保证首屏仍是一屏 */
+@media (max-height: 620px) and (max-width: 899px) {
+  .side {
+    display: none;
+  }
 }

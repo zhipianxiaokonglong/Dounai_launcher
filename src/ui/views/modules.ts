@@ -10,9 +10,7 @@ import {
   removeLocalModule,
   restartInstance,
   setModuleEnabled,
-  startAll,
   startModule,
-  stopAll,
   stopModule,
   switchActive,
   uninstallModule,
@@ -29,8 +27,8 @@ import {
   openModal,
   toast,
 } from "../dom.js";
-import { formatChainResult, setLastChainRun } from "./chains.js";
-import { icon } from "../icons.js";
+import { startEverything, stopEverything } from "../bulk.js";
+import { icon, roleIcon } from "../icons.js";
 import {
   beginEnvJob,
   describeError,
@@ -45,7 +43,14 @@ import {
   store,
   type EnvJob,
 } from "../store.js";
-import { ROLE_DESC, ROLE_ORDER, ROLE_SHORT, ROLE_TITLE } from "../roles.js";
+import {
+  DATA_PLANE,
+  ROLE_DESC,
+  ROLE_HINT,
+  ROLE_ORDER,
+  ROLE_TAG,
+  ROLE_TITLE,
+} from "../roles.js";
 
 
 /** 渲染上下文：页头与正文容器由外壳传入。 */
@@ -91,8 +96,8 @@ function renderHead(head: HTMLElement): void {
 
   bindActions(head, [
     { act: "catalog", run: () => goToDownload() },
-    { act: "start-all", run: () => startEverything() },
-    { act: "stop-all", run: () => stopEverything() },
+    { act: "start-all", run: () => startEverythingAndRepaint() },
+    { act: "stop-all", run: () => stopEverythingAndRepaint() },
   ]);
 }
 
@@ -157,20 +162,25 @@ function renderBody(body: HTMLElement): void {
 
     const views = [...byModule.values()].flat();
     const running = views.filter((view) => isRunning(view)).length;
-    const activeInstance = views.find((view) => view.active);
+    const activeInstance = views.length > 1 ? views.find((view) => view.active) : undefined;
+    // 单实例时不再写 active = …：实例行上已经有 active 徽标，页头再写一遍
+    // 会把分组行挤到换行或截断。
     const statParts = [`${running}/${views.length} 运行`];
     if (activeInstance) statParts.push(`active = ${activeInstance.instance.module_id}`);
 
     const group = document.createElement("section");
+    const title = DATA_PLANE.includes(role) ? `${ROLE_TITLE[role]}层` : ROLE_TITLE[role];
     group.innerHTML = `
-      <div class="grp">
-        <span class="grp-name">${esc(role)} · ${esc(ROLE_TITLE[role])}</span>
-        <span class="grp-line"></span>
-        <span class="grp-stat">${esc(statParts.join(" · "))}</span>
+      <div class="mgrp">
+        <span class="role" data-role="${esc(role)}"><i></i>${esc(ROLE_TAG[role])}</span>
+        <h3>${esc(title)}</h3>
+        <span class="desc">${esc(ROLE_HINT[role])}</span>
+        <span class="line"></span>
+        <span class="stat">${esc(statParts.join(" · "))}</span>
       </div>
-      <div class="cards"></div>
+      <div class="mcards"></div>
     `;
-    const cards = group.querySelector(".cards");
+    const cards = group.querySelector(".mcards");
     if (cards) {
       for (const [moduleId, list] of byModule) {
         cards.appendChild(buildCard(moduleId, list));
@@ -231,20 +241,23 @@ function filteredViews(): InstanceRuntimeView[] {
 
 function buildCard(moduleId: string, views: InstanceRuntimeView[]): HTMLElement {
   const card = document.createElement("article");
-  card.className = "card";
+  card.className = "mcard";
+
+  const role = views[0]?.instance.role ?? "auxiliary";
+  card.dataset.role = role;
+  card.style.setProperty("--role", `var(--role-${roleKey(role)})`);
+  card.style.setProperty("--role-soft", `var(--role-${roleKey(role)}-soft)`);
 
   const hasDir = views.some((view) => view.instance.source_kind === "dir");
   const unverified = hasDir || views.some((view) => view.instance.verdict !== "A");
-  if (unverified) card.classList.add("card--warn");
+  if (unverified) card.classList.add("mcard--warn");
 
-  const role = views[0]?.instance.role ?? "auxiliary";
   const counter = views.find((view) => view.active) ?? views[0];
 
-  const statusChip = moduleStatusChip(views);
-  const meta = [
-    counter?.port ? `端口 <b>${counter.port}</b>` : "无规范端口",
-    `v${esc(counter?.instance.version ?? "—")}`,
-    esc(views[0]?.instance.source_kind ?? "zip"),
+  const meta: string[] = [
+    `<span title="${esc(moduleId)}">${esc(moduleId)}</span>`,
+    `<em>·</em><span>v${esc(counter?.instance.version ?? "—")}</span>`,
+    `<em>·</em><span>${esc(views[0]?.instance.source_kind ?? "zip")}</span>`,
   ];
   if (hasDir) meta.push('<span class="warn">本地源码 · 未验证</span>');
   else if (unverified) meta.push('<span class="warn">未验证</span>');
@@ -252,29 +265,37 @@ function buildCard(moduleId: string, views: InstanceRuntimeView[]): HTMLElement 
   const desc = viewDescription(views[0], role);
 
   card.innerHTML = `
-    <div class="card-top">
-      <span class="role-ico" aria-hidden="true">${esc(ROLE_SHORT[role])}</span>
-      <div style="min-width:0">
-        <span class="card-name" title="${esc(moduleName(moduleId))}">${esc(moduleName(moduleId))}</span>
-        <span class="card-id" title="${esc(moduleId)}">${esc(moduleId)}</span>
+    <div class="mcard-left">
+      <div class="mcard-main">
+        <span class="mcard-ico" aria-hidden="true">${roleIcon(role, 14)}</span>
+        <div class="mcard-title">
+          <div class="mcard-name">
+            <b title="${esc(moduleName(moduleId))}">${esc(moduleName(moduleId))}</b>
+            ${moduleStatusChip(views)}
+          </div>
+          <p class="mcard-desc">${esc(desc)}</p>
+          <div class="mcard-meta">${meta.join("")}</div>
+        </div>
       </div>
-      <span style="margin-left:auto">${statusChip}</span>
+      <div class="mcard-acts"></div>
     </div>
-    <p class="card-desc">${esc(desc)}</p>
-    <div class="meta">${meta.map((m) => `<span>${m}</span>`).join("")}</div>
-    <div class="inst-list"></div>
-    <div class="card-foot"></div>
+    <div class="mcard-insts"></div>
   `;
 
-  const list = card.querySelector(".inst-list");
+  const list = card.querySelector(".mcard-insts");
   if (list) {
-    for (const view of views) list.appendChild(buildInstanceRow(view));
+    for (const view of views) list.appendChild(buildInstanceBlock(view));
   }
 
-  const foot = card.querySelector(".card-foot");
+  const foot = card.querySelector(".mcard-acts");
   if (foot) foot.innerHTML = cardFootHtml(moduleId, views);
 
   return card;
+}
+
+/** CSS 里的角色令牌后缀：auxiliary 的变量名短一截。 */
+function roleKey(role: Role): string {
+  return role === "auxiliary" ? "aux" : role;
 }
 
 /** 卡片级状态：优先级 running > starting > failed > stopped。 */
@@ -302,16 +323,34 @@ function moduleStatusChip(views: InstanceRuntimeView[]): string {
   return '<span class="chip chip--stop">○ 已停止</span>';
 }
 
+/** 单个实例自己的状态：同一模块的两个实例可以一个跑一个停。 */
+function instancePhaseChip(view: InstanceRuntimeView): string {
+  const phase = view.snapshot?.phase ?? "stopped";
+  if (phase === "running") {
+    return isExternal(view)
+      ? '<span class="chip chip--warn"><i class="dot dot--warn"></i>外部运行</span>'
+      : '<span class="chip chip--run"><i class="dot dot--run"></i>运行中</span>';
+  }
+  if (phase === "starting") return '<span class="chip chip--warn"><i class="dot dot--warn"></i>启动中</span>';
+  if (phase === "failed") {
+    if (hasLiveProcess(view)) return '<span class="chip chip--warn">启动超时</span>';
+    const code = view.snapshot?.exit_code;
+    const label = code === null || code === undefined ? "启动失败" : `已退出 ${code}`;
+    return `<span class="chip chip--fail"><i class="dot dot--fail"></i>${esc(label)}</span>`;
+  }
+  return '<span class="chip chip--stop">已停止</span>';
+}
+
 function viewDescription(view: InstanceRuntimeView | undefined, role: Role): string {
   if (!view) return ROLE_DESC[role];
   if (view.instance.note) return view.instance.note;
   return ROLE_DESC[role];
 }
 
-function buildInstanceRow(view: InstanceRuntimeView): HTMLElement {
-  const row = document.createElement("div");
+function buildInstanceBlock(view: InstanceRuntimeView): HTMLElement {
+  const block = document.createElement("div");
   const external = isExternal(view);
-  row.className = `inst${external ? " inst--warn" : ""}`;
+  block.className = external ? "mi mi--warn" : "mi";
 
   const dotClass = phaseDot(view);
   const chips: string[] = [];
@@ -330,23 +369,29 @@ function buildInstanceRow(view: InstanceRuntimeView): HTMLElement {
 
   const health = healthChip(view);
   const detail = instanceDetailText(view);
+  const port = view.port === null ? "无端口" : `:${view.port}`;
 
-  row.innerHTML = `
-    <div class="inst-row">
-      <span class="dot ${dotClass}"></span>
-      <span class="inst-name" title="${esc(view.instance.instance_id)}">${esc(view.instance.instance_id)}</span>
-      ${chips.join("")}
-      <span class="inst-meta">${esc(detail)}</span>
+  block.innerHTML = `
+    <div class="mi-head">
+      ${instancePhaseChip(view)}
+      <span class="sp"></span>
+      <span class="mi-meta">${esc(port)}</span>
     </div>
-    <div class="inst-row">
+    <div class="mi-line">
+      <span class="dot ${dotClass}"></span>
+      <span class="mi-name" title="${esc(view.instance.instance_id)}">${esc(view.instance.instance_id)}</span>
+      ${chips.join("")}
+    </div>
+    <div class="mi-line">
       ${health}
-      <span class="sp" style="margin-left:auto"></span>
+      ${detail ? `<span class="mi-meta">${esc(detail)}</span>` : ""}
+      <span class="sp"></span>
       ${instanceButtons(view)}
     </div>
     <div class="env-slot" data-env-job="${esc(view.instance.instance_id)}"></div>
   `;
-  paintEnvJob(row, view.instance.instance_id);
-  return row;
+  paintEnvJob(block, view.instance.instance_id);
+  return block;
 }
 
 /* ------------------------------------------------------------------ */
@@ -431,9 +476,9 @@ function healthChip(view: InstanceRuntimeView): string {
   return '<span class="chip chip--stop">未探测</span>';
 }
 
+/** 端口已经单独占一行，这里只补进程号与判级。 */
 function instanceDetailText(view: InstanceRuntimeView): string {
   const parts: string[] = [];
-  if (view.port !== null) parts.push(`:${view.port}`);
   if (view.snapshot?.pid) parts.push(`pid ${view.snapshot.pid}`);
   if (view.instance.verdict !== "A") parts.push(`判级 ${view.instance.verdict}`);
   return parts.join(" · ");
@@ -561,21 +606,6 @@ function bindBodyActions(body: HTMLElement): void {
  * 再点一次，都会发出第二个请求，后端只会回「实例已在启动中」。
  */
 const inFlight = new Set<string>();
-/** 一键启停共用一个闸门：这类操作按拓扑串行，重复触发没有意义。 */
-let bulkBusy = false;
-
-async function runBulk(label: string, run: () => Promise<void>): Promise<void> {
-  if (bulkBusy) {
-    toast(`${label} 正在执行，请稍候…`);
-    return;
-  }
-  bulkBusy = true;
-  try {
-    await run();
-  } finally {
-    bulkBusy = false;
-  }
-}
 
 async function startOne(instanceId: string): Promise<void> {
   if (!instanceId) return;
@@ -645,48 +675,13 @@ async function restartOne(instanceId: string): Promise<void> {
   await refreshModules();
 }
 
-async function startEverything(): Promise<void> {
-  await runBulk("一键启动", async () => {
-    try {
-      toast("正在按默认链路批量提交启动…");
-      const result = await startAll();
-      // 一键启动与链路页共用同一份结果：这里汇总 toast，逐步状态点交给链路页。
-      setLastChainRun(result);
-      const summary = formatChainResult(result);
-      const problems = result.steps.filter(
-        (step) =>
-          step.state === "failed" ||
-          step.state === "blocked" ||
-          step.state === "dangling",
-      );
-      const submitted = summary.started + summary.external;
-      if (problems.length === 0) {
-        const tail = summary.external > 0 ? `，其中 ${summary.external} 个是外部服务` : "";
-        toast(`默认链路已提交 ${submitted} / ${summary.total} 步${tail}；步骤见「链路」页`, "ok");
-      } else {
-        toast(
-          `默认链路提交 ${submitted} / ${summary.total} 步，需注意：${problems
-            .map((step) => `第 ${step.index} 步 ${step.instance_id}（${step.reason ?? "未说明"}）`)
-            .join("；")}`,
-          "error",
-        );
-      }
-    } catch (error) {
-      toast(`一键启动失败：${describeError(error)}`, "error");
-    }
-  });
+async function startEverythingAndRepaint(): Promise<void> {
+  await startEverything();
   await refreshModules();
 }
 
-async function stopEverything(): Promise<void> {
-  await runBulk("一键停止", async () => {
-    try {
-      await stopAll();
-      toast("已停止全部托管实例", "ok");
-    } catch (error) {
-      toast(`停止失败：${describeError(error)}`, "error");
-    }
-  });
+async function stopEverythingAndRepaint(): Promise<void> {
+  await stopEverything();
   await refreshModules();
 }
 
