@@ -1447,6 +1447,139 @@ select.input:focus-visible {
   line-height: 1.5;
 }
 
+/* ---------------- 下载中心（多源） ---------------- */
+
+.dl-sources {
+  margin-bottom: 16px;
+}
+
+.dl-section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 8px;
+  font-size: 12.5px;
+}
+
+.dl-section-head .cap {
+  margin: 0;
+  font-size: 11px;
+  color: var(--fg-3);
+}
+
+.dl-source {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 10px 12px;
+  padding: 10px 12px;
+  margin-bottom: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
+  background: var(--panel-2);
+}
+
+.dl-source.is-off {
+  opacity: 0.62;
+}
+
+.dl-source-main {
+  display: flex;
+  flex: 1 1 320px;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.dl-source-main b {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.dl-source-main .cap {
+  margin: 0;
+  font-size: 11px;
+  color: var(--fg-3);
+  word-break: break-all;
+}
+
+.dl-source-main .fp {
+  padding: 3px 6px;
+  border-color: var(--line-2);
+  background: transparent;
+  font-size: 10px;
+}
+
+.dl-source-side {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.dl-allowlist {
+  margin: 8px 0 0;
+  font-size: 11px;
+  color: var(--fg-3);
+  word-break: break-all;
+}
+
+.dl-filters {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.dl-filters .input {
+  flex: 0 1 200px;
+}
+
+.dl-filters select.input {
+  flex: 0 0 auto;
+  min-width: 120px;
+}
+
+.dl-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--fg-2);
+  white-space: nowrap;
+}
+
+.dl-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.dl-group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 6px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--line);
+}
+
+.dl-group-head b {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.dl-group-head .cap {
+  margin: 0;
+  font-size: 11px;
+  color: var(--fg-3);
+}
+
+.dl-group .cat-row {
+  margin-bottom: 6px;
+}
+
 /* ---------------- 空态 / 提示 ---------------- */
 
 .empty {

@@ -7,8 +7,6 @@
 
 import {
   isDesktop,
-  installFromCatalog,
-  refreshCatalog,
   removeLocalModule,
   restartInstance,
   setModuleEnabled,
@@ -20,15 +18,12 @@ import {
   uninstallModule,
   confirmLocalSource,
   prepareInstanceEnv,
-  type CatalogEntry,
-  type CatalogResponse,
   type InstanceRuntimeView,
   type Role,
 } from "../../bridge.js";
 import {
   bindActions,
   clear,
-  closeModal,
   confirmModal,
   esc,
   openModal,
@@ -87,14 +82,14 @@ function renderHead(head: HTMLElement): void {
       <div class="sub">${esc(bits.join(" · "))}</div>
     </div>
     <div class="sp">
-      <button class="btn btn--sm" type="button" data-act="catalog">模块目录</button>
+      <button class="btn btn--sm" type="button" data-act="catalog">下载中心</button>
       <button class="btn btn--sm" type="button" data-act="stop-all">停止全部</button>
       <button class="btn btn--primary btn--sm" type="button" data-act="start-all">一键启动</button>
     </div>
   `;
 
   bindActions(head, [
-    { act: "catalog", run: () => showCatalog() },
+    { act: "catalog", run: () => goToDownload() },
     { act: "start-all", run: () => startEverything() },
     { act: "stop-all", run: () => stopEverything() },
   ]);
@@ -140,13 +135,13 @@ function renderBody(body: HTMLElement): void {
         <b>${store.views.length === 0 ? "还没有登记任何模块" : "没有匹配的实例"}</b>
         <p>${
           store.views.length === 0
-            ? "从「模块目录」在线装一个签名包，或到「导入本地」装一个 .zip 离线包。登记源码目录不会复制也不会删除你的文件。"
+            ? "到「下载」页从已信任的源装一个签名包，或到「导入本地」装一个 .zip 离线包。登记源码目录不会复制也不会删除你的文件。"
             : "清空搜索词或取消「只看有问题的」再试。"
         }</p>
         ${
           store.views.length === 0
             ? `<div class="sp" style="gap:8px">
-                 <button class="btn btn--primary btn--sm" type="button" data-act="catalog">打开模块目录</button>
+                 <button class="btn btn--primary btn--sm" type="button" data-act="catalog">打开下载中心</button>
                  <button class="btn btn--sm" type="button" data-act="goto-import">导入本地包</button>
                </div>`
             : ""
@@ -539,7 +534,7 @@ function bindBodyActions(body: HTMLElement): void {
     { act: "toggle", run: (node) => toggleModule(node.dataset.id ?? "") },
     { act: "uninstall", run: (node) => askUninstall(node.dataset.id ?? "") },
     { act: "unlink", run: (node) => askUnlink(node.dataset.id ?? "") },
-    { act: "catalog", run: () => showCatalog() },
+    { act: "catalog", run: () => goToDownload() },
     {
       act: "goto-import",
       run: () => {
@@ -891,126 +886,11 @@ function showInstanceDetail(instanceId: string): void {
 }
 
 /* ------------------------------------------------------------------ */
-/* 模块目录（在线安装）                                                */
-/* ------------------------------------------------------------------ */
 
-function formatBytes(bytes: number): string {
-  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
-  if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)} KiB`;
-  return `${bytes} B`;
+/** 模块目录已独立成「下载」视图；这里的按钮只负责导航，不弹模态。 */
+function goToDownload(): void {
+  window.dispatchEvent(new CustomEvent("dounai:navigate", { detail: "download" }));
 }
-
-/**
- * 目录条目 → 一行。
- *
- * 已安装的也给按钮：重装（同版本覆盖）是排障最常用的一步，
- * 但按钮文案要写清楚是「重装」而不是「安装」。
- */
-function catalogRow(entry: CatalogEntry): string {
-  const installed = store.views.some((v) => v.instance.module_id === entry.module_id);
-  const label = installed ? "重装" : "安装";
-  return `
-    <div class="cat-row" data-module="${esc(entry.module_id)}" data-variant="${esc(entry.variant)}">
-      <div class="cat-main">
-        <b>${esc(entry.name || entry.module_id)}</b>
-        <span class="cap">${esc(entry.module_id)}@${esc(entry.variant)} · v${esc(entry.version)} · ${esc(ROLE_TITLE[entry.role] ?? entry.role)} · ${esc(formatBytes(entry.size))}</span>
-        <code class="fp">${esc(entry.sha256)}</code>
-      </div>
-      <div class="cat-side">
-        ${installed ? '<span class="chip chip--run">已安装</span>' : ""}
-        <button class="btn btn--sm${installed ? "" : " btn--primary"}" type="button" data-act="cat-install">${label}</button>
-      </div>
-    </div>
-  `;
-}
-
-/** 拉目录并摊开给用户看。目录取不到时明确说原因，不给「空列表」。 */
-async function showCatalog(): Promise<void> {
-  let res: CatalogResponse;
-  try {
-    res = await refreshCatalog("");
-  } catch (error) {
-    toast(`读取模块目录失败：${describeError(error)}`, "error");
-    return;
-  }
-
-  if (res.source === "unavailable") {
-    openModal({
-      title: "模块目录",
-      subtitle: "取不到目录",
-      bodyHtml: `
-        <p style="margin:0 0 8px">${esc(res.reason ?? "未知原因")}</p>
-        <p class="cap" style="margin:0">允许访问的域名：${esc(res.allowlist.join("、"))}</p>
-        <p class="cap" style="margin:8px 0 0">网络不通时也可以到「导入本地」装一个 .zip 离线包。</p>
-      `,
-      actions: [{ label: "关闭", tone: "quiet", autofocus: true }],
-    });
-    return;
-  }
-
-  const body = res.entries.length
-    ? res.entries.map(catalogRow).join("")
-    : `<p class="cap" style="margin:0">目录是空的：还没有模块上架。</p>`;
-  const note =
-    res.source === "cache"
-      ? `<p class="cap" style="margin:0 0 8px">在线目录不可用，以下是本次会话内已验签的目录。原因：${esc(res.reason ?? "")}</p>`
-      : "";
-
-  openModal({
-    title: "模块目录",
-    subtitle: `${res.entries.length} 个可安装模块`,
-    wide: true,
-    bodyHtml: `${note}<div class="cat-list">${body}</div>`,
-    footNote: "包按目录声明的 sha256 校验后再安装",
-    actions: [{ label: "关闭", tone: "quiet", autofocus: true }],
-    onMount: (root) => {
-      bindActions(root, [
-        { act: "cat-install", run: (el) => runCatalogInstall(el, false) },
-        { act: "cat-force", run: (el) => runCatalogInstall(el, true) },
-      ]);
-    },
-  });
-}
-
-/**
- * 安装一行。
- *
- * `confirm=false` 先试一次：B/C 类包 Rust 会拒绝并说明原因，
- * 这里把同一个按钮改成「确认并安装」，用户看到原因再决定。
- * 确认这个判断不放进前端——前端只负责把用户的决定回传。
- */
-async function runCatalogInstall(button: HTMLElement, confirm: boolean): Promise<void> {
-  const row = button.closest<HTMLElement>(".cat-row");
-  if (!row) return;
-  const moduleId = row.dataset.module ?? "";
-  const variant = row.dataset.variant ?? "";
-  if (!moduleId) return;
-
-  const idleLabel = button.textContent ?? "安装";
-  button.setAttribute("disabled", "disabled");
-  button.textContent = confirm ? "安装中…" : "下载中…";
-  try {
-    const res = await installFromCatalog(moduleId, variant || null, confirm);
-    closeModal();
-    const slot = res.activated ? "，已设为该角色的主实例（占用规范端口）" : "";
-    toast(`已安装 ${res.module_id}：${res.files} 个文件，${formatBytes(res.bytes)}${slot}`, "ok");
-    await refreshModules();
-  } catch (error) {
-    const message = describeError(error);
-    button.removeAttribute("disabled");
-    if (!confirm && message.includes("需要用户显式确认")) {
-      button.textContent = "确认并安装";
-      button.dataset.act = "cat-force";
-      row.querySelector(".cat-note")?.remove();
-      row.insertAdjacentHTML("beforeend", `<p class="cat-note">${esc(message)}</p>`);
-      return;
-    }
-    button.textContent = idleLabel;
-    toast(`安装 ${moduleId} 失败：${message}`, "error");
-  }
-}
-
-/* ------------------------------------------------------------------ */
 
 /** 重新拉状态并重绘当前页（生命周期事件与动作完成后都走这里）。 */
 export async function refreshModules(): Promise<void> {

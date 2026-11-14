@@ -8,13 +8,11 @@
 import {
   enableDevMode,
   isDesktop,
-  refreshCatalog,
   revokeTrustedKey,
   confirmTrustedKey,
   setChildOutput,
   setKeepVersions,
   storageFacts,
-  type CatalogResponse,
   type StorageFacts,
 } from "../../bridge.js";
 import { confirmModal, esc, openModal, toast } from "../dom.js";
@@ -36,7 +34,6 @@ const SECTIONS: Array<{ id: SectionId; label: string }> = [
 ];
 
 let active: SectionId = "appearance";
-let catalogResult: CatalogResponse | null = null;
 
 export async function renderSettings(slots: ViewSlots): Promise<void> {
   renderHead(slots.head);
@@ -188,12 +185,13 @@ function trustHtml(): string {
       </div>`,
     ) +
     row(
-      "Catalog 公钥 K5",
-      "签目录清单",
+      "官方源 catalog 公钥 K5",
+      "签官方目录清单，编译期内嵌",
       `<div class="ctl--row" style="display:flex;gap:8px;align-items:center">
         <span class="fp">${esc(settings.k5_fingerprint)}</span>
         <button class="btn btn--sm" type="button" data-act="copy-fp" data-id="${esc(settings.k5_fingerprint)}">复制</button>
-      </div>`,
+      </div>
+      <p class="cap" style="margin:6px 0 0">这是内置官方源那一把。社区源各有自己的公钥，在「下载」页逐个显示与撤销。</p>`,
     ) +
     row(
       "已信任的发布者",
@@ -255,37 +253,17 @@ function storageHtml(): string {
 /* ---------------- 网络 ---------------- */
 
 function networkHtml(): string {
-  const entries = catalogResult?.entries.length;
-  const status = catalogResult
-    ? catalogResult.source === "unavailable"
-      ? `<span class="chip chip--fail">不可用</span>`
-      : `<span class="chip chip--run">${esc(catalogResult.source)} · ${entries} 条</span>`
-    : "";
   return (
     row(
-      "Catalog 源",
-      "主源失败才回落镜像",
-      `<div class="inputbox" style="margin-bottom:6px"><span>downloads.sourceforge.net/project/dounai-releases</span><span class="hint">主</span></div>
-       <p class="cap" style="margin:6px 0 0">目录与包都从这个源取，catalog 由 K5 签名、有效期 7 天。SourceForge 的下载域会 302 到镜像主机，启动器逐跳校验域名后再跟随。</p>`
-    ) +
-    row(
-      "手动拉取",
-      "留空即用内置源",
-      `<div style="display:flex;gap:8px;align-items:center">
-        <input id="catalog-url" class="input" style="flex:1" placeholder="留空用内置源，或填 https://…/catalog.json" />
-        <button class="btn btn--sm" type="button" data-act="fetch-catalog">拉取</button>
-        ${status}
-      </div>
-      ${
-        catalogResult?.reason
-          ? `<p class="cap" style="margin:6px 0 0">原因：${esc(catalogResult.reason)}</p>`
-          : ""
-      }`
+      "下载源",
+      "按源验签，不做全局优选",
+      `<div><button class="btn btn--sm" type="button" data-act="goto-download">到「下载」页管理源…</button></div>
+       <p class="cap" style="margin:6px 0 0">每个源带自己的 catalog 公钥与域名白名单。加源、启用停用、撤销公钥都在「下载」页做。</p>`
     ) +
     row(
       "出网白名单",
       "空集即不允许任何外部请求",
-      `<p class="cap" style="margin:0">当前版本的下载与清单请求只允许白名单内的主机；白名单为空时，远程资源请求数为零。</p>`
+      `<p class="cap" style="margin:0">白名单由已启用源的域名逐个派生，不再有全局兜底列表；白名单为空时，远程资源请求数为零。</p>`
     )
   );
 }
@@ -451,9 +429,8 @@ function bindSection(form: Element): void {
     });
   });
 
-  form.querySelector('[data-act="fetch-catalog"]')?.addEventListener("click", () => {
-    const input = form.querySelector<HTMLInputElement>("#catalog-url");
-    void fetchCatalog(input?.value.trim() ?? "");
+  form.querySelector('[data-act="goto-download"]')?.addEventListener("click", () => {
+    window.dispatchEvent(new CustomEvent("dounai:navigate", { detail: "download" }));
   });
 
   form.querySelector('[data-act="goto-env"]')?.addEventListener("click", () => {
@@ -544,22 +521,6 @@ async function saveKeepVersions(value: number): Promise<void> {
   } catch (error) {
     toast(`保存失败：${describeError(error)}`, "error");
   }
-}
-
-async function fetchCatalog(url: string): Promise<void> {
-  try {
-    const result = await refreshCatalog(url);
-    catalogResult = result;
-    if (result.source === "unavailable") {
-      toast(`清单不可用：${result.reason ?? "未说明原因"}`, "error");
-    } else {
-      toast(`已拉取 ${result.entries.length} 条（${result.source}）`, "ok");
-    }
-  } catch (error) {
-    toast(`拉取失败：${describeError(error)}`, "error");
-  }
-  const body = document.getElementById("pbody");
-  if (body) renderBody(body);
 }
 
 async function reload(): Promise<void> {

@@ -14,6 +14,7 @@ import {
   setModuleEnabled,
   uninstallModule,
   refreshCatalog,
+  catalogCache,
   installFromCatalog,
   trustInfo,
   probeEnvironmentCmd,
@@ -110,7 +111,7 @@ describe("命令调用参数格式", () => {
     });
   });
 
-  it("install_from_catalog 传 moduleId、variant 与 confirm", async () => {
+  it("install_from_catalog 传 entryKey 与 confirm", async () => {
     const calls: Call[] = [];
     installTauri("core", calls, {
       module_id: "dounai/demo",
@@ -120,11 +121,10 @@ describe("命令调用参数格式", () => {
       install_dir: "/x",
       trust: { kind: "signed", key_index: 0 },
     });
-    const res = await installFromCatalog("dounai/demo", "stable", true);
+    const res = await installFromCatalog("official:dounai/demo:stable:1.0.0", true);
     expect(calls[0]?.cmd).toBe("install_from_catalog");
     expect(calls[0]?.args).toEqual({
-      moduleId: "dounai/demo",
-      variant: "stable",
+      entryKey: "official:dounai/demo:stable:1.0.0",
       confirm: true,
     });
     expect(res.module_id).toBe("dounai/demo");
@@ -152,17 +152,32 @@ describe("命令调用参数格式", () => {
     });
   });
 
-  it("refresh_catalog 传 catalogUrl", async () => {
+  it("refresh_catalog 不带参数：源只能来自 sources.json", async () => {
     const calls: Call[] = [];
     installTauri("core", calls, {
       source: "cache",
       entries: [],
+      sources: [],
       allowlist: [],
       reason: null,
     });
-    await refreshCatalog("https://dl.example.com/catalog.json");
+    await refreshCatalog();
     expect(calls[0]?.cmd).toBe("refresh_catalog");
-    expect(calls[0]?.args).toEqual({ catalogUrl: "https://dl.example.com/catalog.json" });
+    expect(calls[0]?.args).toBeUndefined();
+  });
+
+  it("catalog_cache 不带参数：只读会话缓存，不发网络请求", async () => {
+    const calls: Call[] = [];
+    installTauri("core", calls, {
+      source: "cache",
+      entries: [],
+      sources: [],
+      allowlist: [],
+      reason: null,
+    });
+    await catalogCache();
+    expect(calls[0]?.cmd).toBe("catalog_cache");
+    expect(calls[0]?.args).toBeUndefined();
   });
 
   it("probe_environment 不带参数", async () => {

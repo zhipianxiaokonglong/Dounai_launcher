@@ -49,7 +49,62 @@ export interface RunView {
   external: boolean;
 }
 
+export type SourceClass = "official" | "community";
+
+/** sources.json 里一条源的只读快照。 */
+export interface SourceView {
+  id: string;
+  name: string;
+  kind: SourceClass;
+  base_url: string;
+  catalog_fingerprint: string;
+  host_suffixes: string[];
+  enabled: boolean;
+  deletable: boolean;
+  auto_update: boolean;
+  revoked: boolean;
+  sequence: number | null;
+  expires: string | null;
+}
+
+export interface SourcesView {
+  sources: SourceView[];
+  /** 只由已启用源派生；空集即不发起任何远程请求。 */
+  allowlist: string[];
+}
+
+export interface SourceStatusView {
+  id: string;
+  name: string;
+  state: "ok" | "unavailable" | "invalid" | "disabled";
+  reason: string | null;
+}
+
+/** 添加源第一步的结果：指纹与派生白名单，尚未落盘。 */
+export interface SourcePreview {
+  id: string;
+  name: string;
+  base_url: string;
+  catalog_pubkey: string;
+  catalog_fingerprint: string;
+  host_suffixes: string[];
+  derived: boolean;
+  note: string;
+}
+
+export interface RevokeSourceResult {
+  sources: SourcesView;
+  /** 从该源安装的实例 ID；不卸载、不自动更新。 */
+  affected: string[];
+}
+
 export interface CatalogEntry {
+  /** 会话缓存主键，安装时原样回传，界面不做隐式优选。 */
+  entry_key: string;
+  source_id: string;
+  source_name: string;
+  source_kind: SourceClass;
+  catalog_fingerprint: string;
   module_id: string;
   variant: string;
   name: string;
@@ -60,11 +115,21 @@ export interface CatalogEntry {
   size: number;
   download_url: string;
   signature_required: boolean;
+  publisher_fp: string;
+  min_launcher: string | null;
+  min_version: string | null;
+  expires: string;
+  revoked: boolean;
+  installed_state: "available" | "installed" | "upgrade" | "downgrade" | "incompatible";
+  auto_update: boolean;
+  source_revoked: boolean;
+  note: string | null;
 }
 
 export interface CatalogResponse {
-  source: "remote" | "cache" | "unavailable";
+  source: "remote" | "partial" | "cache" | "unavailable";
   entries: CatalogEntry[];
+  sources: SourceStatusView[];
   allowlist: string[];
   reason: string | null;
 }
@@ -327,17 +392,16 @@ export async function installLocalPackage(
  * 从已验签的模块目录安装。
  *
  * 目录条目里的 sha256 与 size 一份三用：下载校验、安装校验、界面展示。
+ * `entryKey` 来自用户点选的那一行，跨源同名与多版本不做隐式优选。
  * `confirm` 用于 B/C 类包：为 false 时 Rust 直接拒绝并说明原因，
  * 界面据此弹确认框后带 true 重试——确认这一步不交给界面自己判断。
  */
 export async function installFromCatalog(
-  moduleId: string,
-  variant: string | null,
+  entryKey: string,
   confirm: boolean,
 ): Promise<InstallResponse> {
   return call<InstallResponse>("install_from_catalog", {
-    moduleId,
-    variant,
+    entryKey,
     confirm,
   });
 }
@@ -395,8 +459,72 @@ export async function probeEnvironmentCmd(): Promise<RustEnvReport> {
   return call<RustEnvReport>("probe_environment");
 }
 
-export async function refreshCatalog(catalogUrl: string): Promise<CatalogResponse> {
-  return call<CatalogResponse>("refresh_catalog", { catalogUrl });
+/** 刷新所有已启用源。没有会话级 URL 参数，源只能在 sources.json 里配置。 */
+export async function refreshCatalog(): Promise<CatalogResponse> {
+  return call<CatalogResponse>("refresh_catalog");
+}
+
+/**
+ * 只读本次会话内已验签过的目录，不发网络请求。
+ *
+ * 安装之后刷新「已安装 / 可升级」状态用它：重新拉网络一旦失败，
+ * 界面会把刚装好的条目连同整张列表一起清掉。
+ */
+export async function catalogCache(): Promise<CatalogResponse> {
+  return call<CatalogResponse>("catalog_cache");
+}
+
+/* ------------------------------------------------------------------ */
+/* 下载中心：可配置源                                                  */
+/* ------------------------------------------------------------------ */
+
+export async function listSources(): Promise<SourcesView> {
+  return call<SourcesView>("list_sources");
+}
+
+/** 只算指纹与派生白名单，不写任何文件。 */
+export async function inspectSource(input: {
+  baseUrl: string;
+  catalogPubkey: string;
+  hostSuffixes?: string[] | null;
+}): Promise<SourcePreview> {
+  return call<SourcePreview>("inspect_source", {
+    request: {
+      base_url: input.baseUrl,
+      catalog_pubkey: input.catalogPubkey,
+      host_suffixes: input.hostSuffixes ?? null,
+    },
+  });
+}
+
+/** `confirm` 为 false 时后端一律拒绝写入，界面必须先展示完整指纹。 */
+export async function addSource(
+  input: Omit<SourcePreview, "catalog_fingerprint" | "derived" | "note"> & {
+    confirm: boolean;
+  },
+): Promise<SourcesView> {
+  return call<SourcesView>("add_source", {
+    request: {
+      id: input.id,
+      name: input.name,
+      base_url: input.base_url,
+      catalog_pubkey: input.catalog_pubkey,
+      host_suffixes: input.host_suffixes,
+      confirm: input.confirm,
+    },
+  });
+}
+
+export async function setSourceEnabled(id: string, enabled: boolean): Promise<SourcesView> {
+  return call<SourcesView>("set_source_enabled", { request: { id, enabled } });
+}
+
+export async function revokeSource(id: string): Promise<RevokeSourceResult> {
+  return call<RevokeSourceResult>("revoke_source", { request: { id } });
+}
+
+export async function removeSource(id: string): Promise<SourcesView> {
+  return call<SourcesView>("remove_source", { request: { id } });
 }
 
 /* ------------------------------------------------------------------ */
@@ -711,11 +839,6 @@ export interface KeyInfo {
   fingerprint: string;
   accepted: boolean;
   note: string;
-}
-
-/** 会话内替换 K5 公钥；重启回落到内置值。 */
-export async function setK5Pubkey(pubkeyB64: string): Promise<KeyInfo> {
-  return call<KeyInfo>("set_k5_pubkey", { pubkeyB64 });
 }
 
 export async function confirmTrustedKey(

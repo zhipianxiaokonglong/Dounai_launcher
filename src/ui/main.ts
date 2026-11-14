@@ -26,15 +26,16 @@ import {
 } from "./store.js";
 import { adminLifecycleChanged, disposeAdmin, renderAdmin } from "./views/admin.js";
 import { renderEnv } from "./views/env.js";
+import { renderDownload } from "./views/download.js";
 import { renderImport } from "./views/import.js";
 import { disposeLogs, focusInstance, renderLogs } from "./views/logs.js";
 import { patchEnvJob, refreshModules, renderModules } from "./views/modules.js";
 import { renderSettings } from "./views/settings.js";
 import { startTour } from "./tour.js";
 
-type ViewId = "modules" | "env" | "logs" | "settings" | "import" | "admin";
+type ViewId = "modules" | "download" | "env" | "logs" | "settings" | "import" | "admin";
 
-const VIEWS: ViewId[] = ["modules", "env", "logs", "settings", "import", "admin"];
+const VIEWS: ViewId[] = ["modules", "download", "env", "logs", "settings", "import", "admin"];
 
 let current: ViewId = "modules";
 
@@ -62,6 +63,9 @@ async function renderView(view: ViewId, arg?: string): Promise<void> {
     switch (view) {
       case "modules":
         renderModules(slots);
+        break;
+      case "download":
+        await renderDownload(slots);
         break;
       case "env":
         await renderEnv(slots);
