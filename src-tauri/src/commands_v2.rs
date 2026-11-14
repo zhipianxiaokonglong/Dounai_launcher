@@ -1971,6 +1971,49 @@ pub fn refresh_catalog(state: State<'_, AppStateV2>) -> CatalogResponse {
     }
 }
 
+/// 只读本次会话内已验签过的目录，不发任何网络请求。
+///
+/// 安装之后要刷新「已安装 / 可升级」这类状态。重新拉网络既慢又可能失败，
+/// 一旦失败，界面会把刚装好的条目连同整张列表一起清掉——用户看到的是
+/// 「刚装的东西不见了」。这里只读缓存：条目视图每次都按 `installed.json`
+/// 现算，所以状态照样是最新的。
+#[tauri::command]
+pub fn catalog_cache(state: State<'_, AppStateV2>) -> CatalogResponse {
+    let registry = state.sources();
+    let allowlist = registry.allowlist();
+    let statuses: Vec<SourceStatusView> = registry
+        .sources
+        .iter()
+        .map(|s| {
+            let state = if s.is_revoked() {
+                "invalid"
+            } else if s.enabled {
+                "ok"
+            } else {
+                "disabled"
+            };
+            source_status(s, state, None)
+        })
+        .collect();
+    let cached = state.cached_entries();
+    if cached.is_empty() {
+        return CatalogResponse {
+            source: "unavailable".into(),
+            entries: Vec::new(),
+            sources: statuses,
+            allowlist,
+            reason: Some("本次会话还没有验签过任何目录".into()),
+        };
+    }
+    CatalogResponse {
+        source: "cache".into(),
+        entries: catalog_entries(&state, &cached),
+        sources: statuses,
+        allowlist,
+        reason: None,
+    }
+}
+
 /// 缓存条目 → 界面行。安装目标由用户点选的那一行决定，不做隐式优选。
 fn catalog_entries(
     state: &AppStateV2,

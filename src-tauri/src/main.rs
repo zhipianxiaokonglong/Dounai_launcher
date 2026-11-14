@@ -61,6 +61,7 @@ fn main() {
             dounai_launcher::commands_v2::install_local_package,
             dounai_launcher::commands_v2::install_from_catalog,
             dounai_launcher::commands_v2::refresh_catalog,
+            dounai_launcher::commands_v2::catalog_cache,
             dounai_launcher::commands_v2::trust_info,
             dounai_launcher::commands_v2::settings_snapshot,
             dounai_launcher::commands_v2::purge_local_data,
