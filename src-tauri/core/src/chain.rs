@@ -366,11 +366,12 @@ impl ChainRunResult {
         }
     }
 
-    /// 本次成功拉起的实例，供 only_started 回滚停止使用。
+    /// 本次成功拉起的实例，供 only_started 回滚停止使用。External 不算：
+    /// 端口上的外部服务不是启动器起的，去停它只会制造一条失败记录。
     pub fn started_ids(&self) -> Vec<String> {
         self.steps
             .iter()
-            .filter(|s| matches!(s.state, ChainStepState::Started | ChainStepState::External))
+            .filter(|s| s.state == ChainStepState::Started)
             .map(|s| s.instance_id.clone())
             .collect()
     }
@@ -515,6 +516,14 @@ mod tests {
         result.missing_deps.push("c".into());
         assert_eq!(result.started_ids(), vec!["a"]);
         assert_eq!(result.steps[1].reason.as_deref(), Some("端口被占"));
+    }
+
+    #[test]
+    fn external_services_are_not_part_of_rollback() {
+        let plan = ChainPlan::from_default(&["a".into(), "b".into(), "c".into()]);
+        let mut result = ChainRunResult::from_plan(&plan);
+        result.set(2, ChainStepState::External, Some("端口上已有外部健康服务".into()));
+        assert_eq!(result.started_ids(), vec!["a", "c"]);
     }
 
     #[test]
