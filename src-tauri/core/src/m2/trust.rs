@@ -353,6 +353,7 @@ mod tests {
             expires: "2026-01-08T00:00:00Z".into(),
             expected_signer_fp: None,
             min_version: None,
+            min_launcher: None,
             revoked: vec![],
         };
         let forced = classify(

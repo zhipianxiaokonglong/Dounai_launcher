@@ -39,6 +39,9 @@ pub struct Instance {
     pub installed_at: String,
     pub source_kind: InstanceSourceKind,
     pub source_path: Option<String>,
+    /// 从 catalog 源安装的实例记录来源 id；本地 zip / dir 导入为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
     pub git: Option<GitObservation>,
     pub pinned: bool,
     pub auto_update: bool,
@@ -299,6 +302,7 @@ mod tests {
             installed_at: "2026-01-01T00:00:00Z".into(),
             source_kind: InstanceSourceKind::Zip,
             source_path: None,
+            source_id: None,
             git: None,
             pinned: false,
             auto_update: verdict == Verdict::A,

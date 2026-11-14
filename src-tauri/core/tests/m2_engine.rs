@@ -16,6 +16,7 @@ use zip::ZipWriter;
 use launcher_core::m2::adapters::{HttpFetcher, LocalDirAdapter, RemoteCatalogAdapter};
 use launcher_core::m2::catalog::{
     check_update_allowed, select_catalog, CatalogEntry, CatalogState, EntrySource,
+    SourceWatermark,
 };
 use launcher_core::m2::contract_probe::evaluate;
 use launcher_core::m2::installed::{InstalledState, Instance};
@@ -23,6 +24,7 @@ use launcher_core::m2::local::{require_confirmed, validate_local_dir};
 use launcher_core::m2::package::{install_package, verify_zip, ZipExpectation};
 use launcher_core::m2::retention::RetentionPolicy;
 use launcher_core::m2::source::{SourceAdapter, SourceError};
+use launcher_core::m2::sources::{SourceClass, SourceEntry};
 use launcher_core::m2::trust::{classify, ClassifyContext, TrustStore};
 use launcher_core::m2::{fingerprint, Category, InstanceSourceKind, Verdict};
 use launcher_core::manifest::Role;
@@ -120,11 +122,43 @@ fn entry_for(sha256: &str, size: u64, publisher_fp: &str) -> CatalogEntry {
         expires: "2026-01-07T00:00:00Z".into(),
         expected_signer_fp: None,
         min_version: None,
+        min_launcher: None,
         revoked: vec![],
     }
 }
 
+/// 按源表记录构造远程适配器：公钥、指纹与白名单都来自同一条本地记录。
+fn remote_source(
+    id: &str,
+    base_url: &str,
+    hosts: &[&str],
+    priority: u32,
+    pk5: &str,
+    fp5: &str,
+) -> SourceEntry {
+    SourceEntry {
+        id: id.into(),
+        name: id.into(),
+        kind: SourceClass::Official,
+        base_url: base_url.into(),
+        catalog_pubkey: pk5.into(),
+        catalog_fingerprint: fp5.into(),
+        host_suffixes: hosts.iter().map(|s| (*s).to_string()).collect(),
+        enabled: true,
+        deletable: false,
+        auto_update: true,
+        group: Some("official".into()),
+        sequence: None,
+        expires: None,
+        priority: Some(priority),
+        added_at: None,
+        revoked_at: None,
+        note: None,
+    }
+}
+
 fn catalog_json(sk: &SigningKey, sequence: u64, entry: &CatalogEntry) -> Vec<u8> {
+    let signer_fp = fingerprint(&B64.encode(sk.verifying_key().to_bytes())).unwrap();
     let mut document = json!({
         "schema_version": 2,
         "sequence": sequence,
@@ -138,7 +172,7 @@ fn catalog_json(sk: &SigningKey, sequence: u64, entry: &CatalogEntry) -> Vec<u8>
         ],
         "modules": [entry],
         "revoked": [],
-        "signature": { "algo": "Ed25519", "key_id": "K5",
+        "signature": { "algo": "Ed25519", "key_id": "K5", "signer_fp": signer_fp,
                        "signed_at": "2026-01-01T00:00:00Z", "value": "" }
     });
     let payload = canonical_payload(&document).unwrap();
@@ -211,26 +245,34 @@ fn one_source_down_still_installs_from_the_other() {
     responses.insert(SF_CATALOG.into(), Ok(catalog));
     responses.insert(SF_ZIP.into(), Ok(zip_bytes.clone()));
     let http = FakeHttp { responses };
-    let github = RemoteCatalogAdapter::github(
+    let github_source = remote_source(
         "github",
         "https://github.com/dounai/releases",
+        &["github.com", "githubusercontent.com"],
         1,
         &pk5,
-        &http,
+        &fp5,
     );
-    let sf = RemoteCatalogAdapter::sourceforge(
+    let sf_source = remote_source(
         "sourceforge",
         "https://downloads.sourceforge.net/dounai",
+        &["sourceforge.net", "sourceforge.io"],
         2,
         &pk5,
+        &fp5,
+    );
+    let github = RemoteCatalogAdapter::from_source(
+        &github_source,
+        vec![github_source.id.clone()],
         &http,
     );
+    let sf = RemoteCatalogAdapter::from_source(&sf_source, vec![sf_source.id.clone()], &http);
     assert!(matches!(
         fetch(&github),
         Err(SourceError::Unavailable { .. })
     ));
     let candidates = vec![(1, fetch(&github)), (2, fetch(&sf))];
-    let document = select_catalog(&candidates, &CatalogState::default(), NOW).unwrap();
+    let document = select_catalog(&candidates, &SourceWatermark::default(), NOW).unwrap();
     assert_eq!(document.sequence, 7);
 
     let dir = tempfile::tempdir().unwrap();
@@ -265,39 +307,47 @@ fn one_source_down_still_installs_from_the_other() {
 
 #[test]
 fn catalog_rollback_bad_signature_and_no_usable_source_are_all_rejected() {
-    let (_k1, _pk1, _fp1, k5, pk5, _fp5, _zip, entry) = fixture();
-    let previous = CatalogState {
+    let (_k1, _pk1, _fp1, k5, pk5, fp5, _zip, entry) = fixture();
+    let previous = SourceWatermark {
         sequence: Some(7),
-        ..Default::default()
+        expires: None,
     };
     let old = catalog_json(&k5, 6, &entry);
     let signed = String::from_utf8(old.clone()).unwrap();
-    let doc = launcher_core::m2::catalog::CatalogDocument::parse(&signed, &pk5).unwrap();
+    let doc = launcher_core::m2::catalog::CatalogDocument::parse(&signed, &pk5, &fp5).unwrap();
     assert!(doc.validate(&previous, NOW).is_err());
 
     let tampered = signed.replace("\"sequence\":6", "\"sequence\":8");
     assert!(matches!(
-        launcher_core::m2::catalog::CatalogDocument::parse(&tampered, &pk5),
+        launcher_core::m2::catalog::CatalogDocument::parse(&tampered, &pk5, &fp5),
         Err(SourceError::CatalogInvalid { .. })
     ));
 
     let http = FakeHttp {
         responses: BTreeMap::new(),
     };
-    let github = RemoteCatalogAdapter::github(
+    let github_source = remote_source(
         "github",
         "https://github.com/dounai/releases",
+        &["github.com", "githubusercontent.com"],
         1,
         &pk5,
-        &http,
+        &fp5,
     );
-    let sf = RemoteCatalogAdapter::sourceforge(
+    let sf_source = remote_source(
         "sourceforge",
         "https://downloads.sourceforge.net/dounai",
+        &["sourceforge.net", "sourceforge.io"],
         2,
         &pk5,
+        &fp5,
+    );
+    let github = RemoteCatalogAdapter::from_source(
+        &github_source,
+        vec![github_source.id.clone()],
         &http,
     );
+    let sf = RemoteCatalogAdapter::from_source(&sf_source, vec![sf_source.id.clone()], &http);
     let candidates = vec![(1, fetch(&github)), (2, fetch(&sf))];
     assert!(matches!(
         select_catalog(&candidates, &previous, NOW),
@@ -448,9 +498,10 @@ fn unregistered_key_needs_tofu_and_revocation_blocks_updates() {
 
 #[test]
 fn version_monotonicity_is_scoped_to_the_same_variant() {
-    let (_k1, _pk1, fp1, k5, pk5, _fp5, _zip, entry) = fixture();
+    let (_k1, _pk1, fp1, k5, pk5, fp5, _zip, entry) = fixture();
     let catalog_json_text = String::from_utf8(catalog_json(&k5, 7, &entry)).unwrap();
-    let doc = launcher_core::m2::catalog::CatalogDocument::parse(&catalog_json_text, &pk5).unwrap();
+    let doc =
+        launcher_core::m2::catalog::CatalogDocument::parse(&catalog_json_text, &pk5, &fp5).unwrap();
     let mut state = CatalogState::default();
     state
         .last_seen_version
@@ -587,6 +638,7 @@ fn incompatible_contract_does_not_activate_and_cleanup_respects_boundaries() {
                 installed_at: NOW.into(),
                 source_kind: InstanceSourceKind::Zip,
                 source_path: None,
+                source_id: None,
                 git: None,
                 pinned: false,
                 auto_update: true,
@@ -621,4 +673,45 @@ fn incompatible_contract_does_not_activate_and_cleanup_respects_boundaries() {
         .unwrap()
         .removable
         .is_empty());
+}
+
+/// M8 内建测试源夹具：不等官方 catalog 签发，也能验证「每个源用自己的钥匙
+/// 签 catalog」这条链路。同一份内容换一把钥匙签，用 A 源登记的公钥必然验不过。
+#[test]
+fn community_catalog_only_verifies_with_its_own_registered_key() {
+    let (_k1, _pk1, _fp1, _k5, pk5, fp5, _zip, entry) = fixture();
+    let (community_key, community_pk, community_fp) = keypair(9);
+    let text = String::from_utf8(catalog_json(&community_key, 3, &entry)).unwrap();
+
+    let doc = launcher_core::m2::catalog::CatalogDocument::parse(
+        &text,
+        &community_pk,
+        &community_fp,
+    )
+    .expect("社区源用自己登记的公钥应验通");
+    assert_eq!(doc.sequence, 3);
+    assert_eq!(doc.signature.signer_fp, community_fp);
+
+    // 同一份内容，用官方 K5 的登记值去验：指纹不符，硬拒，不进会话缓存。
+    let err = launcher_core::m2::catalog::CatalogDocument::parse(&text, &pk5, &fp5)
+        .unwrap_err();
+    assert!(err.to_string().contains("指纹与源登记值不符"), "{err}");
+}
+
+/// catalog 自述 pubkey 必须在运行时也被挡住，不能只靠 JSON Schema 的
+/// additionalProperties=false：serde 默认会忽略未知字段。
+#[test]
+fn catalog_cannot_smuggle_its_own_pubkey() {
+    let (k5, pk5, fp5) = keypair(5);
+    let (_k1, _pk1, fp1, _k5, _pk5, _fp5, _zip, _entry) = fixture();
+    let entry = entry_for(&format!("sha256:{}", "a".repeat(64)), 1, &fp1);
+    let mut doc: Value = serde_json::from_slice(&catalog_json(&k5, 1, &entry)).unwrap();
+    doc["signature"]["pubkey"] = json!(pk5);
+    let err = launcher_core::m2::catalog::CatalogDocument::parse(
+        &doc.to_string(),
+        &pk5,
+        &fp5,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("不得自述 pubkey"), "{err}");
 }
