@@ -5,8 +5,8 @@
   "category": "optional",
   "entry": {
     "type": "command",
-    "command": "python -m emotional_tts serve",
-    "working_dir": "output",
+    "command": "{module_dir}/.venv/Scripts/python.exe -m emotional_tts serve --port 8103",
+    "working_dir": "",
     "env": {
       "EMOTION_TTS_PORT": "8103",
       "EMOTION_TTS_DATA_DIR": "{data_dir}/moodvoice",

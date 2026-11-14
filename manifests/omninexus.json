@@ -1,12 +1,12 @@
 {
   "module_id": "omninexus",
   "name": "LLM 编排核心 · OmniNexus",
-  "version": "0.1.0",
+  "version": "0.3.4",
   "category": "core",
   "entry": {
     "type": "command",
-    "command": "python -m omninexus",
-    "working_dir": "OmniNexus",
+    "command": "{module_dir}/.venv/Scripts/python.exe -m omninexus --port 8102",
+    "working_dir": "",
     "env": {
       "OMNI_PORT": "8102",
       "OMNI_DATA_DIR": "{data_dir}/omninexus"

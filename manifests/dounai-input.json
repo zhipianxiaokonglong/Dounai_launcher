@@ -1,12 +1,12 @@
 {
   "module_id": "dounai-input",
   "name": "输入接入层 · Dounai Input",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "category": "core",
   "entry": {
     "type": "command",
-    "command": "dounai-input serve",
-    "working_dir": "input",
+    "command": "{module_dir}/.venv/Scripts/python.exe -m dounai_input serve --port 8101",
+    "working_dir": "",
     "env": {
       "DOUNAI_PORT": "8101",
       "DOUNAI_DATA_DIR": "{data_dir}/input"
@@ -24,6 +24,11 @@
       "name": "Python",
       "version": ">=3.11,<3.13",
       "type": "runtime"
+    },
+    {
+      "name": "av",
+      "version": ">=11,<19",
+      "type": "library"
     },
     {
       "name": "fastapi",

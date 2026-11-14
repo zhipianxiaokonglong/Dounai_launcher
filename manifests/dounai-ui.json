@@ -1,12 +1,12 @@
 {
   "module_id": "dounai-ui",
   "name": "总装与 UI 层 · Dounai",
-  "version": "0.1.0",
+  "version": "0.3.1",
   "category": "core",
   "entry": {
     "type": "command",
-    "command": "dounai.exe",
-    "working_dir": "Dounai",
+    "command": "{module_dir}/dounai.exe",
+    "working_dir": "",
     "env": {},
     "health": {
       "url": null,
