@@ -419,7 +419,7 @@ validates('sources-v1 接受内置源注册表样例', sourcesExample, sourcesSc
 validates('sources-v1 接受社区源条目', patchCommunity({}), sourcesSchema);
 rejects('sources-v1 拒绝源条目缺 catalog_fingerprint', (() => {
   const doc = patchCommunity({});
-  delete doc.sources[2].catalog_fingerprint;
+  delete doc.sources[1].catalog_fingerprint;
   return doc;
 })(), sourcesSchema);
 rejects('sources-v1 拒绝内置源 deletable: true', patchSource({ deletable: true }), sourcesSchema);
@@ -430,14 +430,20 @@ rejects('sources-v1 拒绝公共后缀 com', patchCommunity({ host_suffixes: ['c
 rejects('sources-v1 拒绝非 https base_url', patchCommunity({ base_url: 'http://example.org/catalog' }), sourcesSchema);
 rejects('sources-v1 拒绝撤销公钥后仍启用的源',
   patchCommunity({ revoked_at: TIME }), sourcesSchema);
-expect('源 id 唯一，官方主源与镜像共享 official 水位组',
+expect('源 id 唯一，样例只含已下发的官方主源（GitHub 镜像暂缓）',
   new Set(sourcesExample.sources.map((s) => s.id)).size === sourcesExample.sources.length
-  && sourcesExample.sources.filter((s) => s.kind === 'official').every((s) => s.group === 'official'));
+  && sourcesExample.sources.every((s) => s.kind !== 'official' || s.group === 'official')
+  && !sourcesExample.sources.some((s) => s.id === 'official-gh'));
 expect('allowlist 只由已启用源的 host 后缀派生', (() => {
   const enabled = sourcesExample.sources.filter((s) => s.enabled);
   const list = [...new Set(enabled.flatMap((s) => s.host_suffixes))].sort();
-  return list.length === 4 && !list.includes('com') && list.includes('sourceforge.net');
+  return list.length === 2 && !list.includes('com') && list.includes('sourceforge.net');
 })());
+validates('sources-v1 接受逐源 last_error 记录', patchSource({
+  last_error: '旧格式缺 signer_fp',
+  last_error_at: TIME
+}), sourcesSchema);
+rejects('sources-v1 拒绝 last_error 类型错误', patchSource({ last_error: 7 }), sourcesSchema);
 expect('样例源表公钥与 Rust 内嵌 K5 一致', (() => {
   const rust = readFileSync(join(here, '../src-tauri/src/state_v2.rs'), 'utf8');
   const pubkey = /BUILTIN_K5_PUBKEY_B64:\s*&str\s*=\s*"([^"]+)"/.exec(rust)?.[1];
@@ -446,7 +452,7 @@ expect('样例源表公钥与 Rust 内嵌 K5 一致', (() => {
 })());
 
 // 断言数量固定。误删或跳过断言时，不能只靠 failed 判绿。
-const EXPECTED_ASSERTIONS = 129;
+const EXPECTED_ASSERTIONS = 131;
 const count = report.filter((x) => x.startsWith('通过') || x.startsWith('失败')).length;
 console.log(report.join('\n'));
 console.log('');

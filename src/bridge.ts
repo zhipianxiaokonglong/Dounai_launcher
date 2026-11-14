@@ -65,6 +65,9 @@ export interface SourceView {
   revoked: boolean;
   sequence: number | null;
   expires: string | null;
+  /** 最近一次刷新失败的摘要与时间；成功刷新后清空。 */
+  last_error: string | null;
+  last_error_at: string | null;
 }
 
 export interface SourcesView {

@@ -238,6 +238,11 @@ function sourceRow(source: SourceView): string {
       <span class="cap">${esc(source.base_url)}</span>
       <code class="fp">catalog 指纹 ${esc(source.catalog_fingerprint)}</code>
       <span class="cap">白名单：${esc(source.host_suffixes.join("、"))} · 自动更新：${source.auto_update ? "开" : "关"}${source.sequence ? ` · 水位 ${source.sequence}` : ""}</span>
+      ${
+        source.last_error
+          ? `<span class="cap" style="color:var(--danger)">上次刷新失败（${esc(source.last_error_at ?? "")}）：${esc(source.last_error)}</span>`
+          : ""
+      }
     </div>
     <div class="dl-source-side">${controls}</div>
   </div>`;

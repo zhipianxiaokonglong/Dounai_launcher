@@ -8,7 +8,10 @@
       "base_url": "https://downloads.sourceforge.net/project/dounai-releases",
       "catalog_pubkey": "+56W2k6Sw60cMspmEKUESgqX1TGJLqmVozPJvI0n8G8=",
       "catalog_fingerprint": "sha256:8c1d31cf6f5ce98961be579f88fe49f8521242bcaa07483e85d0bbea1532eff5",
-      "host_suffixes": ["sourceforge.net", "sourceforge.io"],
+      "host_suffixes": [
+        "sourceforge.net",
+        "sourceforge.io"
+      ],
       "enabled": true,
       "deletable": false,
       "auto_update": true,
@@ -16,22 +19,6 @@
       "sequence": null,
       "expires": null,
       "priority": 1
-    },
-    {
-      "id": "official-gh",
-      "name": "官方镜像（GitHub）",
-      "kind": "official",
-      "base_url": "https://raw.githubusercontent.com/Tonyjh07/dounai-releases/main",
-      "catalog_pubkey": "+56W2k6Sw60cMspmEKUESgqX1TGJLqmVozPJvI0n8G8=",
-      "catalog_fingerprint": "sha256:8c1d31cf6f5ce98961be579f88fe49f8521242bcaa07483e85d0bbea1532eff5",
-      "host_suffixes": ["github.com", "githubusercontent.com"],
-      "enabled": true,
-      "deletable": false,
-      "auto_update": true,
-      "group": "official",
-      "sequence": null,
-      "expires": null,
-      "priority": 2
     }
   ]
 }
