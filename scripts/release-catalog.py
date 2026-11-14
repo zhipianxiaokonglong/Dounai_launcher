@@ -124,6 +124,11 @@ def main() -> None:
         doc["expires"] = expires
         print(f"序号：{old_sequence} -> {doc['sequence']}；窗口 {generated_at} -> {expires}（{args.days} 天）")
 
+        # 条目自带的 expires 跟着 catalog 走：只刷新顶层窗口、条目还停在旧日期，
+        # 会让启动器在 catalog 仍然有效时把每个模块都当成过期条目。
+        for entry in doc.get("modules", []):
+            entry["expires"] = expires
+
         # 3) 包哈希核对
         if not args.skip_download_check:
             modules_dir = Path(args.modules_dir) if args.modules_dir else None
