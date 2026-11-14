@@ -344,6 +344,62 @@ pub fn check_catalog(c: &Value) -> Result<(), ReleaseError> {
     Ok(())
 }
 
+/// 签发前预检：条目 `source_id` 必须与顶层 `sources[].id` 自洽，且落在允许集合内。
+///
+/// 2026-11-14 的现网事故根因就在这：签发侧与消费侧各改各的，旧件带着
+/// `sourceforge` 这个源表里根本不存在的 id 上线，启动器验签通过也匹配不到
+/// 下载地址。规则：
+/// - `sources[].id` 非空、唯一；
+/// - 每个 `modules[].sources[].source_id` 必须出现在 `sources[].id` 里；
+/// - 所有 id 必须落在 `allowed_sources` 内。官方件传内置源 id
+///   （[`launcher_core::m2::sources::BUILTIN_SOURCE_IDS`]）；社区源签发时显式
+///   传入自己的源 id，不给「顺手写错」留通道。
+pub fn preflight_catalog(c: &Value, allowed_sources: &[&str]) -> Result<(), ReleaseError> {
+    check_catalog(c)?;
+    let ids: Vec<&str> = c["sources"]
+        .as_array()
+        .expect("check_catalog 已确认 sources 是数组")
+        .iter()
+        .filter_map(|s| s["id"].as_str())
+        .collect();
+    if ids.is_empty() {
+        return Err(ReleaseError::BadCatalog("sources[].id 不得为空".into()));
+    }
+    if ids.len() != ids.iter().collect::<std::collections::BTreeSet<_>>().len() {
+        return Err(ReleaseError::BadCatalog("sources[].id 重复".into()));
+    }
+    for id in &ids {
+        if !allowed_sources.contains(id) {
+            return Err(ReleaseError::BadCatalog(format!(
+                "源 id {id} 不在允许集合内（{:?}）；如确属新源，请显式传入该源 id",
+                allowed_sources
+            )));
+        }
+    }
+    for module in c["modules"].as_array().expect("已确认是数组") {
+        let module_id = module["module_id"].as_str().unwrap_or("?");
+        let entry_sources = module["sources"]
+            .as_array()
+            .ok_or_else(|| ReleaseError::BadCatalog(format!("{module_id} 缺少 sources 数组")))?;
+        if entry_sources.is_empty() {
+            return Err(ReleaseError::BadCatalog(format!(
+                "{module_id} 的 sources 为空，条目将匹配不到任何下载地址"
+            )));
+        }
+        for s in entry_sources {
+            let source_id = s["source_id"]
+                .as_str()
+                .ok_or_else(|| ReleaseError::BadCatalog(format!("{module_id} 有条目缺 source_id")))?;
+            if !ids.contains(&source_id) {
+                return Err(ReleaseError::BadCatalog(format!(
+                    "{module_id} 的下载地址指向源 {source_id}，但顶层 sources 里没有它"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 // ---- 打包 ----
 
 /// 校验包内相对路径。
@@ -526,6 +582,63 @@ mod tests {
             "modules": [],
             "revoked": []
         })
+    }
+
+    #[test]
+    fn preflight_passes_a_consistent_document() {
+        let mut c = catalog();
+        c["sources"] = json!([
+            { "id": "official-sf", "kind": "sourceforge", "base_url": "https://example.com", "priority": 1 }
+        ]);
+        c["modules"] = json!([{
+            "module_id": "dounai/demo",
+            "sources": [{ "source_id": "official-sf", "url": "https://example.com/a.zip" }]
+        }]);
+        preflight_catalog(&c, &["official-sf"]).expect("自洽文档应通过预检");
+    }
+
+    #[test]
+    fn preflight_rejects_ids_outside_the_allowed_set() {
+        // 2026-11-14 现网事故的形状：条目写着源表里不存在的 sourceforge。
+        let mut c = catalog();
+        c["modules"] = json!([{
+            "module_id": "dounai/demo",
+            "sources": [{ "source_id": "sourceforge", "url": "https://example.com/a.zip" }]
+        }]);
+        let error = preflight_catalog(&c, &["official-sf"]).unwrap_err();
+        assert!(error.to_string().contains("不在允许集合内"), "{error}");
+    }
+
+    #[test]
+    fn preflight_rejects_entries_pointing_at_missing_top_level_sources() {
+        let mut c = catalog();
+        c["sources"] = json!([
+            { "id": "official-sf", "kind": "sourceforge", "base_url": "https://example.com", "priority": 1 }
+        ]);
+        c["modules"] = json!([{
+            "module_id": "dounai/demo",
+            "sources": [{ "source_id": "official-gh", "url": "https://example.com/a.zip" }]
+        }]);
+        let error = preflight_catalog(&c, &["official-sf", "official-gh"]).unwrap_err();
+        assert!(error.to_string().contains("顶层 sources 里没有它"), "{error}");
+    }
+
+    #[test]
+    fn preflight_rejects_duplicate_and_missing_source_ids() {
+        let mut c = catalog();
+        c["sources"] = json!([
+            { "id": "official-sf", "kind": "sourceforge", "base_url": "https://example.com", "priority": 1 },
+            { "id": "official-sf", "kind": "sourceforge", "base_url": "https://example.com", "priority": 2 }
+        ]);
+        assert!(preflight_catalog(&c, &["official-sf"]).is_err());
+
+        let mut c = catalog();
+        c["sources"] = json!([]);
+        assert!(preflight_catalog(&c, &["official-sf"]).is_err());
+
+        let mut c = catalog();
+        c["modules"] = json!([{ "module_id": "dounai/demo", "sources": [] }]);
+        assert!(preflight_catalog(&c, &["official-sf"]).is_err());
     }
 
     #[test]

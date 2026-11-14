@@ -128,6 +128,9 @@ pub struct SourceView {
     pub revoked: bool,
     pub sequence: Option<u64>,
     pub expires: Option<String>,
+    /// 最近一次刷新失败的摘要与时间；成功刷新后清空。
+    pub last_error: Option<String>,
+    pub last_error_at: Option<String>,
 }
 
 impl From<&SourceEntry> for SourceView {
@@ -145,6 +148,8 @@ impl From<&SourceEntry> for SourceView {
             revoked: source.is_revoked(),
             sequence: source.sequence,
             expires: source.expires.clone(),
+            last_error: source.last_error.clone(),
+            last_error_at: source.last_error_at.clone(),
         }
     }
 }
@@ -1862,16 +1867,15 @@ pub fn refresh_catalog(state: State<'_, AppStateV2>) -> CatalogResponse {
                 registry_next.advance(OFFICIAL_GROUP, doc.sequence, &doc.expires);
                 observed.push(doc);
                 for source in &official {
+                    registry_next.set_last_error(&source.id, None);
                     statuses.push(source_status(source, "ok", None));
                 }
             }
             Err(error) => {
+                let reason = error.reason().to_string();
                 for source in &official {
-                    statuses.push(source_status(
-                        source,
-                        "invalid",
-                        Some(error.reason().to_string()),
-                    ));
+                    registry_next.set_last_error(&source.id, Some((reason.clone(), now.clone())));
+                    statuses.push(source_status(source, "invalid", Some(reason.clone())));
                 }
             }
         }
@@ -1892,29 +1896,31 @@ pub fn refresh_catalog(state: State<'_, AppStateV2>) -> CatalogResponse {
                 Ok(()) => {
                     collect_entries(&registry, source, &doc, &mut cache);
                     registry_next.advance(&source.id, doc.sequence, &doc.expires);
+                    registry_next.set_last_error(&source.id, None);
                     observed.push(doc);
                     statuses.push(source_status(source, "ok", None));
                 }
-                Err(error) => statuses.push(source_status(
-                    source,
-                    "invalid",
-                    Some(error.reason().to_string()),
-                )),
+                Err(error) => {
+                    let reason = error.reason().to_string();
+                    registry_next.set_last_error(&source.id, Some((reason.clone(), now.clone())));
+                    statuses.push(source_status(source, "invalid", Some(reason)));
+                }
             },
-            Ok(None) => statuses.push(source_status(
-                source,
-                "invalid",
-                Some("该源没有返回 catalog".into()),
-            )),
-            Err(error) => statuses.push(source_status(
-                source,
-                if matches!(error, SourceError::Unavailable { .. }) {
+            Ok(None) => {
+                let reason = "该源没有返回 catalog".to_string();
+                registry_next.set_last_error(&source.id, Some((reason.clone(), now.clone())));
+                statuses.push(source_status(source, "invalid", Some(reason)));
+            }
+            Err(error) => {
+                let reason = error.reason().to_string();
+                let state_name = if matches!(error, SourceError::Unavailable { .. }) {
                     "unavailable"
                 } else {
                     "invalid"
-                },
-                Some(error.reason().to_string()),
-            )),
+                };
+                registry_next.set_last_error(&source.id, Some((reason.clone(), now.clone())));
+                statuses.push(source_status(source, state_name, Some(reason)));
+            }
         }
     }
 
@@ -1952,6 +1958,12 @@ pub fn refresh_catalog(state: State<'_, AppStateV2>) -> CatalogResponse {
     // 只允许回退本次会话内已验签过的条目；不读磁盘上的旧 catalog。
     let cached = state.cached_entries();
     if cached.is_empty() {
+        // 全部失败：目录拿不到，但失败事实要记进 sources.json，界面才有逐源原因可看。
+        let next = registry_next.clone();
+        let _ = state.mutate_sources(|current| {
+            *current = next;
+            Ok(())
+        });
         unavailable(
             &allowlist,
             statuses
@@ -2178,6 +2190,8 @@ pub fn add_source(
         added_at: Some(AppStateV2::now()),
         revoked_at: None,
         note: None,
+        last_error: None,
+        last_error_at: None,
     };
     state.mutate_sources(|registry| {
         registry.add(entry).map_err(|e| e.to_string())?;

@@ -16,8 +16,9 @@ use std::process::ExitCode;
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
-use dounai_launcher::release::{check_catalog, load_signing_key, sign_catalog_doc, ReleaseError};
+use dounai_launcher::release::{load_signing_key, preflight_catalog, sign_catalog_doc, ReleaseError};
 use dounai_launcher::signature::verify_manifest;
+use launcher_core::m2::sources::BUILTIN_SOURCE_IDS;
 use serde_json::Value;
 
 fn main() -> ExitCode {
@@ -59,6 +60,21 @@ fn print_usage() {
     );
 }
 
+/// 收集可重复出现的旗标值（如 `--allow-source a --allow-source b`）。
+fn flags(args: &[String], name: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == name {
+            if let Some(v) = args.get(i + 1) {
+                out.push(v.clone());
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
 fn flag(args: &[String], name: &str) -> Option<String> {
     let mut i = 0;
     while i < args.len() {
@@ -83,7 +99,10 @@ fn cmd_sign(args: &[String]) -> Result<(), ReleaseError> {
     let catalog_path = require(args, "--catalog")?;
     let sk = load_signing_key(Path::new(&require(args, "--key")?))?;
     let mut catalog = read_json(&catalog_path)?;
-    check_catalog(&catalog)?;
+    let extras = flags(args, "--allow-source");
+    let mut allowed: Vec<&str> = BUILTIN_SOURCE_IDS.to_vec();
+    allowed.extend(extras.iter().map(String::as_str));
+    preflight_catalog(&catalog, &allowed)?;
     let key_id = flag(args, "--key-id").unwrap_or_else(|| "K5".into());
     sign_catalog_doc(&mut catalog, &sk, &key_id)?;
 
@@ -111,7 +130,10 @@ fn cmd_verify(args: &[String]) -> Result<(), ReleaseError> {
     let catalog_path = require(args, "--catalog")?;
     let catalog = read_json(&catalog_path)?;
     verify_manifest(&catalog, &pk)?;
-    check_catalog(&catalog)?;
+    let extras = flags(args, "--allow-source");
+    let mut allowed: Vec<&str> = BUILTIN_SOURCE_IDS.to_vec();
+    allowed.extend(extras.iter().map(String::as_str));
+    preflight_catalog(&catalog, &allowed)?;
     let fp = launcher_core::m2::fingerprint(&pk)
         .map_err(|e| ReleaseError::BadCatalog(e.to_string()))?;
     let signer_fp = catalog["signature"]["signer_fp"]
@@ -141,6 +163,16 @@ mod tests {
             .collect();
         assert_eq!(flag(&args, "--key").as_deref(), Some("k.b64"));
         assert_eq!(flag(&args, "--out"), None);
+    }
+
+    #[test]
+    fn flags_collects_repeated_values() {
+        let args: Vec<String> = ["--allow-source", "a", "--allow-source", "b"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(flags(&args, "--allow-source"), vec!["a", "b"]);
+        assert!(flags(&args, "--key").is_empty());
     }
 
     #[test]

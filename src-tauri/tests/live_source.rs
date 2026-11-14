@@ -19,7 +19,7 @@ use dounai_launcher::state_v2::{BUILTIN_K5_FINGERPRINT, BUILTIN_K5_PUBKEY_B64};
 use launcher_core::m2::adapters::RemoteCatalogAdapter;
 use launcher_core::m2::catalog::CatalogDocument;
 use launcher_core::m2::source::SourceAdapter;
-use launcher_core::m2::sources::{SourceEntry, SourceRegistry, OFFICIAL_SF_ID};
+use launcher_core::m2::sources::{SourceEntry, SourceRegistry, OFFICIAL_GH_ID, OFFICIAL_SF_ID};
 
 /// 用内置源表里的官方 SourceForge 记录装配适配器，与运行时走同一份配置。
 fn official_source() -> SourceEntry {
@@ -58,6 +58,20 @@ fn builtin_catalog_verifies_with_builtin_k5() {
             entry.sha256
         );
         assert!(entry.size > 0, "{} 没写包大小", entry.module_id);
+        // 2026-11-14 的现网事故：条目 source_id 与源表登记不一致，验签过了也匹配不到地址。
+        assert!(
+            !entry.sources.is_empty(),
+            "{} 没有下载地址",
+            entry.module_id
+        );
+        for source in &entry.sources {
+            assert!(
+                source.source_id == OFFICIAL_SF_ID || source.source_id == OFFICIAL_GH_ID,
+                "{} 的下载地址指向源表外的源 {}",
+                entry.module_id,
+                source.source_id
+            );
+        }
     }
     println!(
         "目录可用：{} 个模块，expires={}",
