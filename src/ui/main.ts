@@ -83,7 +83,11 @@ async function renderView(view: ViewId, arg?: string): Promise<void> {
         // 实例表会被「安装 / 卸载 / 启用停用」改写，而这些动作不保证触发
         // 生命周期推送。进页先拉一次，否则看到的是启动时那份快照——
         // 表现为「刚装好的模块不在列表里」。读失败就沿用上一份，不挡渲染。
-        await refreshViews().catch(() => undefined);
+        try {
+          await refreshViews();
+        } catch (error) {
+          toast(`读取实例状态失败：${describeError(error)}`, "error");
+        }
         renderModules(slots);
         break;
       case "download":
@@ -210,20 +214,25 @@ async function boot(): Promise<void> {
   // 期间界面必须已经能点、能切页，否则等数据回来之前就是一块死界面。
   wireNav();
   wireEvents();
+  // 首屏这一下已经把实例表拉回来了（模块页进页自读）。
   await renderView("modules");
 
-  // 四组事实并行拉取：任何一组失败都不该挡住界面，只在状态栏与页面上体现。
-  const results = await Promise.allSettled([
-    refreshViews(),
-    refreshSettings(),
-    refreshDevMode(),
-    refreshEnv(),
-  ]);
+  // 其余三组事实并行拉取：任何一组失败都不该挡住界面，只在状态栏与页面上体现。
+  // 实例表不在这批里——环境探测要 spawn 子进程（PowerShell / WMI / nvidia-smi），
+  // 几百毫秒到几秒不等；把数据渲染挂在它后面，刷新后就会先看到「0 个模块」，
+  // 而且用户在这期间切走的话，那个页面再也不会被补渲染。
+  const results = await Promise.allSettled([refreshSettings(), refreshDevMode(), refreshEnv()]);
   const failure = results.find((item): item is PromiseRejectedResult => item.status === "rejected");
   if (failure) {
     toast(`部分状态没有读到：${describeError(failure.reason)}`, "error");
   }
-  await renderView(current);
+  // 模块页刚带着数据渲染过，不必为它再拉一次实例表；其它页要拿到新的
+  // 设置 / 环境事实才重绘。两种情况都更新一次外壳计数。
+  if (current === "modules") {
+    updateChrome();
+  } else {
+    await renderView(current);
+  }
 
   // 引导放在最后：等实例表回来才知道该不该弹（装过模块的人不用看）。
   void maybeStartTour();
