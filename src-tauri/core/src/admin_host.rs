@@ -77,8 +77,14 @@ pub fn validate_mount_request(req: &MountRequest) -> Result<u16, AdminHostError>
     if port == 0 {
         return Err(AdminHostError::BadPort(port_text.to_string()));
     }
-    if path.is_empty() || path.split('/').any(|part| part == "..") {
-        return Err(AdminHostError::MissingPath(req.url.clone()));
+    // 根路径 `/` 必须放行：contracts/examples 里 dounai-input 与 moodvoice 的
+    // `admin_ui.web_ui.path` 就是 "/"，拼出来是 http://127.0.0.1:8101/。
+    // 这条校验在 M4 之前没有真正的消费者，第一次内嵌时把两个官方模块误判成
+    // 「缺少路径」并降级成独立窗口。host 与 port 已经锁死在回环地址上，指向
+    // 服务根不构成越界；这里只挡路径里的 `..`（query / fragment 一并检查，
+    // 保守拒绝好过放行）。
+    if path.split('/').any(|part| part == "..") {
+        return Err(AdminHostError::TraversalPath(req.url.clone()));
     }
     Ok(port)
 }
@@ -177,6 +183,36 @@ mod tests {
         assert_eq!(validate_mount_request(&r), Ok(8102));
         let spare = request("probe", "http://127.0.0.1:18102/settings?tab=logs");
         assert_eq!(validate_mount_request(&spare), Ok(18102));
+        // 服务根也是合法入口，不只是「/后面还得有字」。
+        assert_eq!(
+            validate_mount_request(&request("probe", "http://127.0.0.1:8101/")),
+            Ok(8101)
+        );
+    }
+
+    /// 回归：宿主校验必须能接受所有官方样例 manifest 声明的管理页路径。
+    ///
+    /// 之前只拿 `/settings` 写用例，结果 `web_ui.path = "/"` 的两个样例在真机上
+    /// 全部降级成独立窗口。样例改了这里会跟着变，避免契约与宿主再次分叉。
+    #[test]
+    fn accepts_every_official_manifest_web_ui_path() {
+        const EXAMPLES: &[&str] = &[
+            include_str!("../../../contracts/examples/dounai-input.v2.json"),
+            include_str!("../../../contracts/examples/moodvoice.v2.json"),
+            include_str!("../../../contracts/examples/omninexus.v2.json"),
+        ];
+        for raw in EXAMPLES {
+            let manifest: serde_json::Value = serde_json::from_str(raw).unwrap();
+            let path = manifest["admin_ui"]["web_ui"]["path"]
+                .as_str()
+                .expect("样例必须声明 web_ui.path");
+            let url = format!("http://127.0.0.1:8101{path}");
+            assert_eq!(
+                validate_mount_request(&request("probe", &url)),
+                Ok(8101),
+                "官方样例路径被宿主拒绝：{url}"
+            );
+        }
     }
 
     #[test]
@@ -189,13 +225,25 @@ mod tests {
             "http://127.0.0.1:0/settings",
             "http://127.0.0.1:99999/settings",
             "http://127.0.0.1:8102",
-            "http://127.0.0.1:8102/",
             "http://127.0.0.1:8102/../admin",
             "file:///C:/evil.html",
         ] {
             let r = request("probe", url);
             assert!(validate_mount_request(&r).is_err(), "未被拒绝：{url}");
         }
+        // 「没有斜杠」与「路径越界」是两种不同的失败，别再混成 MissingPath。
+        assert_eq!(
+            validate_mount_request(&request("probe", "http://127.0.0.1:8102")),
+            Err(AdminHostError::MissingPath(
+                "http://127.0.0.1:8102".to_string()
+            ))
+        );
+        assert_eq!(
+            validate_mount_request(&request("probe", "http://127.0.0.1:8102/../admin")),
+            Err(AdminHostError::TraversalPath(
+                "http://127.0.0.1:8102/../admin".to_string()
+            ))
+        );
     }
 
     #[test]

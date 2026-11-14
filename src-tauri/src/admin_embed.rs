@@ -268,6 +268,15 @@ mod tests {
     }
 
     #[test]
+    fn root_path_from_input_module_is_mountable() {
+        // dounai-input / moodvoice 的 web_ui.path 是 "/"，曾在这里被判
+        // 「缺少路径」而降级成独立窗口。宿主是真正的调用点，再钉一次。
+        let mut r = request(&derive_label("dounai/input@stable"));
+        r.url = "http://127.0.0.1:8101/".into();
+        assert_eq!(validate_mount_request(&r), Ok(8101));
+    }
+
+    #[test]
     fn resize_rejects_bad_bounds() {
         for bad in [
             Bounds { x: -1.0, y: 0.0, width: 10.0, height: 10.0 },
