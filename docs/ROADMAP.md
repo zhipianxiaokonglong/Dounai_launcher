@@ -404,17 +404,19 @@ M1 收口（install.json 自举 + 内置 uv）
 
 M8 上线当天真机验收撞到现网 catalog 与新契约不兼容：11-13 签发的旧件缺 `signature.signer_fp`、条目 `source_id` 是 `"sourceforge"` 而源表登记的是 `official-sf`、且两天后过期。当天的处置是**只修数据不改代码**：三包 sha256 与现网一致，用 K5 重签一份 `sequence=2`、`source_id=official-sf`、7 天有效期的新 catalog 覆盖上传（签发工具 sign 后自验通过，现网回读确认生效）。由此暴露的欠账记在这里，按优先级排：
 
-### 代码侧
+### 代码侧（2026-11-14 当天已修，1–4 全部落地）
 
-1. **签发工具缺自检**（根因）。`sign_catalog` 不检查 catalog 的 `sources[].id` 与 `entries[].source_id` 是否与启动器源表登记一致——这次三处不兼容里两处（缺 `signer_fp`、`source_id` 漂移）都源于签发侧与消费侧各改各的。应给 `sign` 子命令加预检：source_id 必须匹配内置源 id 或给出显式参数确认；`signature` 块的完整校验（含 `signer_fp` 必填）在签名前而不是签名后做。
-2. **多源失败的错误聚合太粗**。`refresh_catalog` 全部源都失败时报「没有可用的已验签 catalog：catalog 字段不合法：missing field signer_fp」，不说哪个源、各源各自什么原因。源状态视图（`inspect_source`）应逐源带 `last_error` 与 `last_error_at`，界面把每个源的失败原因分行展示。
-3. **签发到上传未脚本化**。哈希核对、`sequence` 递增、7 天时间窗计算这次全是手工，每 7 天重复一次必然再出错。应做一个 `release-catalog` 脚本：从 SF 现读旧 catalog 取 `sequence`+1、自动算时间窗、重算各包哈希并与待签文档比对、签后自验、打印 sftp 上传命令（上传仍人工执行）。
-4. **`live_source` 真源冒烟按旧模型写的**（2 项 ignored）。源模型改了，要按多源模型重写：现网 catalog 验签 + 指纹比对 + 条目 source_id 与源表匹配。
+1. **~~签发工具缺自检~~（已修）**。`sign_catalog` 新增 `preflight_catalog` 预检：`sources[].id` 非空唯一、条目 `source_id` 必须出现在顶层 `sources` 里、所有 id 必须落在内置源集合内（社区源用 `--allow-source <id>` 显式确认，可重复）；`verify` 子命令同样跑预检。`sign_catalog` 不检查 catalog 的 `sources[].id` 与 `entries[].source_id` 是否与启动器源表登记一致——这次三处不兼容里两处（缺 `signer_fp`、`source_id` 漂移）都源于签发侧与消费侧各改各的。应给 `sign` 子命令加预检：source_id 必须匹配内置源 id 或给出显式参数确认；`signature` 块的完整校验（含 `signer_fp` 必填）在签名前而不是签名后做。
+2. **~~多源失败的错误聚合太粗~~（已修）**。`SourceEntry` 增 `last_error` / `last_error_at`（`sources-v1` 契约同步），刷新失败逐源记录、成功清除；全部失败时也会落盘（此前全失败路径不写 `sources.json`）。`list_sources` 透出两字段，下载页源卡显示「上次刷新失败（时间）：原因」。`refresh_catalog` 全部源都失败时报「没有可用的已验签 catalog：catalog 字段不合法：missing field signer_fp」，不说哪个源、各源各自什么原因。源状态视图（`inspect_source`）应逐源带 `last_error` 与 `last_error_at`，界面把每个源的失败原因分行展示。
+3. **~~签发到上传未脚本化~~（已修）**。新增 `scripts/release-catalog.py`：拉现网底稿 → `sequence`+1 → 自动算 7 天窗 → 逐条目下载包并核对 sha256/大小（不符即中止，`--update-hashes` 显式改写）→ 调 `sign_catalog` 签名（预检 + 签后自验）→ K5 公钥复验 → 打印 sftp 上传命令（上传仍人工执行）。哈希核对、`sequence` 递增、7 天时间窗计算这次全是手工，每 7 天重复一次必然再出错。应做一个 `release-catalog` 脚本：从 SF 现读旧 catalog 取 `sequence`+1、自动算时间窗、重算各包哈希并与待签文档比对、签后自验、打印 sftp 上传命令（上传仍人工执行）。
+4. **~~`live_source` 真源冒烟按旧模型写的~~（已修）**。两个测试已按多源模型重写：现网 catalog 用内置 K5 验签 + 指纹比对 + 逐条目断言 `source_id` 与内置源表一致、包内 zip 可验、下载哈希一致。2 项 ignored 仍默认跳过（CI 不依赖第三方站点）。
 
 ### 源侧（非代码，待拍板）
 
-5. **官方镜像源 `official-gh` 指向的仓库不存在**。内置源表里 GitHub 镜像指向 `raw.githubusercontent.com/Tonyjh07/dounai-releases/main`，该仓库目前 404。建仓属于对外可见动作，等作者拍板；拍板前该源每次刷新都会失败，错误聚合修好之前会把噪音混进总错误信息。
-6. **catalog 是手工周期品**。7 天有效期意味着每周必须重签重传一次，漏签的后果是官方源整体报「已过期」（fail-closed，安全但不可用）。上面第 3 条的脚本化之外，还需要一个提醒机制（日历或自动化）。
+5. **~~官方镜像源 `official-gh` 暂不下发~~（2026-11-14 拍板：先隐藏）**。`SourceRegistry::builtin` 不再注册 GitHub 镜像（仓库未建，对外可见动作待作者拍板），旧文件加载时剔除内置的该条目（`HIDDEN_OFFICIAL_IDS`）；仓库就绪后从该表移除即恢复下发。`BUILTIN_SOURCE_IDS` 仍含此 id，签发预检按全集校验。
+6. **catalog 是手工周期品**。7 天有效期意味着每周必须重签重传一次，漏签的后果是官方源整体报「已过期」（fail-closed，安全但不可用）。第 3 条脚本已消除手工核对与手算时间窗，剩余的人工步骤只剩执行脚本与上传两条命令，仍需要一个提醒机制（日历或自动化）。
+
+**代码侧欠账于 2026-11-14 同日清偿**：契约断言 129 → 131（`last_error` 两个新断言 + 样例剔除 official-gh）；core 测试新增预检 4 项、last_error 1 项、隐藏镜像 1 项（替换原「两个内置源」断言）；release lib 测试 19 项全过。
 
 ### 修源当天的操作记录
 

@@ -706,3 +706,15 @@ Rust：app lib 80、core lib 188、pack 6、sign_catalog 2、bundled_uv 3、fuzz
 - 社区源实例不自动更新。
 
 真机验收按 [ROADMAP.md](ROADMAP.md) M8 的 12 条逐条走，走完再更新本节。
+
+## Backlog 清偿与隐藏镜像源（2026-11-14 下午）
+
+ROADMAP「Backlog：现网修复与签发流程欠账」的代码侧 1–4 与源侧第 5 条当天落地，本节记离线结果：
+
+- **隐藏 `official-gh`**：`SourceRegistry::builtin` 只注册官方 SourceForge 源；`load` 剔除旧文件里内置的 GitHub 镜像条目（`HIDDEN_OFFICIAL_IDS`）。测试从「两个内置源」改为「一个内置源 + 旧文件剔除」。
+- **签发预检**：`release.rs` 新增 `preflight_catalog`（`sources[].id` 均匀唯一、条目 `source_id` 必须在顶层 `sources`、id 限于允许集合），`sign_catalog` 的 `sign` 与 `verify` 都在签名/验签前跑预检；release lib 测试增 4 项。
+- **逐源 last_error**：`SourceEntry` 增 `last_error` / `last_error_at`，刷新失败逐源记录、成功清除，全部失败也落盘；下载页源卡显示最近失败原因。契约断言 129 → **131**。
+- **签发脚本**：`scripts/release-catalog.py` 端到端演练通过（拉现网 → sequence+1 → 7 天窗 → 签名 → 复验 → 打印 sftp 命令），产物未上传。
+- **真源冒烟**：`live_source` 两个测试补逐条目 `source_id` 与内置源表一致的断言（仍默认 ignored）。
+
+门禁：Rust app lib **84**、core lib **189**（合计与集成共 **325**）通过；前端 **71**；契约 **131**；`tsc` / `vite build` / `clippy -D warnings` / `check-upstreams` 全绿。真机 12 条验收状态不变。
