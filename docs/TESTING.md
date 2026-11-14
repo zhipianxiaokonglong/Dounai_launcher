@@ -718,3 +718,28 @@ ROADMAP「Backlog：现网修复与签发流程欠账」的代码侧 1–4 与�
 - **真源冒烟**：`live_source` 两个测试补逐条目 `source_id` 与内置源表一致的断言（仍默认 ignored）。
 
 门禁：Rust app lib **84**、core lib **189**（合计与集成共 **325**）通过；前端 **71**；契约 **131**；`tsc` / `vite build` / `clippy -D warnings` / `check-upstreams` 全绿。真机 12 条验收状态不变。
+
+## M6 链路编排离线验收（2026-11-14 晚）
+
+M6 的六条验收要求真机逐条实测，本节只记离线断言，两者不混。M4 当时记的「六个视图」是那一阶段的事实，M8 加「下载」、M6 加「链路」后当前为八个。
+
+**契约**：新增 `contracts/chains-v1.schema.json` 与 `contracts/examples/state/chains.json`。`validate.mjs` 断言 131 → **148**，17 项覆盖非法 id、空 / 重复 steps、32 步上限、缺 name、时间戳格式、`schema_version` 非 1、未知字段与空注册表；悬空引用在正例里允许保留。CI 编译新 schema 并校验样例。
+
+**core**：`src-tauri/core/src/chain.rs` 共 12 项单测，钉住四件事：注册表 load / save / upsert 的时间戳语义（编辑保留 `created_at`、推进 `updated_at`）、悬空只在读取时算而不回写、默认链路不落盘、`started_ids` 不含外部服务（回滚停止不去停不属于启动器的进程）。
+
+**app**：`commands_v2.rs` 新增 5 项：隐式默认链路按 role 拓扑排序（乱序传入也能拉回 input → llm → output）、逆序停止保留原步骤编号、外部服务标记、`precheck_step` 只跳过坏的那一步、新建 id 不撞已有 id。lib 测试 84 → **89**。
+
+**前端**：新增 `tests/chains-view.test.ts` 12 项，覆盖结果汇总与逐步文案、生命周期失败只回填 `started` 步骤、编辑上下移与勾选、五个命令的参数形状。`tests/running.test.ts` 的 `start_all` 用例从「多个 RunView」改为「默认链路 ChainRunResult」。前端 71 → **83**（9 个文件）。
+
+**门禁**：Rust **339** 通过（app lib 89、core lib 201、其余集成 49），`live_source` 2 项与 `env_engine` 1 项按设计 ignored；契约 **148**；前端 **83**；`tsc --noEmit`、`vite build`、`clippy --workspace --all-targets -D warnings`、`check-upstreams` 15 项全绿。
+
+**未实测（六条真机验收全部未执行）**：
+
+- 三实例链路一键启动后进入 running / starting，步骤清单与状态点；
+- 中间一步端口被占后其余步骤照常拉起、卡片定位第几步；
+- 未装依赖的 `blocked` 步骤不 spawn 与「一键补装」；
+- 删实例后卡片「缺 N 项」与启动跳过；
+- `stop_chain` 逆序、单步失败不阻断、`only_started` 只收本次拉起的；
+- 手改 `chains.json` 出非法 id / 空 steps / 重复项被拒。
+
+「状态点靠 lifecycle-changed 回填」只在纯函数层测过：真机上异步失败能否准确落到那一步，还没验过。
