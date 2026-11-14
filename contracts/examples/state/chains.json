@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "chains": [
+    {
+      "id": "daily-chat",
+      "name": "日常对话",
+      "steps": [
+        "dounai/dounai-input@stable@main",
+        "dounai/omninexus@stable@main",
+        "dounai/moodvoice@stable@main"
+      ],
+      "created_at": "2026-11-14T10:00:00Z",
+      "updated_at": "2026-11-14T10:00:00Z"
+    },
+    {
+      "id": "with-missing-step",
+      "name": "含已卸载实例",
+      "steps": [
+        "dounai/omninexus@stable@main",
+        "dounai/removed-module@stable@main"
+      ],
+      "created_at": "2026-11-14T10:05:00Z",
+      "updated_at": "2026-11-14T10:05:00Z"
+    }
+  ]
+}

@@ -131,6 +131,7 @@ const trustSchema = read('trust-v1.schema.json');
 const retentionSchema = read('retention-v1.schema.json');
 const installSchema = read('install-v1.schema.json');
 const depsSchema = read('deps-v1.schema.json');
+const chainsSchema = read('chains-v1.schema.json');
 
 report.push('== 角色枚举 ==');
 const roleIds = roles.roles.map((r) => r.id);
@@ -451,8 +452,50 @@ expect('样例源表公钥与 Rust 内嵌 K5 一致', (() => {
   return sourcesExample.sources.every((s) => s.catalog_pubkey === pubkey && s.catalog_fingerprint === fp);
 })());
 
+report.push('== M6 链路契约 ==');
+const chainsExample = read('examples/state/chains.json');
+const withChains = (list) => ({ schema_version: 1, chains: list });
+const patchChain = (patch) => {
+  const list = chainsExample.chains.map((c) => ({ ...c, steps: [...c.steps] }));
+  Object.assign(list[0], patch);
+  return withChains(list);
+};
+const dropChainKey = (key) => {
+  const doc = patchChain({});
+  delete doc.chains[0][key];
+  return doc;
+};
+const numberedSteps = (n) => Array.from({ length: n }, (_, i) => `instance-${i}`);
+
+validates('chains-v1 接受链路注册表样例', chainsExample, chainsSchema);
+validates('chains-v1 接受空链路表（默认链路不落盘）', withChains([]), chainsSchema);
+validates('chains-v1 接受悬空引用（实例卸载后保留原值）',
+  withChains([chainsExample.chains[1]]), chainsSchema);
+validates('chains-v1 接受 32 步上限内的链路', patchChain({ steps: numberedSteps(32) }), chainsSchema);
+rejects('chains-v1 拒绝非法链路 id', patchChain({ id: 'Daily/Chat' }), chainsSchema);
+rejects('chains-v1 拒绝空链路 id', patchChain({ id: '' }), chainsSchema);
+rejects('chains-v1 拒绝空 steps', patchChain({ steps: [] }), chainsSchema);
+rejects('chains-v1 拒绝重复 instance_id',
+  patchChain({ steps: [chainsExample.chains[0].steps[0], chainsExample.chains[0].steps[0]] }), chainsSchema);
+rejects('chains-v1 拒绝超过 32 步', patchChain({ steps: numberedSteps(33) }), chainsSchema);
+rejects('chains-v1 拒绝 steps 元素非字符串', patchChain({ steps: [7] }), chainsSchema);
+rejects('chains-v1 拒绝缺 name', dropChainKey('name'), chainsSchema);
+rejects('chains-v1 拒绝非法时间戳', patchChain({ updated_at: '2026-11-14 10:00' }), chainsSchema);
+rejects('chains-v1 拒绝 schema_version 非 1', { ...chainsExample, schema_version: 2 }, chainsSchema);
+rejects('chains-v1 拒绝未知字段', patchChain({ is_default: true }), chainsSchema);
+rejects('chains-v1 拒绝缺 created_at', dropChainKey('created_at'), chainsSchema);
+expect('样例链路 id 唯一且 steps 内无重复', (() => {
+  const ids = chainsExample.chains.map((c) => c.id);
+  return new Set(ids).size === ids.length
+    && chainsExample.chains.every((c) => new Set(c.steps).size === c.steps.length);
+})());
+expect('chains-v1 不含默认链路标记，默认链路由实例表隐式生成',
+  chainsSchema.$defs.chain.additionalProperties === false
+  && !('is_default' in chainsSchema.$defs.chain.properties)
+  && chainsExample.chains.every((c) => !('is_default' in c)));
+
 // 断言数量固定。误删或跳过断言时，不能只靠 failed 判绿。
-const EXPECTED_ASSERTIONS = 131;
+const EXPECTED_ASSERTIONS = 148;
 const count = report.filter((x) => x.startsWith('通过') || x.startsWith('失败')).length;
 console.log(report.join('\n'));
 console.log('');

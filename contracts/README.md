@@ -133,6 +133,7 @@ cargo run --bin sign_catalog -- verify --pubkey k5.pub --catalog signed.json
 - `roles-v1.json` 增加或删除 `role` 时，同步改 `module-v2.schema.json` 的 `role` 枚举、`source-v1.schema.json` 的 `active` 键集合、`catalog-v2.schema.json` 的条目枚举与五份样例。
 - 字段语义不兼容时直接改本份契约并同步所有消费者，不叠加兼容分支。只有存在**已分发制品**且需要同时读新旧两代格式时才升文件名版本号；正式完工前没有这种制品。
 - M8 直接改 `catalog-v2` 与 `source-v1`：`signature.key_id` 从 `K5` 常量放开为展示用字符串，新增必填 `signature.signer_fp`；`catalog_state.sequence/expires` 从必填改为「M8 起停止写入」的废弃字段，实例新增可选 `source_id`。新增 `sources-v1.schema.json` 与 `examples/state/sources.json`。官方 catalog 尚未签发，没有已分发制品，因此不升文件名版本号、不写读取旧 catalog 的兼容分支；旧 `installed.json` 里残留的 `sequence/expires` 只读不判。
+- M6 新增 `chains-v1.schema.json` 与 `examples/state/chains.json`，不改既有 schema：`chains` 空数组合法（默认链路不落盘，由实例表隐式生成），`steps` 只存 `instance_id`，最多 32 步且不得重复，悬空引用合法并由读取方标记而非回写。运行进度不写入该文件。`validate.mjs` 断言 131 → 148，CI 同步加 schema 编译与样例校验。
 - 签名算法标识由 `SHA-256 + Ed25519` 改为 `Ed25519`。改动发生在任何包或 catalog 对外发布之前，没有已分发制品，不升文件名版本号；`validate.mjs` 用负例断言拒收旧值。发布后如需再改，必须升版本。
 - `validate.mjs` 的失败项不得通过放宽 schema 消除。允许例外时，在断言里写明理由。
 - M1 新增 `install-v1.schema.json` 与 `deps-v1.schema.json`。`module-v2.schema.json` 只改 `runtime.deps` 与 `runtime.snapshot_sha256` 的 `description`，字段类型、必填与取值未变，不升文件名版本号。
