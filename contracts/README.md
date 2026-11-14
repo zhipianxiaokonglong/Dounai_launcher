@@ -117,7 +117,7 @@ cargo run --bin sign_catalog -- verify --pubkey k5.pub --catalog signed.json
 以下口径按代码事实收紧或补全：
 
 1. `version` 只接受 SemVer 三段，不含预发布与构建元数据。`0.3.3-agent` 是合法 SemVer 预发布串，光写“严格 SemVer”挡不住把变体塞进版本串。变体由 `variant` 单独声明。
-2. `runtime` 对 `shell` 不必填，`entry.command` 用 `{install_root}`。`shell` 只启动本地 exe，其余角色必须含 `{venv_python}`。
+2. `runtime` 对 `shell` 不必填，`entry.command` 用 `{module_dir}` 指向包内 exe。`shell` 只启动本地 exe，其余角色必须含 `{venv_python}`。zip 包解压在 `data_root/instances/<key>/package`，`{install_root}` 是只读程序根，指向它会导致首个 shell 发布包启动失败。
 3. `model_packs` 设为可选字段。字段沿用 v1，待后续细化。
 4. v1 的 `reserved` 段未纳入 v2。默认禁用等语义改由 `category: reserved` 与验签结果裁定。
 5. `active` 对象不含 `auxiliary` 键。该角色没有 active 上限，用槽位表达会产生假的单选约束。
@@ -135,6 +135,7 @@ cargo run --bin sign_catalog -- verify --pubkey k5.pub --catalog signed.json
 - M8 直接改 `catalog-v2` 与 `source-v1`：`signature.key_id` 从 `K5` 常量放开为展示用字符串，新增必填 `signature.signer_fp`；`catalog_state.sequence/expires` 从必填改为「M8 起停止写入」的废弃字段，实例新增可选 `source_id`。新增 `sources-v1.schema.json` 与 `examples/state/sources.json`。官方 catalog 尚未签发，没有已分发制品，因此不升文件名版本号、不写读取旧 catalog 的兼容分支；旧 `installed.json` 里残留的 `sequence/expires` 只读不判。
 - M6 新增 `chains-v1.schema.json` 与 `examples/state/chains.json`，不改既有 schema：`chains` 空数组合法（默认链路不落盘，由实例表隐式生成），`steps` 只存 `instance_id`，最多 32 步且不得重复，悬空引用合法并由读取方标记而非回写。运行进度不写入该文件。`validate.mjs` 断言 131 → 148，CI 同步加 schema 编译与样例校验。
 - 签名算法标识由 `SHA-256 + Ed25519` 改为 `Ed25519`。改动发生在任何包或 catalog 对外发布之前，没有已分发制品，不升文件名版本号；`validate.mjs` 用负例断言拒收旧值。发布后如需再改，必须升版本。
+- `module-v2.schema.json` 的 shell 分支由 `{install_root}` 收紧为 `{module_dir}`，同步改 `m2/manifest.rs`、`examples/dounai-ui.v2.json`、两处测试夹具与 `validate.mjs` 的负例。已分发的三个 zip 都是数据面模块，不含 shell，因此这次收紧不影响旧制品，不升文件名版本号、不写兼容分支；如果之后要放宽给已分发的 shell 包，按已分发制品处理。
 - `validate.mjs` 的失败项不得通过放宽 schema 消除。允许例外时，在断言里写明理由。
 - M1 新增 `install-v1.schema.json` 与 `deps-v1.schema.json`。`module-v2.schema.json` 只改 `runtime.deps` 与 `runtime.snapshot_sha256` 的 `description`，字段类型、必填与取值未变，不升文件名版本号。
 - M2 把 `deps-v1` 的落盘路径改成内容寻址 generation，只改 `description`，字段与取值不变，不升文件名版本号。

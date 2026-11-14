@@ -129,12 +129,16 @@ fn manifest_files_are_valid_json_with_required_fields() {
             module_id.matches('/').count() == 1 && !module_id.starts_with('/'),
             "{name} 的 module_id 不是 namespace/name：{module_id}"
         );
-        // 数据面模块的入口必须走 venv，shell 必须指安装根。
+        // 数据面模块的入口必须走 venv，shell 必须指包目录（zip 解压位置）。
         let command = json["entry"]["command"].as_str().unwrap_or_default();
         if json["role"] == "shell" {
             assert!(
-                command.contains("{install_root}"),
-                "{name} shell 入口必须含 {{install_root}}"
+                command.contains("{module_dir}"),
+                "{name} shell 入口必须含 {{module_dir}}"
+            );
+            assert!(
+                !command.contains("{install_root}"),
+                "{name} shell 入口不得指回只读程序根"
             );
         } else {
             assert!(

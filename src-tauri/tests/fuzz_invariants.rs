@@ -309,7 +309,7 @@ fn valid_package(entries: &[(&str, &[u8])]) -> Vec<u8> {
         "category": "optional",
         "publisher": { "id": "dounai", "name": "Dounai" },
         "requires": { "launcher": ">=0.3.0" },
-        "entry": { "command": "{install_root}/fuzz.exe", "env": {}, "health": null },
+        "entry": { "command": "{module_dir}/fuzz.exe", "env": {}, "health": null },
         "ports": [],
         "permissions": { "network": [], "filesystem": [], "devices": [] },
         "files": files,

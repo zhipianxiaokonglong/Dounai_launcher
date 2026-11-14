@@ -115,7 +115,7 @@
         "command": {
           "type": "string",
           "minLength": 1,
-          "description": "数据面与 auxiliary 实例必须含 {venv_python}；shell 实例必须含 {install_root}。"
+          "description": "数据面与 auxiliary 实例必须含 {venv_python}；shell 实例必须含 {module_dir}。zip 包解压在实例目录（data_root），{install_root} 是只读程序根，不能拿来定位包内 exe。"
         },
         "working_dir": { "type": "string", "minLength": 1 },
         "env": {
@@ -235,7 +235,7 @@
       "if": { "properties": { "role": { "const": "shell" } }, "required": ["role"] },
       "then": {
         "properties": {
-          "entry": { "properties": { "command": { "pattern": "\\{install_root\\}" } } }
+          "entry": { "properties": { "command": { "pattern": "\\{module_dir\\}" } } }
         }
       }
     },

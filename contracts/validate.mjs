@@ -196,6 +196,12 @@ rejects('manifest 自述 instance_id', clone({ instance_id: 'x' }), moduleSchema
 rejects('auxiliary 缺 auxiliary_kind', clone({ role: 'auxiliary' }), moduleSchema);
 rejects('非 shell 缺 {venv_python}', clone({ entry: { ...base.entry, command: 'python -m omninexus' } }), moduleSchema);
 validates('shell 不带 runtime 仍通过', samples[3].data, moduleSchema);
+const shellClone = (command) => JSON.parse(JSON.stringify({
+  ...samples[3].data,
+  entry: { ...samples[3].data.entry, command }
+}));
+rejects('shell 缺 {module_dir} 被拒', shellClone('dounai.exe'), moduleSchema);
+rejects('shell 指回只读程序根 {install_root} 被拒', shellClone('{install_root}/Dounai/dounai.exe'), moduleSchema);
 validates('dir 实例 files 为 {} 仍通过', clone({ files: {} }), moduleSchema);
 
 report.push('== 其余四份 schema 的可用性 ==');
@@ -495,7 +501,7 @@ expect('chains-v1 不含默认链路标记，默认链路由实例表隐式生�
   && chainsExample.chains.every((c) => !('is_default' in c)));
 
 // 断言数量固定。误删或跳过断言时，不能只靠 failed 判绿。
-const EXPECTED_ASSERTIONS = 148;
+const EXPECTED_ASSERTIONS = 150;
 const count = report.filter((x) => x.startsWith('通过') || x.startsWith('失败')).length;
 console.log(report.join('\n'));
 console.log('');

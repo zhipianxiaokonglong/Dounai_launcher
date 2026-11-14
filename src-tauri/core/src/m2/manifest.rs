@@ -130,9 +130,11 @@ impl PackageManifest {
             }
         }
         if self.role == Role::Shell {
-            if !self.entry.command.contains("{install_root}") {
+            // zip 实例解压到 data_root/instances/<key>/package，dir 实例指用户源码目录，
+            // 两者都由 {module_dir} 给出；{install_root} 是只读程序根，包内 exe 不在那里。
+            if !self.entry.command.contains("{module_dir}") {
                 return Err(M2Error::Invalid(
-                    "shell 的 command 必须含 {install_root}".into(),
+                    "shell 的 command 必须含 {module_dir}".into(),
                 ));
             }
         } else {
@@ -307,6 +309,30 @@ mod tests {
             "", "../evil", "a/../b", "/abs", "a/", "a//b", "a\\b", "C:/x", "CON", "com1.txt",
         ] {
             assert!(validate_relative_path(path).is_err(), "{path} 应当被拒");
+        }
+    }
+
+    fn shell_manifest(command: &str) -> serde_json::Value {
+        let mut value: serde_json::Value = serde_json::from_str(EXAMPLE).unwrap();
+        value["role"] = serde_json::json!("shell");
+        value["entry"]["command"] = serde_json::json!(command);
+        value["entry"]["health"] = serde_json::json!(null);
+        value["ports"] = serde_json::json!([]);
+        value.as_object_mut().unwrap().remove("runtime");
+        value
+    }
+
+    #[test]
+    fn shell_entry_points_into_the_package_not_the_program_root() {
+        assert!(
+            PackageManifest::parse(&shell_manifest("{module_dir}/dounai.exe").to_string()).is_ok()
+        );
+        for rejected in ["{install_root}/Dounai/dounai.exe", "dounai.exe"] {
+            let err = PackageManifest::parse(&shell_manifest(rejected).to_string()).unwrap_err();
+            assert!(
+                format!("{err:?}").contains("{module_dir}"),
+                "{rejected} 应因缺少 {{module_dir}} 被拒，实际 {err:?}"
+            );
         }
     }
 }
