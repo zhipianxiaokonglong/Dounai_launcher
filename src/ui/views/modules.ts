@@ -595,11 +595,21 @@ function cardFootHtml(moduleId: string, views: InstanceRuntimeView[]): string {
     parts.push(
       `<button class="btn btn--sm btn--primary" type="button" data-act="confirm-source" data-id="${esc(dirInstance.instance.instance_id)}">确认变更并启动</button>`,
     );
-  } else if (adminReady && adminUi) {
-    parts.push(`<button class="btn btn--sm" type="button" data-act="admin" data-id="${id}">${esc(adminUi.label)}</button>`);
-  } else if (primary) {
+  }
+  // 详情对每个实例都给：同一模块只有一个卡位，但「先确认变更」时也要能看实例详情。
+  if (primary) {
     parts.push(
       `<button class="btn btn--sm" type="button" data-act="detail" data-id="${esc(primary.instance.instance_id)}">详情</button>`,
+    );
+  }
+  // 管理页按钮统一叫「设置」。后端仍按模块自报 label 描述它是什么，
+  // 这里只把它放进 title，界面上不再各叫一个名字。
+  if (adminUi) {
+    const label = esc(adminUi.label);
+    parts.push(
+      adminReady
+        ? `<button class="btn btn--sm" type="button" data-act="admin" data-id="${id}" title="打开${label}">设置</button>`
+        : `<button class="btn btn--sm" type="button" data-act="admin" data-id="${id}" disabled title="实例启动后可打开${label}">设置</button>`,
     );
   }
 
