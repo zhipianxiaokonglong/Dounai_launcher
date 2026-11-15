@@ -568,19 +568,24 @@ fn start_instance(
     supervisor.start(plan.request).map(StartOutcome::Managed)
 }
 
-/// 外部实例的存活探测，每 2 秒由采样子线程跑一轮。
+/// 外部实例的存活探测与发现，每 2 秒由采样子线程跑一轮。
 ///
-/// 外部进程不由启动器拉起，退出时没有任何事件能通知到我们；不主动探，
-/// 界面会一直停在「外部运行」，即使那个服务早就被 Ctrl+C 关掉了。
-/// 连续两轮探不到才摘标记：单次超时可能只是服务正忙。
+/// 两个方向都要做，缺一不可：
+/// - 已知外部实例的**存活复检**：外部进程不由启动器拉起，退出时没有任何事件
+///   能通知到我们；不主动探，界面会一直停在「外部运行」，即使那个服务早就
+///   被 Ctrl+C 关掉了。连续两轮探不到才摘标记，单次超时可能只是服务正忙。
+/// - 未标记实例的**反向发现**：用户在启动器之外手工拉起模块（另一个终端里跑
+///   起来、或用 IDE 直接运行），启动器没有任何事件可听，只能按分配端口逐个
+///   探健康端点。不做这一步，界面永远不会变化，用户会以为启动器没反应。
 pub const EXTERNAL_PROBE_TIMEOUT_MS: u64 = 1200;
+/// 反向发现的探测预算。发现是轮询、不是启动门禁，宁可漏一拍也不要让采样
+/// 线程等太久：目标端口没人监听时本机连接会立刻被拒，只有「端口开着但不
+/// 响应」才会吃满这个超时。
+const DISCOVER_PROBE_TIMEOUT_MS: u64 = 600;
 const EXTERNAL_MISS_LIMIT: u8 = 2;
 
 pub fn refresh_externals(state: &AppStateV2, supervisor: &Supervisor) {
     let ids = supervisor.external_ids();
-    if ids.is_empty() {
-        return;
-    }
     for id in ids {
         let Some(instance) = state.with_installed(|s| s.instances.get(&id).cloned()) else {
             // 实例已被卸载，标记没有意义。
@@ -599,6 +604,47 @@ pub fn refresh_externals(state: &AppStateV2, supervisor: &Supervisor) {
         if supervisor.note_external_miss(&id) >= EXTERNAL_MISS_LIMIT {
             supervisor.clear_external(&id);
             supervisor.broadcast(&id);
+        }
+    }
+    discover_externals(state, supervisor);
+}
+
+/// 逐个探「既不在进程表里、也还没标外部」的实例，通了就标成外部运行。
+///
+/// 判据必须同时排除三种情况：启动器自己拉起的（进程表里有，`owns`）、
+/// 已经标过的（上面刚复检完）、以及被用户停用的模块——停用的实例端口仍按
+/// 规则分配，但把它的端口探成「正在运行」与「已停用」自相矛盾。
+fn discover_externals(state: &AppStateV2, supervisor: &Supervisor) {
+    let instances = all_instances(state);
+    if instances.is_empty() {
+        return;
+    }
+    let ports = assign_ports(state, supervisor.roles(), &instances);
+    // 正在启动或正在停止的实例不参与发现：这两个阶段里端口上短暂出现的
+    // 监听者可能是启动器自己的进程（进程表登记与状态迁移之间有几毫秒空档），
+    // 抢在这个空档标成外部会连带丢掉停止权。
+    let busy: BTreeSet<String> = supervisor
+        .snapshot()
+        .into_iter()
+        .filter(|(_, snap)| matches!(snap.phase, Phase::Starting | Phase::Stopping))
+        .map(|(id, _)| id)
+        .collect();
+    for instance in instances {
+        let id = instance.instance_id.clone();
+        if busy.contains(&id) || supervisor.owns(&id) || supervisor.is_external(&id) {
+            continue;
+        }
+        if state.is_disabled(&instance.module_id) {
+            continue;
+        }
+        let port = ports.get(&id).copied().flatten();
+        let Some(url) = prestart_health_url(supervisor.roles(), &instance, port) else {
+            // `health: null` 的角色（组装层 shell）没有可探的门禁，
+            // 外部启动的这类实例发现不了，只能靠用户点一次「启动」认领。
+            continue;
+        };
+        if Supervisor::probe_external_once(&url, DISCOVER_PROBE_TIMEOUT_MS) {
+            supervisor.mark_external(&id);
         }
     }
 }

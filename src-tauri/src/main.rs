@@ -31,10 +31,9 @@ fn main() {
             let tauri::WindowEvent::CloseRequested { api, .. } = event else {
                 return;
             };
-            let Some(state) =
-                window
-                    .app_handle()
-                    .try_state::<dounai_launcher::state_v2::AppStateV2>()
+            let Some(state) = window
+                .app_handle()
+                .try_state::<dounai_launcher::state_v2::AppStateV2>()
             else {
                 return;
             };
@@ -107,8 +106,7 @@ fn main() {
                     };
                     supervisor.sample_once();
                     // 外部实例没有事件可听，只能顺带探活。名单为空时这里直接返回。
-                    if let Some(state) =
-                        handle.try_state::<dounai_launcher::state_v2::AppStateV2>()
+                    if let Some(state) = handle.try_state::<dounai_launcher::state_v2::AppStateV2>()
                     {
                         dounai_launcher::commands_v2::refresh_externals(&state, &supervisor);
                     }
