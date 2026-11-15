@@ -643,6 +643,7 @@ fn incompatible_contract_does_not_activate_and_cleanup_respects_boundaries() {
                 allow_unsigned_once: None,
                 head_confirmed: None,
                 data_dir: Some(format!("C:/data/{id}")),
+                manifest_path: None,
                 note: None,
             })
             .unwrap();

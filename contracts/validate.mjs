@@ -259,6 +259,29 @@ dirInstance.instances['local@agent'] = {
 validates('source-v1.schema.json 接受 dir 实例（固定 C 类）', dirInstance, sourceSchema);
 dirInstance.instances['local@agent'].auto_update = true;
 rejects('source-v1 拒绝 C 类实例自动更新', dirInstance, sourceSchema);
+dirInstance.instances['local@agent'].auto_update = false;
+
+const convertedDir = JSON.parse(JSON.stringify(dirInstance));
+const generatedManifest = 'C:/Users/me/AppData/Local/com.dounai.launcher/launcher/instances/local@agent/manifest-v2.json';
+convertedDir.instances['local@agent'].manifest_path = generatedManifest;
+validates('source-v1 接受导入期转换后带 manifest_path 的 dir 实例', convertedDir, sourceSchema);
+rejects('source-v1 拒绝 zip 实例自述 manifest_path', {
+  ...installed,
+  instances: {
+    ...installed.instances,
+    'dounai/omninexus@stable@main': {
+      ...installed.instances['dounai/omninexus@stable@main'],
+      manifest_path: generatedManifest
+    }
+  }
+}, sourceSchema);
+rejects('source-v1 拒绝空的 manifest_path', {
+  ...convertedDir,
+  instances: {
+    ...convertedDir.instances,
+    'local@agent': { ...convertedDir.instances['local@agent'], manifest_path: '' }
+  }
+}, sourceSchema);
 
 validates('trust-v1.schema.json 接受 K1/K5 两钥', {
   schema_version: 1,
@@ -501,7 +524,7 @@ expect('chains-v1 不含默认链路标记，默认链路由实例表隐式生�
   && chainsExample.chains.every((c) => !('is_default' in c)));
 
 // 断言数量固定。误删或跳过断言时，不能只靠 failed 判绿。
-const EXPECTED_ASSERTIONS = 150;
+const EXPECTED_ASSERTIONS = 153;
 const count = report.filter((x) => x.startsWith('通过') || x.startsWith('失败')).length;
 console.log(report.join('\n'));
 console.log('');

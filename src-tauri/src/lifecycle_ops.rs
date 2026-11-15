@@ -39,7 +39,7 @@ pub fn build_start_request(
     roles: &RolesDoc,
 ) -> Result<LaunchPlan, String> {
     let module_dir = state.module_dir(instance);
-    let manifest_path = module_dir.join(MANIFEST_FILE);
+    let manifest_path = state.manifest_file(instance);
     let text = std::fs::read_to_string(&manifest_path)
         .map_err(|e| format!("读取实例 manifest 失败（{}）：{e}", manifest_path.display()))?;
     let package_manifest = launcher_core::m2::manifest::PackageManifest::parse(&text)
@@ -436,6 +436,7 @@ mod tests {
             allow_unsigned_once: None,
             head_confirmed: None,
             data_dir: None,
+            manifest_path: None,
             note: None,
         }
     }

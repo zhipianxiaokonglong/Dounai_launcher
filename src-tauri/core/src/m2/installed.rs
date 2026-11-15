@@ -58,6 +58,11 @@ pub struct Instance {
     pub head_confirmed: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_dir: Option<String>,
+    /// 仅本地目录实例可能带：导入期由旧版 v1 清单补生成的 module-v2 清单，
+    /// 落在 `data_root/instances/<key>/`，源码目录保持只读。
+    /// 缺省时运行时读 `module_dir/manifest.json`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
 }
@@ -311,6 +316,7 @@ mod tests {
             allow_unsigned_once: None,
             head_confirmed: None,
             data_dir: None,
+            manifest_path: None,
             note: None,
         }
     }

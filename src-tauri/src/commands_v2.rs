@@ -37,12 +37,13 @@ use launcher_core::m2::sources::{
     OFFICIAL_GROUP,
 };
 use launcher_core::m2::trust::{classify, ClassifyContext};
+use launcher_core::m2::v1_convert::{self, V1Options, V1Preview};
 use launcher_core::m2::{semver_cmp, Category, InstanceSourceKind, Verdict, MAX_UNPACKED_BYTES};
 use launcher_core::manifest::{ModuleManifestV2, Role};
 
 use crate::lifecycle_ops::{
     all_instances, assign_ports, build_start_request, ordered_instances, package_dir,
-    write_manifest, MANIFEST_FILE,
+    write_manifest,
 };
 use crate::lifecycle_runtime::Supervisor;
 use crate::m2_http::ReqwestCatalogFetcher;
@@ -50,6 +51,8 @@ use crate::state_v2::{bare_sha256, prefixed_sha256, AppStateV2, CachedEntry, Clo
 
 /// 启动前外部服务探测预算：只发一次请求，超时就走正常启动路径。
 const PRESTART_TIMEOUT_MS: u64 = 600;
+/// v1 导入期转换生成物。固定在数据根的实例目录下，不写源码目录。
+const GENERATED_MANIFEST_FILE: &str = "manifest-v2.json";
 
 /* ------------------------------------------------------------------ */
 /* 与 v1 等价的返回形状                                                */
@@ -236,8 +239,12 @@ pub struct ScanCandidate {
     pub category: String,
     pub signed: bool,
     pub registered: bool,
-    /// 清单过不了 module-v2 契约时的原因。有值的候选不提供登记按钮。
+    /// 清单过不了 module-v2 契约时的原因。v1 清单另有「补齐清单」入口。
     pub problem: Option<String>,
+    /// 旧版 v1 清单：不是不可登记，而是要先在向导里补齐成 v2。
+    pub v1: bool,
+    /// 已登记实例的实际 module_id。v1 转换后标识会变，解除登记得用这个值。
+    pub instance_module_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -355,6 +362,23 @@ pub struct AddLocalModuleRequest {
 #[derive(Debug, Deserialize)]
 pub struct BulkAddLocalModulesRequest {
     pub paths: Vec<String>,
+}
+
+/// 预览旧版 v1 清单的补齐结果。`options` 为空时用自动推导的默认值；
+/// 向导里每改一个字段都带着当前选项重新调一次，预览始终是落盘内容。
+#[derive(Debug, Deserialize)]
+pub struct V1PreviewRequest {
+    pub path: String,
+    #[serde(default)]
+    pub options: Option<V1Options>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct V1ConvertRequest {
+    pub path: String,
+    /// 预览时那份 v1 原文的哈希。确认时重读比对。
+    pub source_sha256: String,
+    pub options: V1Options,
 }
 
 #[derive(Debug, Deserialize)]
@@ -855,7 +879,7 @@ struct ManifestBrief {
 /// 读不到不算错误：卡片退回 module_id 展示，管理页按钮不出现——
 /// 这与「声明了才给入口」是同一件事，不编造一个不存在的界面。
 fn manifest_brief(state: &AppStateV2, instance: &Instance) -> ManifestBrief {
-    let raw = match read_manifest_value(&state.module_dir(instance)) {
+    let raw = match read_instance_manifest(state, instance) {
         Ok(value) => value,
         Err(_) => {
             return ManifestBrief {
@@ -1231,11 +1255,19 @@ fn switch_active_impl(
 /* 安装：整包哈希 → 包内 manifest → 四级验签 → 原子落盘 → 登记实例     */
 /* ------------------------------------------------------------------ */
 
-fn read_manifest_value(dir: &Path) -> Result<serde_json::Value, String> {
-    let path = dir.join(MANIFEST_FILE);
+fn read_manifest_file(path: &Path) -> Result<serde_json::Value, String> {
     let text =
-        std::fs::read_to_string(&path).map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
+        std::fs::read_to_string(path).map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
     serde_json::from_str(&text).map_err(|e| format!("{} 不是合法 JSON：{e}", path.display()))
+}
+
+/// 实例的展示、启动、依赖准备与管理页都读这一份清单。
+/// v1 导入期转换过的 dir 实例指向数据根里的生成物，其余仍读模块根。
+fn read_instance_manifest(
+    state: &AppStateV2,
+    instance: &Instance,
+) -> Result<serde_json::Value, String> {
+    read_manifest_file(&state.manifest_file(instance))
 }
 
 fn runtime_manifest(raw: &serde_json::Value) -> Result<ModuleManifestV2, String> {
@@ -1396,6 +1428,7 @@ fn commit_install(
                 .to_string_lossy()
                 .into_owned(),
         ),
+        manifest_path: None,
         note: None,
     };
     state.upsert(instance)?;
@@ -1734,7 +1767,7 @@ fn prepare_instance_env_impl(
     let slot = state.instance_slot(instance_id);
     let _exclusive = slot.lock().unwrap_or_else(|e| e.into_inner());
     let dir = state.module_dir(&instance);
-    let raw = read_manifest_value(&dir)?;
+    let raw = read_instance_manifest(state, &instance)?;
     let manifest = runtime_manifest(&raw)?;
     let install = launcher_core::install::InstallState::load(&state.paths).map_err(|e| {
         format!(
@@ -2426,6 +2459,12 @@ fn find_manifest(dir: &Path) -> Option<PathBuf> {
         .find(|p| p.exists())
 }
 
+fn parse_manifest_file(path: &Path) -> Result<PackageManifest, String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
+    parse_dir_manifest(&text)
+}
+
 /// 扫描与登记共用的一把尺子。只看 module_id 会把旧版 v1 清单列成「可登记」，
 /// 用户点下去才收到 serde 的 `missing field pubkey`，还以为文件没读到。
 fn read_dir_manifest(dir: &Path) -> Result<PackageManifest, String> {
@@ -2435,18 +2474,16 @@ fn read_dir_manifest(dir: &Path) -> Result<PackageManifest, String> {
             dir.display()
         )
     })?;
-    let text =
-        std::fs::read_to_string(&path).map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
-    parse_dir_manifest(&text)
+    parse_manifest_file(&path)
 }
 
-/// 把 JSON 解析错误翻成人能行动的话。契约规定不读 v1、不设兼容层，
-/// 所以旧版清单要点破代际，签名段少字段要说明怎么改，而不是丢英文原文。
+/// 把 JSON 解析错误翻成人能行动的话。运行时只认 module-v2，旧版清单
+/// 要点破代际并指向导入向导，签名段少字段要说明怎么改，不丢英文原文。
 fn parse_dir_manifest(text: &str) -> Result<PackageManifest, String> {
     let raw: serde_json::Value =
         serde_json::from_str(text).map_err(|e| format!("manifest.json 不是合法 JSON：{e}"))?;
     if raw.get("schema_version").and_then(|v| v.as_u64()) != Some(2) {
-        return Err("这是旧版 v1 manifest（缺 schema_version: 2）。启动器只登记 module-v2 契约的源码目录，不设兼容层，请换成带 module-v2 清单的目录。".into());
+        return Err("这是旧版 v1 manifest（缺 schema_version: 2）。点「补齐清单」把缺的字段补成 module-v2，再登记。".into());
     }
     let required = [
         "module_id",
@@ -2564,8 +2601,22 @@ pub fn scan_local_modules(
             .and_then(|v| v.as_str())
             .unwrap_or(module_id)
             .to_string();
+        let dir_text = dir.to_string_lossy().into_owned();
+        // v1 转换后 module_id 会多一层 namespace，按旧标识查不到已登记实例。
+        // 生成物在数据根，按 source_path 反查最准。
+        let linked = state.with_installed(|s| {
+            s.instances
+                .values()
+                .find(|i| {
+                    i.manifest_path.is_some()
+                        && i.source_path
+                            .as_deref()
+                            .is_some_and(|p| p.eq_ignore_ascii_case(&dir_text))
+                })
+                .map(|i| i.module_id.clone())
+        });
         out.push(ScanCandidate {
-            path: dir.to_string_lossy().into_owned(),
+            path: dir_text,
             module_id: module_id.to_string(),
             name,
             version: raw
@@ -2583,15 +2634,19 @@ pub fn scan_local_modules(
                 .and_then(|v| v.as_str())
                 .map(|v| !v.trim().is_empty())
                 .unwrap_or(false),
-            registered: !state.instances_for_module(module_id).is_empty(),
+            registered: linked.is_some() || !state.instances_for_module(module_id).is_empty(),
             problem: parse_dir_manifest(&text).err(),
+            v1: v1_convert::is_v1(&raw),
+            instance_module_id: linked,
         });
     }
     out.sort_by(|a, b| a.module_id.cmp(&b.module_id));
     Ok(out)
 }
 
-fn add_local_dir(state: &AppStateV2, raw_path: &str) -> Result<ModuleView, String> {
+/// 本地目录的两道入口共用：路径要先规范化，且不得落在程序根或数据根里。
+/// 生成物写数据根不经过这道校验（那是启动器自己的目录）。
+fn validated_local_dir(state: &AppStateV2, raw_path: &str) -> Result<PathBuf, String> {
     let trimmed = raw_path.trim().trim_matches('"');
     if trimmed.is_empty() {
         return Err("请填写模块目录路径".into());
@@ -2614,14 +2669,37 @@ fn add_local_dir(state: &AppStateV2, raw_path: &str) -> Result<ModuleView, Strin
         &exe_dir,
     )
     .map_err(|e| e.to_string())?;
+    Ok(canonical)
+}
 
-    let manifest = read_dir_manifest(&canonical)?;
+fn add_local_dir(
+    state: &AppStateV2,
+    raw_path: &str,
+    generated_manifest: Option<&Path>,
+) -> Result<ModuleView, String> {
+    let canonical = validated_local_dir(state, raw_path)?;
+
+    // 没走导入期转换的目录，清单就在模块根；走过转换的读数据根里的生成物，
+    // 源码目录里的 v1 清单从此只当历史素材。
+    let manifest = match generated_manifest {
+        Some(path) => parse_manifest_file(path)?,
+        None => read_dir_manifest(&canonical)?,
+    };
     let _runtime = runtime_manifest(&manifest.raw)?;
-
-    let observed = observe_source(&canonical, &AppStateV2::now()).map_err(|e| e.to_string())?;
     let instance_id = format!("{}@local", manifest.module_id);
+    if let Some(path) = generated_manifest {
+        let expected = state
+            .paths
+            .instance_dir_keyed(&instance_id)
+            .join(GENERATED_MANIFEST_FILE);
+        if path != expected {
+            return Err(format!("生成清单的路径与实例不匹配：{}", path.display()));
+        }
+    }
     launcher_core::paths::validate_instance_id(&instance_id)
         .map_err(|e| format!("instance_id 不合法：{e}"))?;
+    // 目录确认只看源码目录；生成物在数据根，不参与这枚观察指纹。
+    let observed = observe_source(&canonical, &AppStateV2::now()).map_err(|e| e.to_string())?;
     let now = AppStateV2::now();
     // 契约固定：dir 实例一律 C 类 / optional / 不自动更新，即便包内带签名。
     // 用户显式选择这个目录就等于完成一次确认；源码变化后仍需重新确认。
@@ -2654,6 +2732,7 @@ fn add_local_dir(state: &AppStateV2, raw_path: &str) -> Result<ModuleView, Strin
                 .to_string_lossy()
                 .into_owned(),
         ),
+        manifest_path: generated_manifest.map(|p| p.to_string_lossy().into_owned()),
         note: None,
     };
     state.upsert(instance.clone())?;
@@ -2685,7 +2764,7 @@ pub fn add_local_module(
     request: AddLocalModuleRequest,
 ) -> Result<ModuleView, String> {
     require_dev_mode(&state)?;
-    let mut view = add_local_dir(&state, &request.path)?;
+    let mut view = add_local_dir(&state, &request.path, None)?;
     let instance = state.resolve_instance(&view.module_id)?;
     view.run = phase_to_run(
         supervisor
@@ -2705,7 +2784,7 @@ pub fn add_local_modules_bulk(
     Ok(request
         .paths
         .iter()
-        .map(|p| match add_local_dir(&state, p) {
+        .map(|p| match add_local_dir(&state, p, None) {
             Ok(view) => BulkAddResult {
                 module_id: view.module_id,
                 path: view.path,
@@ -2720,6 +2799,69 @@ pub fn add_local_modules_bulk(
             },
         })
         .collect())
+}
+
+/* ------------------------------------------------------------------ */
+/* 导入期 v1 → v2 补齐（只服务本地目录，catalog 与 zip 不经过这里）      */
+/* ------------------------------------------------------------------ */
+
+#[tauri::command(async)]
+pub fn preview_v1_manifest(
+    state: State<'_, AppStateV2>,
+    request: V1PreviewRequest,
+) -> Result<V1Preview, String> {
+    require_dev_mode(&state)?;
+    let dir = validated_local_dir(&state, &request.path)?;
+    let (text, raw) = v1_convert::read_v1(&dir)?;
+    Ok(v1_convert::preview(&dir, &text, &raw, request.options))
+}
+
+#[tauri::command(async)]
+pub fn convert_v1_manifest(
+    state: State<'_, AppStateV2>,
+    supervisor: State<'_, Supervisor>,
+    request: V1ConvertRequest,
+) -> Result<ModuleView, String> {
+    require_dev_mode(&state)?;
+    let dir = validated_local_dir(&state, &request.path)?;
+    let (text, raw) = v1_convert::read_v1(&dir)?;
+    let digest = launcher_core::sha256_hex(text.as_bytes());
+    if digest != request.source_sha256 {
+        return Err("v1 清单在预览之后被改动了。关掉这个窗口，重新点「补齐清单」。".into());
+    }
+    let manifest = v1_convert::build_v2(&raw, &request.options)?;
+    let manifest_text = serde_json::to_string_pretty(&manifest)
+        .map_err(|e| format!("生成 module-v2 清单失败：{e}"))?;
+    v1_convert::validate_v2(&manifest_text)?;
+    let parsed = parse_dir_manifest(&manifest_text)?;
+    let instance_id = format!("{}@local", parsed.module_id);
+    launcher_core::paths::validate_instance_id(&instance_id)
+        .map_err(|e| format!("instance_id 不合法：{e}"))?;
+
+    // 生成物只写数据根。源码目录（含它自己的 v1 manifest）全程只读。
+    let target = state
+        .paths
+        .instance_dir_keyed(&instance_id)
+        .join(GENERATED_MANIFEST_FILE);
+    launcher_core::state::write_bytes_atomic(&target, manifest_text.as_bytes())
+        .map_err(|e| format!("写入生成清单失败：{e}"))?;
+
+    let mut view = match add_local_dir(&state, &request.path, Some(&target)) {
+        Ok(view) => view,
+        Err(error) => {
+            // 登记没成就不留孤儿文件；数据根里的东西可以安全删除。
+            let _ = std::fs::remove_file(&target);
+            return Err(error);
+        }
+    };
+    let instance = state.resolve_instance(&view.module_id)?;
+    view.run = phase_to_run(
+        supervisor
+            .snapshot()
+            .get(&instance.instance_id)
+            .map(|s| s.phase),
+    );
+    Ok(view)
 }
 
 #[tauri::command]
@@ -2739,6 +2881,17 @@ pub fn remove_local_module(
         return Err("实例正在运行（含外部启动），请先停止再解除登记".into());
     }
     state.remove_instance(&instance.instance_id)?;
+    // 只删自己生成、且确实落在数据根实例目录里的那份 v2 清单。
+    // 源码目录归用户所有，绝不删除。
+    if let Some(path) = &instance.manifest_path {
+        let expected = state
+            .paths
+            .instance_dir_keyed(&instance.instance_id)
+            .join(GENERATED_MANIFEST_FILE);
+        if Path::new(path) == expected {
+            let _ = std::fs::remove_file(&expected);
+        }
+    }
     // 卸掉的若是原本的 active，槽位会空出来，剩下同 role 的实例只跑备用端口，
     // 组装层就再也看不到这个角色了。补一个上位（C 类仍要用户显式切换）。
     // 已经在跑的实例保持原端口，下次启动才落到规范端口。
@@ -2791,7 +2944,7 @@ pub fn read_module_manifests(state: State<'_, AppStateV2>) -> Vec<ModuleManifest
         };
         let dir = state.module_dir(&instance);
         let root = dir.to_string_lossy().into_owned();
-        match read_manifest_value(&dir) {
+        match read_instance_manifest(&state, &instance) {
             Ok(manifest) => out.push(ModuleManifestView {
                 module_id: instance.module_id,
                 manifest: Some(manifest),
@@ -2815,7 +2968,7 @@ fn admin_url_v2(
     module_id: &str,
 ) -> Result<String, String> {
     let instance = state.resolve_instance(module_id)?;
-    let raw = read_manifest_value(&state.module_dir(&instance))?;
+    let raw = read_instance_manifest(state, &instance)?;
     let web_path = raw
         .pointer("/admin_ui/web_ui/path")
         .and_then(|v| v.as_str())
@@ -2949,7 +3102,7 @@ fn admin_embed_preferred(state: &AppStateV2, module_id: &str) -> bool {
     let Ok(instance) = state.resolve_instance(module_id) else {
         return true;
     };
-    let Ok(raw) = read_manifest_value(&state.module_dir(&instance)) else {
+    let Ok(raw) = read_instance_manifest(state, &instance) else {
         return true;
     };
     raw.pointer("/admin_ui/web_ui/embed")

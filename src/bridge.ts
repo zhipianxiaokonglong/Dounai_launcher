@@ -368,8 +368,59 @@ export interface ScanCandidate {
   category: string;
   signed: boolean;
   registered: boolean;
-  /** 清单不符合 module-v2 契约时的原因；有值就不该给登记按钮。 */
+  /** 清单不符合 module-v2 契约时的原因；v1 清单另有「补齐清单」入口。 */
   problem: string | null;
+  /** 旧版 v1 清单：不是不可登记，而是先在向导里补齐成 v2。 */
+  v1: boolean;
+  /** 转换后标识会变，解除登记得用实例的实际 module_id。 */
+  instance_module_id: string | null;
+}
+
+export type V1Role = "input" | "llm" | "output" | "shell" | "auxiliary";
+export type V1DepsKind = "uv_lock" | "requirements" | "pyproject";
+
+/** 用户在补齐向导里拍板的字段，其余 v2 字段由后端自动推导或固定。 */
+export interface V1Options {
+  module_id: string;
+  role: V1Role;
+  variant: string;
+  ports: number[];
+  deps_kind: V1DepsKind | null;
+  deps_path: string;
+  command: string;
+  auxiliary_kind: string | null;
+}
+
+export interface V1Preview {
+  path: string;
+  source_sha256: string;
+  options: V1Options;
+  manifest: unknown;
+  manifest_text: string;
+  warnings: string[];
+  /** 当前选项生成不出合法 module-v2 时的原因；有值就不许确认。 */
+  problem: string | null;
+}
+
+/** 预览不写任何文件。传 options 表示用户改过字段，要按新值重算。 */
+export async function previewV1Manifest(
+  path: string,
+  options?: V1Options | null,
+): Promise<V1Preview> {
+  return call<V1Preview>("preview_v1_manifest", {
+    request: { path, options: options ?? null },
+  });
+}
+
+/** 确认补齐：生成物落数据根，源码目录只读，随后按普通 dir 实例登记。 */
+export async function convertV1Manifest(
+  path: string,
+  sourceSha256: string,
+  options: V1Options,
+): Promise<ModuleView> {
+  return call<ModuleView>("convert_v1_manifest", {
+    request: { path, source_sha256: sourceSha256, options },
+  });
 }
 
 /** 在给定目录下扫描含 manifest 的模块（自身 + 一层子目录）。 */

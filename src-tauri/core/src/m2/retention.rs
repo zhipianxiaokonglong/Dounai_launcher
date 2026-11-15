@@ -177,6 +177,7 @@ mod tests {
             allow_unsigned_once: None,
             head_confirmed: None,
             data_dir: Some(format!("C:/data/{id}")),
+            manifest_path: None,
             note: None,
         }
     }

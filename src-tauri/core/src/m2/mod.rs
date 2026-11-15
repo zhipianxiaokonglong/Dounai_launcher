@@ -14,6 +14,7 @@ pub mod retention;
 pub mod source;
 pub mod sources;
 pub mod trust;
+pub mod v1_convert;
 
 use std::cmp::Ordering;
 

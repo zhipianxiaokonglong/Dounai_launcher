@@ -9,18 +9,23 @@
 import {
   addLocalModule,
   addLocalModulesBulk,
+  convertV1Manifest,
   enableDevMode,
   inspectLocalPackage,
   installLocalPackage,
   isDesktop,
   onPackageDrop,
   pickPackageFile,
+  previewV1Manifest,
   removeLocalModule,
   scanLocalModules,
   type LocalPackagePreview,
   type ScanCandidate,
+  type V1Options,
+  type V1Preview,
+  type V1Role,
 } from "../../bridge.js";
-import { bindActions, confirmModal, esc, toast } from "../dom.js";
+import { bindActions, confirmModal, esc, openModal, toast } from "../dom.js";
 import { icon } from "../icons.js";
 import { describeError, refreshViews, store } from "../store.js";
 import type { ViewSlots } from "./modules.js";
@@ -153,6 +158,7 @@ function renderBody(body: HTMLElement): void {
     { act: "scan", run: () => scan() },
     { act: "add", run: () => addOne(dirState.root) },
     { act: "add-path", run: (node) => addOne(node.dataset.path ?? "") },
+    { act: "complete-v1", run: (node) => openV1Wizard(node.dataset.path ?? "") },
     { act: "bulk-add", run: () => addAllPending() },
     { act: "unlink", run: (node) => unlink(node.dataset.id ?? "") },
     {
@@ -469,12 +475,7 @@ function renderResult(): void {
     return;
   }
 
-  const pending = dirState.candidates.filter(
-    (item) => !item.registered && !item.problem,
-  );
-  const blocked = dirState.candidates.filter(
-    (item) => !item.registered && item.problem,
-  );
+  const { pending, v1Pending, blocked } = classifyCandidates(dirState.candidates);
   const locked = dirState.busy ? "disabled" : "";
   const rows = dirState.candidates
     .map(
@@ -482,26 +483,28 @@ function renderResult(): void {
       <div class="envrow">
         <span class="k">${item.registered ? "已登记" : "待登记"}</span>
         <span class="v">${esc(item.name)}</span>
-        <span class="cap">${esc(item.module_id)} · ${esc(item.version)}</span>
+        <span class="cap">${esc(item.instance_module_id ?? item.module_id)} · ${esc(item.version)}</span>
         <span class="sp"></span>
-        <span class="chip ${item.problem ? "chip--fail" : item.signed ? "chip--run" : "chip--warn"}">${item.problem ? "清单不兼容" : item.signed ? "已签名" : "未签名"}</span>
+        <span class="chip ${item.v1 && !item.registered ? "chip--warn" : item.problem ? "chip--fail" : item.signed ? "chip--run" : "chip--warn"}">${item.v1 && !item.registered ? "旧版清单" : item.problem ? "清单不兼容" : item.signed ? "已签名" : "未签名"}</span>
         <span class="cap" style="max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(item.path)}</span>
         ${
           item.registered
-            ? `<button class="btn btn--sm btn--quiet" type="button" data-act="unlink" data-id="${esc(item.module_id)}" ${locked}>解除登记</button>`
-            : item.problem
-              ? `<button class="btn btn--sm" type="button" disabled>不可登记</button>`
-              : `<button class="btn btn--sm" type="button" data-act="add-path" data-path="${esc(item.path)}" ${locked}>登记</button>`
+            ? `<button class="btn btn--sm btn--quiet" type="button" data-act="unlink" data-id="${esc(item.instance_module_id ?? item.module_id)}" ${locked}>解除登记</button>`
+            : item.v1
+              ? `<button class="btn btn--sm" type="button" data-act="complete-v1" data-path="${esc(item.path)}" ${locked}>补齐清单</button>`
+              : item.problem
+                ? `<button class="btn btn--sm" type="button" disabled>不可登记</button>`
+                : `<button class="btn btn--sm" type="button" data-act="add-path" data-path="${esc(item.path)}" ${locked}>登记</button>`
         }
       </div>
-      ${item.problem ? `<div class="cap" style="margin:2px 0 8px">${esc(item.problem)}</div>` : ""}
+      ${item.problem && !item.registered ? `<div class="cap" style="margin:2px 0 8px">${esc(item.v1 ? "旧版 v1 清单：点「补齐清单」把缺的字段补成 module-v2，再登记。" : item.problem)}</div>` : ""}
     `,
     )
     .join("");
 
   host.innerHTML = `
     <div class="toolbar">
-      <span class="cap" style="margin:0">找到 ${dirState.candidates.length} 个候选，${pending.length} 个可登记${blocked.length > 0 ? `，${blocked.length} 个清单不兼容` : ""}。</span>
+      <span class="cap" style="margin:0">找到 ${dirState.candidates.length} 个候选，${pending.length} 个可登记${v1Pending.length > 0 ? `，${v1Pending.length} 个待补齐` : ""}${blocked.length > 0 ? `，${blocked.length} 个清单不兼容` : ""}。</span>
       <span class="sp"></span>
       ${
         pending.length > 0
@@ -517,7 +520,7 @@ function renderResult(): void {
 /** 忙碌时锁住本页的目录按钮，并立刻把提示画出来。命令已不占主线程，界面刷得动。 */
 function setDirBusy(busy: boolean): void {
   dirState.busy = busy;
-  for (const act of ["scan", "add", "add-path", "bulk-add"]) {
+  for (const act of ["scan", "add", "add-path", "complete-v1", "bulk-add"]) {
     document
       .querySelectorAll<HTMLButtonElement>(`button[data-act="${act}"]`)
       .forEach((button) => {
@@ -565,6 +568,14 @@ async function addOne(path: string): Promise<void> {
   } catch (error) {
     // 后端错误本身可能已经带句号，直接拼会出现「。。」。
     const reason = describeError(error).replace(/。$/, "");
+    // 用户直接填路径点「登记目录」是最常见的一条路。v1 清单不该停在
+    // 一句报错上，直接把补齐向导送到他面前。
+    if (reason.includes("旧版 v1 manifest")) {
+      dirState.note = "";
+      renderResult();
+      openV1Wizard(path.trim());
+      return;
+    }
     dirState.note = reason.includes("未开启")
       ? `登记失败：${reason}。点这一节里的「开启本地目录登记」再试。`
       : `登记失败：${reason}`;
@@ -600,6 +611,232 @@ async function addAllPending(): Promise<void> {
   } finally {
     setDirBusy(false);
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* 旧版 v1 清单补齐向导                                                */
+/* ------------------------------------------------------------------ */
+
+const V1_ROLES: V1Role[] = ["input", "llm", "output", "shell", "auxiliary"];
+
+export interface CandidateGroups {
+  pending: ScanCandidate[];
+  v1Pending: ScanCandidate[];
+  blocked: ScanCandidate[];
+}
+
+/** v1 清单有 problem，但不是「不兼容」：它能进补齐向导，不能进批量登记。 */
+export function classifyCandidates(items: ScanCandidate[]): CandidateGroups {
+  return {
+    pending: items.filter((item) => !item.registered && !item.problem),
+    v1Pending: items.filter((item) => !item.registered && item.v1),
+    blocked: items.filter((item) => !item.registered && item.problem && !item.v1),
+  };
+}
+
+export function readV1Options(root: HTMLElement): V1Options {
+  const val = (id: string) =>
+    (
+      root.querySelector<HTMLInputElement | HTMLSelectElement>(`#${id}`)?.value ?? ""
+    ).trim();
+  const role = val("v1-role") as V1Role;
+  const deps = val("v1-deps");
+  const ports = val("v1-ports")
+    .split(/[,\s]+/)
+    .map(Number)
+    .filter((n) => Number.isInteger(n) && n > 0 && n <= 65535);
+  return {
+    module_id: val("v1-module-id"),
+    role,
+    variant: val("v1-variant"),
+    ports,
+    deps_kind: role === "shell" || deps === "" ? null : (deps as V1Options["deps_kind"]),
+    deps_path: val("v1-deps-path"),
+    command: val("v1-command"),
+    auxiliary_kind: role === "auxiliary" ? val("v1-aux") || "tooling" : null,
+  };
+}
+
+export function v1Form(p: V1Preview): string {
+  const o = p.options;
+  const roleOptions = V1_ROLES.map(
+    (r) =>
+      `<option value="${r}" ${r === o.role ? "selected" : ""}>${ROLE_TITLE[r]}（${r}）</option>`,
+  ).join("");
+  const depsOptions = [
+    ["pyproject", "pyproject.toml"],
+    ["uv_lock", "uv.lock"],
+    ["requirements", "requirements.txt"],
+    ["", "不装依赖（总装角色）"],
+  ]
+    .map(
+      ([value, label]) =>
+        `<option value="${value}" ${(o.deps_kind ?? "") === value ? "selected" : ""}>${label}</option>`,
+    )
+    .join("");
+  const auxOptions = ["memory", "search", "tooling", "observability"]
+    .map(
+      (k) =>
+        `<option value="${k}" ${o.auxiliary_kind === k ? "selected" : ""}>${k}</option>`,
+    )
+    .join("");
+  return `
+    <div class="alert" style="margin:0 0 12px">
+      <b>这一步只用于导入本地目录</b>
+      <div>运行时只认 module-v2。旧清单当预填素材，确认后生成一份完整的新清单；生成的清单写在数据根，源码目录不会被修改。</div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px">
+      <div class="field" style="margin:0">
+        <label for="v1-module-id">模块标识（namespace/name）</label>
+        <input id="v1-module-id" class="input" type="text" spellcheck="false" value="${esc(o.module_id)}" />
+        <div class="cap">namespace 只是命名，不是信任凭证。</div>
+      </div>
+      <div class="field" style="margin:0">
+        <label for="v1-role">角色</label>
+        <select id="v1-role" class="input">${roleOptions}</select>
+        <div class="cap">决定端口和链路位置，按 v1 的健康地址预填。</div>
+      </div>
+      <div class="field" style="margin:0">
+        <label for="v1-variant">变体</label>
+        <input id="v1-variant" class="input" type="text" spellcheck="false" value="${esc(o.variant)}" />
+      </div>
+      <div class="field" style="margin:0">
+        <label for="v1-ports">规范端口</label>
+        <input id="v1-ports" class="input" type="text" spellcheck="false" value="${esc(o.ports.join(", "))}" />
+        <div class="cap">留空表示不占规范端口；备用端口由启动器分配。</div>
+      </div>
+      <div class="field" style="margin:0">
+        <label for="v1-deps">依赖准备方式</label>
+        <select id="v1-deps" class="input">${depsOptions}</select>
+        <div class="cap">首次启动会在实例目录重建虚拟环境。</div>
+      </div>
+      <div class="field" style="margin:0">
+        <label for="v1-deps-path">依赖文件（包内相对路径）</label>
+        <input id="v1-deps-path" class="input" type="text" spellcheck="false" value="${esc(o.deps_path)}" />
+      </div>
+      <div class="field" style="margin:0">
+        <label for="v1-aux">旁路类型（仅 auxiliary 角色）</label>
+        <select id="v1-aux" class="input">${auxOptions}</select>
+      </div>
+    </div>
+    <div class="field" style="margin:12px 0 0">
+      <label for="v1-command">启动命令</label>
+      <input id="v1-command" class="input" type="text" spellcheck="false" value="${esc(o.command)}" />
+      <div class="cap">v1 把解释器写死在源码目录的 .venv；v2 用 {venv_python} 指向启动器准备的环境。总装角色用 {module_dir}。</div>
+    </div>
+    <div class="field" style="margin:12px 0 0">
+      <label>生成的 module-v2 清单（就是落盘内容）</label>
+      <pre id="v1-json" style="max-height:190px;overflow:auto;margin:0;padding:10px;background:var(--panel);border:1px solid var(--line-2);border-radius:var(--r-s);font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word;color:var(--fg)"></pre>
+    </div>
+    <div id="v1-problem" class="alert" style="margin:10px 0 0" hidden></div>
+    <ul id="v1-warnings" class="cap" style="margin:10px 0 0;padding-left:18px;line-height:1.7"></ul>
+  `;
+}
+
+function openV1Wizard(path: string): void {
+  let current: V1Preview | null = null;
+  let seq = 0;
+  let timer: number | undefined;
+
+  const confirmButton = (root: HTMLElement) =>
+    root.querySelector<HTMLButtonElement>('[data-modal-act="1"]');
+
+  const paint = (root: HTMLElement, p: V1Preview): void => {
+    const json = root.querySelector<HTMLElement>("#v1-json");
+    if (json) json.textContent = p.manifest_text;
+    const problem = root.querySelector<HTMLElement>("#v1-problem");
+    if (problem) {
+      problem.hidden = !p.problem;
+      problem.textContent = p.problem ? `这份清单还不能登记：${p.problem}` : "";
+    }
+    const warnings = root.querySelector<HTMLElement>("#v1-warnings");
+    if (warnings) {
+      warnings.innerHTML = p.warnings.map((w) => `<li>${esc(w)}</li>`).join("");
+    }
+    const button = confirmButton(root);
+    if (button) button.disabled = p.problem !== null;
+  };
+
+  const refresh = async (root: HTMLElement, options: V1Options): Promise<void> => {
+    const ticket = ++seq;
+    const button = confirmButton(root);
+    if (button) button.disabled = true;
+    try {
+      const p = await previewV1Manifest(path, options);
+      if (ticket !== seq) return;
+      current = p;
+      paint(root, p);
+    } catch (error) {
+      if (ticket !== seq) return;
+      const problem = root.querySelector<HTMLElement>("#v1-problem");
+      if (problem) {
+        problem.hidden = false;
+        problem.textContent = `无法预览：${describeError(error)}`;
+      }
+      const btn = confirmButton(root);
+      if (btn) btn.disabled = true;
+    }
+  };
+
+  openModal({
+    title: "补齐 module-v2 清单",
+    subtitle: path,
+    wide: true,
+    footNote: "只用于导入本地目录；生成物写在数据根",
+    bodyHtml: `<div id="v1-wizard"><div class="cap">正在读取旧版清单…</div></div>`,
+    actions: [
+      { label: "取消", tone: "quiet", autofocus: true },
+      {
+        label: "生成并登记",
+        tone: "primary",
+        onClick: async (root) => {
+          if (!current || current.problem) {
+            toast("先把清单里的问题改好", "error");
+            return false;
+          }
+          const host = root.querySelector<HTMLElement>("#v1-wizard");
+          const options = host ? readV1Options(host) : current.options;
+          try {
+            const view = await convertV1Manifest(
+              current.path,
+              current.source_sha256,
+              options,
+            );
+            toast(`已登记 ${view.module_id}`, "ok");
+            await afterChange(
+              `已补齐并登记 ${view.module_id}。生成的清单在数据根，源码目录未改动；首次启动要装依赖。`,
+            );
+            return;
+          } catch (error) {
+            toast(`补齐失败：${describeError(error)}`, "error");
+            return false;
+          }
+        },
+      },
+    ],
+    onMount: (root) => {
+      void (async () => {
+        const host = root.querySelector<HTMLElement>("#v1-wizard");
+        if (!host) return;
+        try {
+          const first = await previewV1Manifest(path, null);
+          current = first;
+          host.innerHTML = v1Form(first);
+          paint(root, first);
+          const schedule = () => {
+            window.clearTimeout(timer);
+            timer = window.setTimeout(() => void refresh(root, readV1Options(host)), 220);
+          };
+          host.addEventListener("input", schedule);
+          host.addEventListener("change", schedule);
+        } catch (error) {
+          host.innerHTML = `<div class="alert">读取旧版清单失败：${esc(describeError(error))}</div>`;
+          const button = confirmButton(root);
+          if (button) button.disabled = true;
+        }
+      })();
+    },
+  });
 }
 
 function unlink(moduleId: string): void {

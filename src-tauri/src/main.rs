@@ -151,6 +151,8 @@ fn main() {
             dounai_launcher::commands_v2::scan_local_modules,
             dounai_launcher::commands_v2::add_local_module,
             dounai_launcher::commands_v2::add_local_modules_bulk,
+            dounai_launcher::commands_v2::preview_v1_manifest,
+            dounai_launcher::commands_v2::convert_v1_manifest,
             dounai_launcher::commands_v2::remove_local_module,
             dounai_launcher::commands_v2::dev_mode_status,
             dounai_launcher::commands_v2::enable_dev_mode,

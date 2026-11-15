@@ -13,7 +13,7 @@
   "properties": {
     "schema_version": {
       "const": 2,
-      "description": "固定为 2。不读取 v1 格式，不设兼容层。"
+      "description": "固定为 2。运行时不读取 v1 格式，不设兼容层；只有本地目录导入向导在用户确认后，把 v1 清单补成完整的 v2 清单，生成物另存数据根。"
     },
     "module_id": {
       "type": "string",

@@ -581,6 +581,19 @@ impl AppStateV2 {
         }
     }
 
+    /// 实例实际使用的 module-v2 清单。
+    ///
+    /// 默认就是模块根里的 `manifest.json`。导入期把旧版 v1 清单补成 v2 时，
+    /// 生成物落在数据根，源码目录一个字节都不改，运行时改读这份生成物。
+    pub fn manifest_file(&self, instance: &Instance) -> PathBuf {
+        match &instance.manifest_path {
+            Some(path) => PathBuf::from(path),
+            None => self
+                .module_dir(instance)
+                .join(crate::lifecycle_ops::MANIFEST_FILE),
+        }
+    }
+
     pub fn instances_for_module(&self, module_id: &str) -> Vec<Instance> {
         self.with_installed(|state| {
             state

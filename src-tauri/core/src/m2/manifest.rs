@@ -201,7 +201,7 @@ pub fn valid_variant(s: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
-fn valid_module_id(s: &str) -> bool {
+pub fn valid_module_id(s: &str) -> bool {
     fn segment(x: &str) -> bool {
         if x.is_empty() || x.len() > 64 {
             return false;

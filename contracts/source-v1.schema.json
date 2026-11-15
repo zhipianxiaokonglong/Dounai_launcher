@@ -126,6 +126,11 @@
           "description": "已确认的 HEAD。启动前比对，变化则要求重新确认并禁止自动启动。"
         },
         "data_dir": { "type": "string", "description": "永不自动删除，只标记孤儿并提供手动入口。" },
+        "manifest_path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "仅 dir 实例：导入期把旧版 v1 清单补成 module-v2 后，生成物的绝对路径，固定在 data_root/instances/<key>/manifest-v2.json。运行时改读这份文件，源码目录保持只读。缺省时读模块根的 manifest.json。"
+        },
         "note": { "type": "string" }
       },
       "allOf": [
@@ -154,6 +159,11 @@
             "properties": { "pinned": { "const": false } },
             "description": "D 类硬拒，不应写入实例表。"
           }
+        },
+        {
+          "if": { "properties": { "source_kind": { "const": "zip" } }, "required": ["source_kind"] },
+          "then": { "not": { "required": ["manifest_path"] } },
+          "description": "zip 包的清单固定在包目录，不许指向别处；只有本地目录导入允许生成物覆盖。"
         }
       ]
     }
