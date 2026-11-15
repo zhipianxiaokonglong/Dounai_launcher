@@ -48,6 +48,23 @@ fn main() {
                     .map_err(|e| format!("初始化生命周期失败：{e}"))?;
             app.manage(supervisor);
 
+            // M7：2 秒一轮资源采样。线程只调 Supervisor 的方法，不另存句柄，
+            // 没有实例运行时 `sample_once` 直接返回，这一轮不碰任何 Win32。
+            {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || loop {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        dounai_launcher::usage::INTERVAL_MS,
+                    ));
+                    let Some(supervisor) =
+                        handle.try_state::<dounai_launcher::lifecycle_runtime::Supervisor>()
+                    else {
+                        continue;
+                    };
+                    supervisor.sample_once();
+                });
+            }
+
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.show();
             }
@@ -85,6 +102,7 @@ fn main() {
             dounai_launcher::env_probe::probe_environment,
             // v2 新增命令。
             dounai_launcher::commands_v2::list_instance_views,
+            dounai_launcher::commands_v2::instance_usage,
             dounai_launcher::commands_v2::restart_instance,
             dounai_launcher::commands_v2::switch_active,
             dounai_launcher::commands_v2::confirm_local_source,

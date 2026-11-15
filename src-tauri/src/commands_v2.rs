@@ -732,6 +732,12 @@ pub fn list_instance_views(
     )
 }
 
+/// M7：实例资源占用。只读内存快照——不触发采样、不发 HTTP、不碰磁盘。
+#[tauri::command]
+pub fn instance_usage(supervisor: State<'_, Supervisor>) -> crate::usage::UsageSnapshot {
+    supervisor.usage_snapshot()
+}
+
 /// 卡片需要的环境事实，由命令层算好，组合函数只负责落位。
 ///
 /// 合成一个结构体而不是继续加参数：这两个字段都来自 runtime.json 与 verify，

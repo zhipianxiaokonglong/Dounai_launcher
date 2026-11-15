@@ -19,8 +19,11 @@ use tauri::{AppHandle, Emitter};
 
 use crate::diag_log::{self, SharedLog};
 use crate::process::win::{SpawnSpec, WinProcess};
+use crate::usage::{UsageBoard, UsageSnapshot};
 
 pub const EVENT_NAME: &str = "lifecycle-changed";
+/// 每轮采样的全量快照。按实例逐个推会让一次 tick 变成 N 条事件。
+pub const EVENT_USAGE: &str = "usage-updated";
 pub const GRACEFUL_TIMEOUT: Duration = Duration::from_secs(3);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -100,6 +103,8 @@ pub struct Supervisor {
     logs: Mutex<BTreeMap<String, SharedLog>>,
     /// 包住 begin_start 到进程登记，状态机本身不代替临界区。
     start_lock: Mutex<()>,
+    /// 资源占用的历史与差分基准。只在内存里，进程生命周期之外不落盘。
+    usage: UsageBoard,
     roles: RolesDoc,
     app: AppHandle,
 }
@@ -114,9 +119,47 @@ impl Supervisor {
             external: Mutex::new(BTreeSet::new()),
             logs: Mutex::new(BTreeMap::new()),
             start_lock: Mutex::new(()),
+            usage: UsageBoard::new(),
             roles,
             app,
         })
+    }
+
+    /// 采样一轮并把快照推给界面。
+    ///
+    /// 先拷 id 再逐个取读数：`stop()` 会持 `processes` 锁跑 taskkill（最长
+    /// `GRACEFUL_TIMEOUT`），整轮持锁会把采样卡在停止那一下。真正的写操作在
+    /// 无进程运行时直接返回，不调任何 Win32——空载时这个线程只是每 2 秒醒一次。
+    pub fn sample_once(&self) -> Option<UsageSnapshot> {
+        let ids: Vec<String> = lock(&self.processes).keys().cloned().collect();
+        let mut alive: BTreeMap<String, Option<crate::process::win::UsageRaw>> = BTreeMap::new();
+        for id in ids {
+            let outcome = {
+                let processes = lock(&self.processes);
+                match processes.get(&id) {
+                    // `Some(None)` 表示进程活着但读不到（权限不够）：仍要占位，
+                    // 好让界面写「—」而不是把这一行从表里删掉。
+                    Some(process) if process.is_alive() => Some(process.usage().ok()),
+                    _ => None,
+                }
+            };
+            if let Some(raw) = outcome {
+                alive.insert(id, raw);
+            }
+        }
+
+        if alive.is_empty() && self.usage.is_empty() {
+            return None;
+        }
+        self.usage.record(&alive, Instant::now());
+        let snapshot = self.usage.snapshot();
+        let _ = self.app.emit(EVENT_USAGE, &snapshot);
+        Some(snapshot)
+    }
+
+    /// 命令面用的只读副本：纯内存读，不发 HTTP、不碰磁盘。
+    pub fn usage_snapshot(&self) -> UsageSnapshot {
+        self.usage.snapshot()
     }
 
     pub fn state(&self) -> Arc<Mutex<LifecycleState>> {
@@ -327,6 +370,8 @@ impl Supervisor {
             }
         };
         lock(&self.processes).remove(id);
+        // 停止即抹掉占用历史：留着上一轮的数值等于把旧读数冒充当前占用。
+        self.usage.forget(id);
         match &outcome {
             Ok(()) => self.log_line(id, "lifecycle", "stopped"),
             Err(error) => self.log_line(id, "lifecycle", &format!("stop failed: {error}")),

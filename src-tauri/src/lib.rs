@@ -16,6 +16,7 @@ pub mod m2_http;
 pub mod process;
 pub mod release;
 pub mod state_v2;
+pub mod usage;
 
 // 供应链安全、路径与管理页宿主契约住在 launcher-core。
 // 重导出模块名，使 crate 内既有的 `crate::security` / `crate::signature`
