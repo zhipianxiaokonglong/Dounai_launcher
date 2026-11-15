@@ -10,13 +10,17 @@ use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+use windows_sys::Win32::Foundation::{CloseHandle, ERROR_MORE_DATA, FILETIME, HANDLE};
 use windows_sys::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-    SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicProcessIdList,
+    JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+    TerminateJobObject, JOBOBJECT_BASIC_PROCESS_ID_LIST, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
-use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+use windows_sys::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+use windows_sys::Win32::System::Threading::{
+    GetProcessTimes, OpenProcess, CREATE_NO_WINDOW, PROCESS_QUERY_LIMITED_INFORMATION,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum WinError {
@@ -30,6 +34,8 @@ pub enum WinError {
     Assign(i32),
     #[error("终止 Job 失败，系统错误码 {0}")]
     Terminate(i32),
+    #[error("查询 Job 进程列表失败，系统错误码 {0}")]
+    QueryJob(i32),
 }
 
 fn last_error() -> i32 {
@@ -196,6 +202,66 @@ impl WinProcess {
         }
         Ok(())
     }
+
+    /// 当前整棵进程树的原始读数。
+    ///
+    /// 走 Job 的 pid 列表而不是 parent-pid 找子进程：孙子进程也在同一个 Job 里，
+    /// parent-pid 只能找到一层，且父进程先退出后关系就断了。
+    ///
+    /// 单个 pid 打不开（已退出、权限不够）只跳过它，不让整轮采样失败——
+    /// 少算一个进程比整片显示「—」有用。
+    pub fn usage(&self) -> Result<UsageRaw, WinError> {
+        let pids = self.job_pids()?;
+        let mut raw = UsageRaw {
+            pids: pids.clone(),
+            ..UsageRaw::default()
+        };
+        for pid in pids {
+            let Some((ticks, working_set)) = sample_pid(pid) else {
+                continue;
+            };
+            raw.cpu_ticks += ticks;
+            raw.working_set_bytes += working_set;
+        }
+        Ok(raw)
+    }
+
+    /// Job 里当前挂着哪些 pid。
+    ///
+    /// `JOBOBJECT_BASIC_PROCESS_ID_LIST` 是变长结构：尾部是 `ProcessIdList[1]`，
+    /// 实际容量按 pid 数另算，所以缓冲区要自己撑开并在 `ERROR_MORE_DATA` 时扩容。
+    fn job_pids(&self) -> Result<Vec<u32>, WinError> {
+        let mut capacity = 8usize;
+        for _ in 0..4 {
+            let size = std::mem::size_of::<JOBOBJECT_BASIC_PROCESS_ID_LIST>()
+                + capacity.saturating_sub(1) * std::mem::size_of::<usize>();
+            let mut buffer = vec![0u8; size];
+            let mut returned = 0u32;
+            let ok = unsafe {
+                QueryInformationJobObject(
+                    self.handle(),
+                    JobObjectBasicProcessIdList,
+                    buffer.as_mut_ptr() as *mut c_void,
+                    size as u32,
+                    &mut returned,
+                )
+            };
+            let list = unsafe { &*(buffer.as_ptr() as *const JOBOBJECT_BASIC_PROCESS_ID_LIST) };
+            if ok != 0 {
+                let count = (list.NumberOfProcessIdsInList as usize).min(capacity);
+                let ids = unsafe { std::slice::from_raw_parts(list.ProcessIdList.as_ptr(), count) };
+                return Ok(ids.iter().map(|id| *id as u32).collect());
+            }
+            let code = last_error();
+            if code != ERROR_MORE_DATA as i32 {
+                return Err(WinError::QueryJob(code));
+            }
+            // 缓冲区不够时系统仍会写上需要的数量，按它扩容。
+            let needed = list.NumberOfAssignedProcesses as usize;
+            capacity = capacity.max(needed).max(capacity * 2);
+        }
+        Err(WinError::QueryJob(ERROR_MORE_DATA as i32))
+    }
 }
 
 impl Drop for WinProcess {
@@ -205,6 +271,56 @@ impl Drop for WinProcess {
             CloseHandle(self.handle());
         }
     }
+}
+
+/// 一个实例当前的原始读数。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UsageRaw {
+    pub pids: Vec<u32>,
+    /// kernel + user，单位 100ns。单调递增，两次之差就是这段墙钟里用掉的 CPU 时间。
+    pub cpu_ticks: u64,
+    /// 整棵树的工作集之和。工作集含共享页，与任务管理器同一口径。
+    pub working_set_bytes: u64,
+}
+
+fn filetime_to_u64(value: &FILETIME) -> u64 {
+    ((value.dwHighDateTime as u64) << 32) | value.dwLowDateTime as u64
+}
+
+/// 单个 pid 的 (CPU 时间累积值, 工作集)。
+fn sample_pid(pid: u32) -> Option<(u64, u64)> {
+    if pid == 0 {
+        return None;
+    }
+    // 只要查询权限：不开 PROCESS_VM_READ，拿不到目标进程的内存内容。
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return None;
+    }
+    let mut creation: FILETIME = unsafe { std::mem::zeroed() };
+    let mut exited: FILETIME = unsafe { std::mem::zeroed() };
+    let mut kernel: FILETIME = unsafe { std::mem::zeroed() };
+    let mut user: FILETIME = unsafe { std::mem::zeroed() };
+    let times_ok =
+        unsafe { GetProcessTimes(handle, &mut creation, &mut exited, &mut kernel, &mut user) };
+    let mut counters: PROCESS_MEMORY_COUNTERS = unsafe { std::mem::zeroed() };
+    counters.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+    let mem_ok = unsafe { GetProcessMemoryInfo(handle, &mut counters, counters.cb) };
+    unsafe { CloseHandle(handle) };
+    if times_ok == 0 && mem_ok == 0 {
+        return None;
+    }
+    let ticks = if times_ok != 0 {
+        filetime_to_u64(&kernel) + filetime_to_u64(&user)
+    } else {
+        0
+    };
+    let working_set = if mem_ok != 0 {
+        counters.WorkingSetSize as u64
+    } else {
+        0
+    };
+    Some((ticks, working_set))
 }
 
 #[cfg(test)]
