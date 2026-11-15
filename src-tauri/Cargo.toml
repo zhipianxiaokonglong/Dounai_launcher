@@ -11,6 +11,14 @@ license = "GPL-3.0-or-later"
 # 而拒绝执行；`tauri dev` 依赖无歧义的默认目标。
 default-run = "dounai-launcher"
 
+[features]
+# 生产构建必须带这个 feature：`generate_context!` 在编译期决定是内嵌 `../dist`
+# 还是加载 `devUrl`。缺了它，`cargo build --release` 也能编译通过，但产物会去连
+# `http://localhost:5175`，窗口里只有 Edge 的 ERR_CONNECTION_REFUSED。
+# `cargo tauri build` 会自动加；直接调 cargo 时必须手动带 `--features custom-protocol`。
+default = []
+custom-protocol = ["tauri/custom-protocol"]
+
 [lib]
 name = "dounai_launcher"
 path = "src/lib.rs"
