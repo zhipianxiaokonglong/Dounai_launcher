@@ -353,10 +353,10 @@ function moduleStatusChip(views: InstanceRuntimeView[]): string {
       return '<span class="chip chip--warn"><i class="dot dot--warn"></i>启动超时</span>';
     }
     const code = failedView.snapshot?.exit_code;
-    const label = code === null || code === undefined ? "启动失败" : `已退出 ${code}`;
+    const label = code === null || code === undefined ? "启动失败" : `异常退出 ${code}`;
     return `<span class="chip chip--fail"><i class="dot dot--fail"></i>${esc(label)}</span>`;
   }
-  return '<span class="chip chip--stop">○ 已停止</span>';
+  return '<span class="chip chip--stop">○ 未运行</span>';
 }
 
 /** 单个实例自己的状态：同一模块的两个实例可以一个跑一个停。 */
@@ -371,10 +371,10 @@ function instancePhaseChip(view: InstanceRuntimeView): string {
   if (phase === "failed") {
     if (hasLiveProcess(view)) return '<span class="chip chip--warn">启动超时</span>';
     const code = view.snapshot?.exit_code;
-    const label = code === null || code === undefined ? "启动失败" : `已退出 ${code}`;
+    const label = code === null || code === undefined ? "启动失败" : `异常退出 ${code}`;
     return `<span class="chip chip--fail"><i class="dot dot--fail"></i>${esc(label)}</span>`;
   }
-  return '<span class="chip chip--stop">已停止</span>';
+  return '<span class="chip chip--stop">未运行</span>';
 }
 
 function viewDescription(view: InstanceRuntimeView | undefined, role: Role): string {

@@ -23,6 +23,7 @@ import {
   type ChainStepState,
   type ChainsView,
   type ChainView,
+  type Phase,
 } from "../../bridge.js";
 import { bindActions, confirmModal, esc, openModal, toast } from "../dom.js";
 import { describeError, store } from "../store.js";
@@ -227,21 +228,72 @@ function defaultCard(steps: string[]): string {
   </div>`;
 }
 
+/**
+ * 实例相位到步骤状态点文案的映射。
+ *
+ * 外部启动的实例也是 running，但 pid 为 null（Supervisor 合成快照），
+ * 界面上要能区分，否则用户会以为是自己没点启动。
+ */
+export function stepPhaseLabel(
+  phase: Phase | undefined,
+  pid: number | null,
+): { dot: string; text: string } {
+  switch (phase) {
+    case "running":
+      return pid === null
+        ? { dot: "ok", text: "运行中 · 外部启动" }
+        : { dot: "ok", text: "运行中" };
+    case "starting":
+      return { dot: "warn", text: "启动中" };
+    case "stopping":
+      return { dot: "warn", text: "停止中" };
+    case "failed":
+      return { dot: "fail", text: "异常退出" };
+    default:
+      return { dot: "idle", text: "未运行" };
+  }
+}
+
+/**
+ * 没有本次链路运行结果时的兜底：读实例当前的相位。
+ *
+ * 卡片列的是「这条链路现在是什么状况」，不是「上一次点启动时发生了什么」。
+ * 用户从模块页一键启动（默认链路）后，自定义链路里这些实例已经在跑，若还写
+ * 「待启动」，界面上就出现两份互相矛盾的事实。
+ */
+function liveStep(instanceId: string): { dot: string; text: string; reason: string | null } | null {
+  const found = store.views.find((item) => item.instance.instance_id === instanceId);
+  if (!found) return null;
+  const snapshot = found.snapshot;
+  const label = stepPhaseLabel(snapshot?.phase, snapshot?.pid ?? null);
+  return {
+    dot: label.dot,
+    text: label.text,
+    reason: snapshot?.phase === "failed" ? snapshot.last_error : null,
+  };
+}
+
 function chainCard(chain: ChainView): string {
   const missing = chain.missing_count > 0
     ? `<span class="chip chip--fail">缺 ${chain.missing_count} 项</span>`
     : "";
   const steps = chain.steps.map((step) => {
     const result = stepResult(chain.id, step.index, step.instance_id);
-    const dot = result ? dotClass(result.state) : "idle";
-    const text = result ? STATE_TITLE[result.state] : step.exists ? "待启动" : "实例缺失";
+    const live = result || !step.exists ? null : liveStep(step.instance_id);
+    const dot = result ? dotClass(result.state) : live?.dot ?? "idle";
+    const text = result
+      ? STATE_TITLE[result.state]
+      : step.exists
+        ? live?.text ?? "未运行"
+        : "实例缺失";
+    const reason = result?.reason ?? live?.reason ?? null;
     return `<li class="chain-step">
       <span class="chain-idx">${step.index}</span>
       <span class="chain-dot chain-dot--${dot}" aria-hidden="true"></span>
       <span class="chain-step__name">${esc(step.name)}${step.exists ? "" : ' <b class="warn-text">（已卸载）</b>'}</span>
       <code class="fp">${esc(step.instance_id)}</code>
       <span class="sp"></span>
-      <span class="cap">${esc(text)}${result?.reason ? ` · ${esc(result.reason)}` : ""}</span>
+      <span class="cap">${esc(text)}${reason ? ` · ${esc(reason)}` : ""}</span>
     </li>`;
   }).join("");
   const failed = view.run?.chain_id === chain.id

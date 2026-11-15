@@ -22,6 +22,7 @@ import {
   moveStep,
   reconcileFailedSteps,
   stepLine,
+  stepPhaseLabel,
   toggleStep,
 } from "../src/ui/views/chains.js";
 
@@ -174,5 +175,36 @@ describe("链路命令形状", () => {
     expect(calls[0]?.args).toEqual({ chainId: "chain-1", onlyStarted: true });
     await stopChain("chain-1");
     expect(calls[1]?.args).toEqual({ chainId: "chain-1", onlyStarted: false });
+  });
+});
+
+/**
+ * 没有本次运行结果时，步骤状态点必须反映实例当前相位。
+ *
+ * 之前的实现只按「实例在不在」给文案：实例通过模块页一键启动、已经在跑，
+ * 自定义链路卡片仍写「待启动」，同一块界面上出现两份矛盾的事实。
+ */
+describe("stepPhaseLabel", () => {
+  it("运行中给绿点", () => {
+    expect(stepPhaseLabel("running", 14484)).toEqual({ dot: "ok", text: "运行中" });
+  });
+
+  it("外部启动的实例也是绿点，但文案要区分", () => {
+    expect(stepPhaseLabel("running", null).text).toContain("外部启动");
+    expect(stepPhaseLabel("running", null).dot).toBe("ok");
+  });
+
+  it("启动中与停止中是黄点，不是未运行", () => {
+    expect(stepPhaseLabel("starting", null).dot).toBe("warn");
+    expect(stepPhaseLabel("stopping", 0).dot).toBe("warn");
+  });
+
+  it("异常退出是红点", () => {
+    expect(stepPhaseLabel("failed", null)).toEqual({ dot: "fail", text: "异常退出" });
+  });
+
+  it("真正没跑才是未运行的灰点", () => {
+    expect(stepPhaseLabel("stopped", null)).toEqual({ dot: "idle", text: "未运行" });
+    expect(stepPhaseLabel(undefined, null).text).toBe("未运行");
   });
 });

@@ -317,7 +317,7 @@ export function adminLifecycleChanged(): void {
       wasHealthy = false;
       if (active) {
         void hideMounted();
-        paintPlaceholder("模块已停止", "启动它之后，这一页会自动恢复。");
+        paintPlaceholder("模块未运行", "启动它之后，这一页会自动恢复。");
       }
     }
     return;

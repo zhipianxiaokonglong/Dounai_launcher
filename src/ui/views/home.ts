@@ -199,8 +199,8 @@ function nodeHtml(role: Role, views: InstanceRuntimeView[]): string {
   const chip = running
     ? '<span class="chip chip--run"><i class="dot dot--run"></i>运行中</span>'
     : failed
-      ? '<span class="chip chip--fail">已退出</span>'
-      : '<span class="chip chip--stop">已停止</span>';
+      ? '<span class="chip chip--fail">异常退出</span>'
+      : '<span class="chip chip--stop">未运行</span>';
 
   const port = counter.port === null ? "无端口" : `:${counter.port}`;
   const versions = new Set(views.map((view) => view.instance.version));
@@ -363,8 +363,8 @@ function resStateChip(view: InstanceRuntimeView): string {
       : '<span class="chip chip--run">运行中</span>';
   }
   if (phase === "starting") return '<span class="chip chip--warn">启动中</span>';
-  if (phase === "failed") return '<span class="chip chip--fail">已退出</span>';
-  return '<span class="chip chip--stop">待机</span>';
+  if (phase === "failed") return '<span class="chip chip--fail">异常退出</span>';
+  return '<span class="chip chip--stop">未运行</span>';
 }
 
 function envTileHtml(): string {
