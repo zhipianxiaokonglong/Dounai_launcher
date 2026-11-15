@@ -115,6 +115,7 @@ sha256sum /tmp/c.json <catalog.json>
 | 1 | 2026-11-13 | 首次签发，三个数据面模块 |
 | 2 | 2026-11-14 | 修 `signer_fp` 字段与条目 `source_id`，改为 `official-sf` 单源 |
 | 3 | 2026-11-14 | 四个模块重打：`dounai-input 0.2.2`、`omninexus 0.3.5`、`moodvoice 1.0.1`、首次发布的 `dounai-ui 0.3.1`（shell） |
+| 4 | 2026-11-15 | 续期重签，四个条目与哈希均未变，窗口至 2026-11-22；同日发布启动器 `v0.4.0`（GitHub release，不进 catalog） |
 
 `sequence=3` 中三个数据面模块的 patch 号比上游仓库 `pyproject.toml` 里的版本各高一档。上游改了代码但没有改版本号，而 catalog 的版本单调只看版本串，同版本换哈希不会让已装用户看到更新，所以重新打包时由发布方升 patch。
 
