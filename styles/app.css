@@ -880,6 +880,9 @@ code,
   flex-direction: column;
   gap: 1px;
   box-shadow: 0 10px 26px rgba(0, 0, 0, 0.35);
+  /* 两侧空间都不够时由脚本写入 max-height，这里负责让多出来的项内部滚动 */
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 /* 浅色主题下 0.35 的黑影太重，边界靠一圈实线更清楚。 */

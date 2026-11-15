@@ -13,6 +13,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const css = readFileSync(resolve(process.cwd(), "styles/app.css"), "utf8");
+const source = readFileSync(resolve(process.cwd(), "src/ui/views/modules.ts"), "utf8");
 
 describe("card more-menu layout", () => {
   it("menu pushes itself right without depending on a parent class", () => {
@@ -36,5 +37,23 @@ describe("card more-menu layout", () => {
   it("only the card with an open menu lifts clipping", () => {
     expect(css).toMatch(/\.mcard\s*\{[^}]*overflow: hidden/);
     expect(css).toMatch(/\.mcard--menu-open\s*\{[^}]*overflow: visible[^}]*z-index: 6/);
+  });
+
+  it("opening one menu closes the others", () => {
+    // 多个浮层能同时展开时，相邻卡片的面板会叠在一起
+    expect(source).toContain("function closeAllMenus");
+    expect(source).toMatch(/if \(other !== menu\) other\.open = false/);
+  });
+
+  it("flips below using the clipping container, not the viewport", () => {
+    // .pbody 才是裁剪边界：卡片贴顶时按视口算会误判成「上方空间充足」
+    expect(source).toContain("function clipRect");
+    expect(source).toMatch(/sr\.top - clip\.top/);
+    expect(source).toMatch(/clip\.bottom - sr\.bottom/);
+  });
+
+  it("panel scrolls inside itself when neither side fits", () => {
+    expect(css).toMatch(/\.menu-body\s*\{[^}]*overflow-y: auto/);
+    expect(source).toContain('panel.style.maxHeight');
   });
 });

@@ -651,7 +651,12 @@ function cardFootHtml(moduleId: string, views: InstanceRuntimeView[]): string {
   return parts.join("");
 }
 
+const boundBodies = new WeakSet<HTMLElement>();
+
 function bindBodyActions(body: HTMLElement): void {
+  // body 元素跨重绘复用，重绘时只清子节点，委托监听会一直累积
+  if (boundBodies.has(body)) return;
+  boundBodies.add(body);
   bindActions(body, [
     { act: "start", run: (node) => startOne(node.dataset.id ?? "") },
     { act: "stop", run: (node) => stopOne(node.dataset.id ?? "") },
@@ -675,14 +680,21 @@ function bindBodyActions(body: HTMLElement): void {
     },
   ]);
 
-  // 点开一个菜单时收起其它菜单：避免多个浮层叠在一起
+  // 点空白处收起所有菜单
   body.addEventListener("click", (event) => {
     const target = event.target as HTMLElement | null;
     if (target?.closest(".menu")) return;
-    body.querySelectorAll<HTMLDetailsElement>(".menu[open]").forEach((menu) => {
-      menu.open = false;
-    });
+    closeAllMenus(body);
   });
+
+  // 列表滚动后原先算出来的上下方向就失效了，直接收起
+  body.addEventListener(
+    "scroll",
+    () => {
+      closeAllMenus(body);
+    },
+    { passive: true },
+  );
 
   // details 的 toggle 不冒泡，只能捕获。菜单默认向上展开，上方空间不够时
   // 改成向下，否则整块浮层会落在滚动容器上沿之外；同时把所在卡片抬层，
@@ -692,21 +704,57 @@ function bindBodyActions(body: HTMLElement): void {
     (event) => {
       const menu = event.target as HTMLDetailsElement | null;
       if (!menu?.classList.contains("menu")) return;
+      if (menu.open) {
+        // 同时只留一个展开：否则相邻卡片的浮层会互相叠住
+        body.querySelectorAll<HTMLDetailsElement>(".menu[open]").forEach((other) => {
+          if (other !== menu) other.open = false;
+        });
+      }
       const card = menu.closest(".mcard");
       card?.classList.toggle("mcard--menu-open", menu.open);
+      const panel = menu.querySelector<HTMLElement>(".menu-body");
       if (!menu.open) {
         menu.removeAttribute("data-dir");
+        if (panel) panel.style.maxHeight = "";
         return;
       }
       const summary = menu.querySelector("summary");
-      const panel = menu.querySelector<HTMLElement>(".menu-body");
       if (!summary || !panel) return;
-      const above = summary.getBoundingClientRect().top;
-      const needed = Math.max(panel.offsetHeight, panel.getBoundingClientRect().height) + 8;
-      menu.dataset.dir = above < needed ? "down" : "up";
+      // 可用空间要按真正裁剪浮层的滚动容器算，不是按视口：列表整体在
+      // .pbody 里，卡片贴顶时上方空间看着有几百像素，实际全是容器外。
+      const clip = clipRect(menu);
+      const sr = summary.getBoundingClientRect();
+      const above = sr.top - clip.top - 8;
+      const below = clip.bottom - sr.bottom - 8;
+      const needed = panel.getBoundingClientRect().height;
+      const dir = above >= needed || above >= below ? "up" : "down";
+      menu.dataset.dir = dir;
+      // 两侧都放不下时收窄面板自身高度，让菜单项内部滚动而不是越出容器
+      const room = Math.max(120, Math.floor(dir === "up" ? above : below));
+      panel.style.maxHeight = room < needed ? `${room}px` : "";
     },
     true,
   );
+}
+
+function closeAllMenus(scope: HTMLElement): void {
+  scope.querySelectorAll<HTMLDetailsElement>(".menu[open]").forEach((menu) => {
+    menu.open = false;
+  });
+}
+
+/**
+ * 找到会裁剪浮层的最近滚动容器。没有滚动祖先时退回视口。
+ */
+function clipRect(node: HTMLElement): { top: number; bottom: number } {
+  for (let el = node.parentElement; el; el = el.parentElement) {
+    const style = getComputedStyle(el);
+    if (style.overflowY !== "visible" || style.overflowX !== "visible") {
+      const rect = el.getBoundingClientRect();
+      return { top: rect.top, bottom: rect.bottom };
+    }
+  }
+  return { top: 0, bottom: window.innerHeight };
 }
 
 /**
