@@ -368,6 +368,8 @@ export interface ScanCandidate {
   category: string;
   signed: boolean;
   registered: boolean;
+  /** 清单不符合 module-v2 契约时的原因；有值就不该给登记按钮。 */
+  problem: string | null;
 }
 
 /** 在给定目录下扫描含 manifest 的模块（自身 + 一层子目录）。 */

@@ -40,10 +40,12 @@ const dirState: {
   candidates: ScanCandidate[];
   /** 扫描或登记的结果说明；空串表示还没做过动作。 */
   note: string;
+  busy: boolean;
 } = {
   root: "",
   candidates: [],
   note: "",
+  busy: false,
 };
 
 const pkgState: {
@@ -102,8 +104,8 @@ function renderBody(body: HTMLElement): void {
       <div class="toolbar" style="margin-bottom:0">
         <input id="import-root" class="input grow" type="text" spellcheck="false"
                placeholder="例如 E:\\Dounai-ai\\OmniNexus" value="${esc(dirState.root)}" />
-        <button class="btn" type="button" data-act="scan">扫描目录</button>
-        <button class="btn btn--primary" type="button" data-act="add">登记目录</button>
+        <button class="btn" type="button" data-act="scan" ${dirState.busy ? "disabled" : ""}>扫描目录</button>
+        <button class="btn btn--primary" type="button" data-act="add" ${dirState.busy ? "disabled" : ""}>登记目录</button>
       </div>
       <div class="cap">扫描会读取该目录和它下面一层子目录，找出含 <code>manifest.json</code> 的模块。模型权重（.gguf、.safetensors）不是模块，扫描不会列出。</div>
       ${
@@ -467,7 +469,13 @@ function renderResult(): void {
     return;
   }
 
-  const pending = dirState.candidates.filter((item) => !item.registered);
+  const pending = dirState.candidates.filter(
+    (item) => !item.registered && !item.problem,
+  );
+  const blocked = dirState.candidates.filter(
+    (item) => !item.registered && item.problem,
+  );
+  const locked = dirState.busy ? "disabled" : "";
   const rows = dirState.candidates
     .map(
       (item) => `
@@ -476,25 +484,28 @@ function renderResult(): void {
         <span class="v">${esc(item.name)}</span>
         <span class="cap">${esc(item.module_id)} · ${esc(item.version)}</span>
         <span class="sp"></span>
-        <span class="chip ${item.signed ? "chip--run" : "chip--warn"}">${item.signed ? "已签名" : "未签名"}</span>
+        <span class="chip ${item.problem ? "chip--fail" : item.signed ? "chip--run" : "chip--warn"}">${item.problem ? "清单不兼容" : item.signed ? "已签名" : "未签名"}</span>
         <span class="cap" style="max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(item.path)}</span>
         ${
           item.registered
-            ? `<button class="btn btn--sm btn--quiet" type="button" data-act="unlink" data-id="${esc(item.module_id)}">解除登记</button>`
-            : `<button class="btn btn--sm" type="button" data-act="add-path" data-path="${esc(item.path)}">登记</button>`
+            ? `<button class="btn btn--sm btn--quiet" type="button" data-act="unlink" data-id="${esc(item.module_id)}" ${locked}>解除登记</button>`
+            : item.problem
+              ? `<button class="btn btn--sm" type="button" disabled>不可登记</button>`
+              : `<button class="btn btn--sm" type="button" data-act="add-path" data-path="${esc(item.path)}" ${locked}>登记</button>`
         }
       </div>
+      ${item.problem ? `<div class="cap" style="margin:2px 0 8px">${esc(item.problem)}</div>` : ""}
     `,
     )
     .join("");
 
   host.innerHTML = `
     <div class="toolbar">
-      <span class="cap" style="margin:0">找到 ${dirState.candidates.length} 个候选，${pending.length} 个未登记。</span>
+      <span class="cap" style="margin:0">找到 ${dirState.candidates.length} 个候选，${pending.length} 个可登记${blocked.length > 0 ? `，${blocked.length} 个清单不兼容` : ""}。</span>
       <span class="sp"></span>
       ${
         pending.length > 0
-          ? `<button class="btn btn--primary btn--sm" type="button" data-act="bulk-add">全部登记（${pending.length}）</button>`
+          ? `<button class="btn btn--primary btn--sm" type="button" data-act="bulk-add" ${locked}>全部登记（${pending.length}）</button>`
           : ""
       }
     </div>
@@ -503,13 +514,27 @@ function renderResult(): void {
   `;
 }
 
+/** 忙碌时锁住本页的目录按钮，并立刻把提示画出来。命令已不占主线程，界面刷得动。 */
+function setDirBusy(busy: boolean): void {
+  dirState.busy = busy;
+  for (const act of ["scan", "add", "add-path", "bulk-add"]) {
+    document
+      .querySelectorAll<HTMLButtonElement>(`button[data-act="${act}"]`)
+      .forEach((button) => {
+        button.disabled = busy;
+      });
+  }
+  renderResult();
+}
+
 async function scan(): Promise<void> {
+  if (dirState.busy) return;
   if (!dirState.root.trim()) {
     toast("先填一个目录路径再扫描", "error");
     return;
   }
   dirState.note = "正在扫描…";
-  renderResult();
+  setDirBusy(true);
   try {
     dirState.candidates = await scanLocalModules(dirState.root.trim());
     dirState.note =
@@ -521,15 +546,18 @@ async function scan(): Promise<void> {
     dirState.note = `扫描失败：${describeError(error)}。确认路径存在并且可以读取。`;
     toast("扫描失败，原因见列表上方说明", "error");
   } finally {
-    renderResult();
+    setDirBusy(false);
   }
 }
 
 async function addOne(path: string): Promise<void> {
+  if (dirState.busy) return;
   if (!path.trim()) {
     toast("先填一个目录路径再登记", "error");
     return;
   }
+  dirState.note = "正在登记…";
+  setDirBusy(true);
   try {
     const view = await addLocalModule(path.trim());
     toast(`已登记 ${view.module_id}`, "ok");
@@ -539,15 +567,22 @@ async function addOne(path: string): Promise<void> {
     const reason = describeError(error).replace(/。$/, "");
     dirState.note = reason.includes("未开启")
       ? `登记失败：${reason}。点这一节里的「开启本地目录登记」再试。`
-      : `登记失败：${reason}。确认这个目录里有 manifest.json，并且当前账号可以读取。`;
+      : `登记失败：${reason}`;
     renderResult();
     toast("登记失败，原因见列表上方说明", "error");
+  } finally {
+    setDirBusy(false);
   }
 }
 
 async function addAllPending(): Promise<void> {
-  const paths = dirState.candidates.filter((item) => !item.registered).map((item) => item.path);
+  if (dirState.busy) return;
+  const paths = dirState.candidates
+    .filter((item) => !item.registered && !item.problem)
+    .map((item) => item.path);
   if (paths.length === 0) return;
+  dirState.note = `正在登记 ${paths.length} 个目录…`;
+  setDirBusy(true);
   try {
     const results = await addLocalModulesBulk(paths);
     const failed = results.filter((item) => !item.ok);
@@ -562,6 +597,8 @@ async function addAllPending(): Promise<void> {
     dirState.note = `批量登记失败：${describeError(error)}`;
     renderResult();
     toast("批量登记失败，原因见列表上方说明", "error");
+  } finally {
+    setDirBusy(false);
   }
 }
 

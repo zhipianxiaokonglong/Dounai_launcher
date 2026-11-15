@@ -396,8 +396,11 @@ impl AppStateV2 {
 
     pub fn set_close_behavior(&self, behavior: CloseBehavior) -> Result<CloseBehavior, String> {
         let mut guard = lock(&self.close_behavior);
-        launcher_core::state::write_json(&self.close_behavior_path(), &ClosePolicyFile { behavior })
-            .map_err(|e| format!("保存关闭行为失败：{e}"))?;
+        launcher_core::state::write_json(
+            &self.close_behavior_path(),
+            &ClosePolicyFile { behavior },
+        )
+        .map_err(|e| format!("保存关闭行为失败：{e}"))?;
         *guard = behavior;
         Ok(behavior)
     }

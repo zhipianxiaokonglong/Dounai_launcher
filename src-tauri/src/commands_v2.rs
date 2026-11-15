@@ -236,6 +236,8 @@ pub struct ScanCandidate {
     pub category: String,
     pub signed: bool,
     pub registered: bool,
+    /// 清单过不了 module-v2 契约时的原因。有值的候选不提供登记按钮。
+    pub problem: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2424,6 +2426,69 @@ fn find_manifest(dir: &Path) -> Option<PathBuf> {
         .find(|p| p.exists())
 }
 
+/// 扫描与登记共用的一把尺子。只看 module_id 会把旧版 v1 清单列成「可登记」，
+/// 用户点下去才收到 serde 的 `missing field pubkey`，还以为文件没读到。
+fn read_dir_manifest(dir: &Path) -> Result<PackageManifest, String> {
+    let path = find_manifest(dir).ok_or_else(|| {
+        format!(
+            "目录里没有 manifest.json 或 dounai-manifest.json：{}",
+            dir.display()
+        )
+    })?;
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
+    parse_dir_manifest(&text)
+}
+
+/// 把 JSON 解析错误翻成人能行动的话。契约规定不读 v1、不设兼容层，
+/// 所以旧版清单要点破代际，签名段少字段要说明怎么改，而不是丢英文原文。
+fn parse_dir_manifest(text: &str) -> Result<PackageManifest, String> {
+    let raw: serde_json::Value =
+        serde_json::from_str(text).map_err(|e| format!("manifest.json 不是合法 JSON：{e}"))?;
+    if raw.get("schema_version").and_then(|v| v.as_u64()) != Some(2) {
+        return Err("这是旧版 v1 manifest（缺 schema_version: 2）。启动器只登记 module-v2 契约的源码目录，不设兼容层，请换成带 module-v2 清单的目录。".into());
+    }
+    let required = [
+        "module_id",
+        "name",
+        "version",
+        "variant",
+        "role",
+        "category",
+        "publisher",
+        "requires",
+        "entry",
+        "ports",
+        "permissions",
+        "files",
+    ];
+    let missing: Vec<&str> = required
+        .iter()
+        .copied()
+        .filter(|key| raw.get(key).is_none())
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "manifest 缺 module-v2 必需字段：{}。按 contracts/module-v2.schema.json 补齐后重试。",
+            missing.join("、")
+        ));
+    }
+    if let Some(signature) = raw.get("signature").filter(|v| v.is_object()) {
+        let missing: Vec<&str> = ["algo", "pubkey", "key_id", "signed_at", "value"]
+            .iter()
+            .copied()
+            .filter(|key| signature.get(key).is_none())
+            .collect();
+        if !missing.is_empty() {
+            return Err(format!(
+                "签名段不完整（缺 {}）。未签名的目录请把 signature 写成 null。",
+                missing.join("、")
+            ));
+        }
+    }
+    PackageManifest::parse(text).map_err(|e| e.to_string())
+}
+
 fn scan_dirs(
     root: &Path,
     out: &mut Vec<PathBuf>,
@@ -2461,7 +2526,9 @@ fn scan_dirs(
     }
 }
 
-#[tauri::command]
+// 扫描目录、算源码快照哈希都是同步文件 IO。同步 command 会跑在主线程上，
+// 几秒的哈希期间整个界面点不动；标 async 后放进运行时线程池。
+#[tauri::command(async)]
 pub fn scan_local_modules(
     state: State<'_, AppStateV2>,
     root: String,
@@ -2517,6 +2584,7 @@ pub fn scan_local_modules(
                 .map(|v| !v.trim().is_empty())
                 .unwrap_or(false),
             registered: !state.instances_for_module(module_id).is_empty(),
+            problem: parse_dir_manifest(&text).err(),
         });
     }
     out.sort_by(|a, b| a.module_id.cmp(&b.module_id));
@@ -2547,11 +2615,7 @@ fn add_local_dir(state: &AppStateV2, raw_path: &str) -> Result<ModuleView, Strin
     )
     .map_err(|e| e.to_string())?;
 
-    let manifest_path = find_manifest(&canonical)
-        .ok_or_else(|| format!("目录缺少 manifest.json：{}", canonical.display()))?;
-    let text =
-        std::fs::read_to_string(&manifest_path).map_err(|e| format!("读取 manifest 失败：{e}"))?;
-    let manifest = PackageManifest::parse(&text).map_err(|e| e.to_string())?;
+    let manifest = read_dir_manifest(&canonical)?;
     let _runtime = runtime_manifest(&manifest.raw)?;
 
     let observed = observe_source(&canonical, &AppStateV2::now()).map_err(|e| e.to_string())?;
@@ -2614,7 +2678,7 @@ fn add_local_dir(state: &AppStateV2, raw_path: &str) -> Result<ModuleView, Strin
     Ok(view)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn add_local_module(
     state: State<'_, AppStateV2>,
     supervisor: State<'_, Supervisor>,
@@ -2632,7 +2696,7 @@ pub fn add_local_module(
     Ok(view)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn add_local_modules_bulk(
     state: State<'_, AppStateV2>,
     request: BulkAddLocalModulesRequest,
@@ -2683,7 +2747,7 @@ pub fn remove_local_module(
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn confirm_local_source(
     instance_id: String,
     state: State<'_, AppStateV2>,
@@ -3827,6 +3891,63 @@ pub async fn stop_chain(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn unsigned_v2_manifest() -> serde_json::Value {
+        json!({
+            "schema_version": 2,
+            "module_id": "dounai/demo",
+            "name": "demo",
+            "version": "0.1.0",
+            "variant": "stable",
+            "role": "input",
+            "category": "optional",
+            "publisher": { "id": "dounai", "name": "Dounai" },
+            "requires": { "launcher": ">=0.4.0" },
+            "entry": { "command": "{venv_python} -m demo serve" },
+            "ports": [8101],
+            "permissions": { "network": [], "filesystem": [], "devices": [] },
+            "files": {},
+            "runtime": {
+                "python": ">=3.11",
+                "venv": "{instance_venv}",
+                "deps": { "kind": "uv_lock", "path": "uv.lock" }
+            },
+            "signature": null
+        })
+    }
+
+    #[test]
+    fn v1_manifest_is_told_apart_from_a_missing_file() {
+        // 上游五仓的清单：没有 schema_version，签名段只有 algo 与 value。
+        let v1 = json!({
+            "module_id": "dounai-input",
+            "name": "输入接入层",
+            "version": "0.2.0",
+            "signature": { "algo": "SHA-256 + Ed25519", "value": "" }
+        });
+        let error = parse_dir_manifest(&v1.to_string()).unwrap_err();
+        assert!(error.contains("旧版 v1 manifest"), "{error}");
+        assert!(error.contains("module-v2"), "{error}");
+        assert!(!error.contains("missing field"), "{error}");
+    }
+
+    #[test]
+    fn incomplete_signature_names_the_missing_field() {
+        let mut manifest = unsigned_v2_manifest();
+        manifest["signature"] = json!({ "algo": "Ed25519", "value": "" });
+        let error = parse_dir_manifest(&manifest.to_string()).unwrap_err();
+        assert!(error.contains("签名段不完整"), "{error}");
+        assert!(error.contains("pubkey"), "{error}");
+        assert!(!error.contains("missing field"), "{error}");
+    }
+
+    #[test]
+    fn unsigned_module_v2_manifest_is_registerable() {
+        let manifest = parse_dir_manifest(&unsigned_v2_manifest().to_string()).unwrap();
+        assert_eq!(manifest.module_id, "dounai/demo");
+        assert!(!manifest.is_signed());
+    }
 
     #[test]
     fn run_views_match_v1_wire_format() {
