@@ -9,6 +9,7 @@
 
 import {
   isDesktop,
+  instanceUsage,
   listInstanceViews,
   probeEnvironmentCmd,
   onboardingState,
@@ -18,11 +19,14 @@ import {
   BridgeUnavailableError,
   type EnvPhaseName,
   type EnvProgressEvent,
+  type InstanceUsage,
   type OnboardingState,
   type InstanceRuntimeView,
   type RustEnvReport,
   type SettingsSnapshot,
   type TrustInfo,
+  type UsageSnapshot,
+  type UsageTotals,
 } from "../bridge.js";
 
 /**
@@ -55,6 +59,12 @@ export interface Store {
   devMode: boolean;
   /** 依赖安装的进行中/失败状态，按 instance_id 存。 */
   envJobs: Record<string, EnvJob>;
+  /**
+   * M7 资源占用：后端每 2 秒推一次全量快照。
+   *
+   * 不存在 store 里另做一份合并：这份就是后端给的原样，界面只读不推。
+   */
+  usage: UsageSnapshot | null;
 }
 
 export const store: Store = {
@@ -66,6 +76,7 @@ export const store: Store = {
   onboarding: null,
   devMode: false,
   envJobs: {},
+  usage: null,
 };
 
 /** 桥接错误的可读文案。 */
@@ -120,6 +131,20 @@ export async function refreshDevMode(): Promise<void> {
   } catch {
     store.devMode = false;
   }
+}
+
+/**
+ * 取一次占用快照。
+ *
+ * 采样由后端线程按 2 秒推进，这里只是读当前值：进页时用一次，之后靠
+ * `usage-updated` 推送。浏览器模式清空，界面写「—」而不是假数字。
+ */
+export async function refreshUsage(): Promise<void> {
+  if (!isDesktop()) {
+    store.usage = null;
+    return;
+  }
+  store.usage = await instanceUsage();
 }
 
 /* ------------------------------------------------------------------ */
@@ -197,6 +222,46 @@ export function runCounts(): RunCounts {
     }
   }
   return { running, starting, failed, external, total: store.views.length };
+}
+
+/* ------------------------------------------------------------------ */
+/* 资源占用（M7）                                                      */
+/* ------------------------------------------------------------------ */
+
+/** 收到一轮全量快照。覆盖式写入，不合并：后端每次给的都是完整状态。 */
+export function applyUsage(snapshot: UsageSnapshot): void {
+  store.usage = snapshot;
+}
+
+export function usageOf(instanceId: string): InstanceUsage | null {
+  return store.usage?.items.find((item) => item.instance_id === instanceId) ?? null;
+}
+
+/** 合计；没有任何实例有读数时为 null，界面据此整段省略。 */
+export function usageTotals(): UsageTotals | null {
+  const snapshot = store.usage;
+  if (!snapshot || snapshot.totals.instances === 0) return null;
+  return snapshot.totals;
+}
+
+/**
+ * 字节数转人读单位。
+ *
+ * `null` 表示读不到（外部实例、首轮），显示「—」。这里不把 null 当 0：
+ * 「读不到」和「真的是 0」是两件事，写 0 会让人以为进程刚起来没占内存。
+ */
+export function formatBytes(bytes: number | null): string {
+  if (bytes === null) return "—";
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  if (bytes < 1024 ** 3) {
+    return `${(bytes / 1024 ** 2).toFixed(bytes < 10 * 1024 ** 2 ? 1 : 0)} MB`;
+  }
+  return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+}
+
+export function formatPercent(value: number | null): string {
+  if (value === null) return "—";
+  return value < 10 ? `${value.toFixed(1)}%` : `${Math.round(value)}%`;
 }
 
 /* ------------------------------------------------------------------ */

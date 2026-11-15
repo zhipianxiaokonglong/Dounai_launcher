@@ -3,26 +3,31 @@
  * 各实例的进程与资源、环境与最近改了什么。
  *
  * 这里不做任何推算：实例与端口来自 `listInstanceViews`，环境来自
- * `probe_environment`，「最近活动」只按 `installed_at` 与本次环境自检时间
- * 排序。没有采样就没有数字——CPU 与内存两列留空并写明未接入，
- * 比填一个假装是实时的 0% 要好。
+ * `probe_environment`，占用来自后端 2 秒一轮的采样，「最近活动」只按
+ * `installed_at` 与本次环境自检时间排序。没有读数就写「—」，不填 0。
  */
 
 import { isDesktop, type InstanceRuntimeView, type Role } from "../../bridge.js";
 import { bindActions, clear, esc, toast } from "../dom.js";
 import { icon } from "../icons.js";
 import { DATA_PLANE, ROLE_ORDER, ROLE_TAG, ROLE_TITLE } from "../roles.js";
+import { sparklineSvg } from "../spark.js";
 import {
   describeError,
+  formatBytes,
+  formatPercent,
   hasLiveProcess,
   installedModuleIds,
   isExternal,
   isRunning,
   moduleName,
   refreshEnv,
+  refreshUsage,
   refreshViews,
   runCounts,
   store,
+  usageOf,
+  usageTotals,
 } from "../store.js";
 import { startEverything, stopEverything } from "../bulk.js";
 
@@ -239,7 +244,7 @@ function lowerHtml(): string {
       <section class="sec sec--res">
         <div class="sec-head">
           <h3>资源占用</h3>
-          <span class="hint">进程采样 · 按实例 PID</span>
+          <span class="hint">2 秒一轮 · 每实例 2 分钟</span>
           <span class="line"></span>
         </div>
         ${resTableHtml()}
@@ -258,50 +263,96 @@ function resTableHtml(): string {
     return `
       <div class="res">
         <div class="res-head">
-          <span>实例</span><span>状态</span><span>CPU</span><span title="私有工作集">内存</span><span class="th-r">进程</span>
+          <span>实例</span><span>状态</span><span>CPU</span><span title="工作集，含共享页">内存</span><span class="th-r">进程</span>
         </div>
-        <div class="res-empty">还没有实例。装好模块后这里按实例列出进程与占用。</div>
-        <div class="res-foot"><span>采样未接入，CPU 与内存列已预留</span></div>
+        <div class="res-empty">还没有实例。装好模块后这里按实例列出占用。</div>
       </div>
     `;
   }
 
-  const body = rows
+  return `
+    <div class="res">
+      <div class="res-head">
+        <span>实例</span><span>状态</span><span>CPU</span><span title="工作集，含共享页">内存</span><span class="th-r">进程</span>
+      </div>
+      <div data-res-rows>${resRowsHtml(rows)}</div>
+      <div class="res-foot" data-res-foot>${resFootHtml()}</div>
+    </div>
+  `;
+}
+
+/** 资源表的行体。采样推送时只重建这一段。 */
+function resRowsHtml(rows: InstanceRuntimeView[] = orderedViews()): string {
+  return rows
     .map((view) => {
       const live = hasLiveProcess(view);
+      const usage = usageOf(view.instance.instance_id);
       const pid = view.snapshot?.pid;
+      // 外部实例根本没有 pid，也就没有 Job；不是「还没采到」，是采不到。
+      const hint = isExternal(view)
+        ? "外部启动的进程不在 Job 内，启动器不采样"
+        : "没有读数：首轮没有差分基准，或这个进程读不到";
       return `
-        <div class="res-row ${isRunning(view) ? "" : "is-idle"}" style="--role: var(--role-${roleKey(
-          view.instance.role,
-        )})">
+        <div class="res-row ${isRunning(view) ? "" : "is-idle"}" data-res-row="${esc(view.instance.instance_id)}" style="--role: var(--role-${roleKey(view.instance.role)})">
           <span class="res-name">
             <span class="dot"></span>
             <b>${esc(moduleName(view.instance.module_id))}</b>
             ${resStateChip(view)}
           </span>
-          <span class="res-na" title="CPU 采样尚未接入">—</span>
-          <span class="res-na" title="内存采样尚未接入">—</span>
-          <span class="res-pid">${live && typeof pid === "number" ? `pid ${pid}` : "—"}</span>
+          <span class="res-gauge" title="${esc(hint)}">
+            ${sparklineSvg((usage?.points ?? []).map((point) => point.cpu_percent))}
+            <span class="val">${esc(formatPercent(usage?.cpu_percent ?? null))}</span>
+          </span>
+          <span class="res-gauge" title="工作集，含共享页；与任务管理器同口径">
+            ${sparklineSvg((usage?.points ?? []).map((point) => point.working_set_bytes))}
+            <span class="val">${esc(formatBytes(usage?.working_set_bytes ?? null))}</span>
+          </span>
+          <span class="res-pid">${live ? procCell(pid, usage?.process_count ?? null) : "—"}</span>
         </div>
       `;
     })
     .join("");
+}
 
-  const withPid = rows.filter((view) => typeof view.snapshot?.pid === "number").length;
+/** 进程列：根进程 pid + 整棵树的数量。数量读不到时只给 pid。 */
+function procCell(pid: number | null | undefined, count: number | null): string {
+  const head = typeof pid === "number" ? `pid ${pid}` : "—";
+  return count === null ? head : `${head} · ${count}`;
+}
 
+function resFootHtml(): string {
+  const totals = usageTotals();
+  if (!totals) {
+    return `<span>还没有运行中的实例</span>`;
+  }
   return `
-    <div class="res">
-      <div class="res-head">
-        <span>实例</span><span>状态</span><span>CPU</span><span title="私有工作集">内存</span><span class="th-r">进程</span>
-      </div>
-      ${body}
-      <div class="res-foot">
-        <span>采样未接入，CPU 与内存列已预留</span>
-        <span class="sp"></span>
-        <span>${rows.length} 实例 · ${withPid} 有进程</span>
-      </div>
-    </div>
+    <span>${totals.instances} 实例 · ${totals.processes} 进程</span>
+    <span class="sp"></span>
+    <span>${esc(formatBytes(totals.working_set_bytes))} · cpu ${esc(formatPercent(totals.cpu_percent))}</span>
+    <span>·</span>
+    <span>${esc(sampledAgo())}</span>
   `;
+}
+
+/** 相对时间用采样的时间戳算，不按本地轮次反推。 */
+function sampledAgo(): string {
+  const at = store.usage?.at_ms;
+  if (!at) return "无采样";
+  const seconds = Math.max(0, Math.round((Date.now() - at) / 1000));
+  return seconds < 2 ? "刚刚" : `${seconds} 秒前`;
+}
+
+/**
+ * 采样推送到达时只刷资源表。
+ *
+ * 不整页重绘：概览页有滚动位置，每 2 秒重建一次 DOM 会把正在看的那行
+ * 与 hover 状态一起抹掉。
+ */
+export function patchHomeUsage(): void {
+  const rows = document.querySelector("[data-res-rows]");
+  if (rows) rows.innerHTML = resRowsHtml();
+  const foot = document.querySelector("[data-res-foot]");
+  if (foot) foot.innerHTML = resFootHtml();
 }
 
 function resStateChip(view: InstanceRuntimeView): string {
@@ -499,6 +550,8 @@ export async function refreshHome(): Promise<void> {
     toast(`读取实例状态失败：${describeError(error)}。稍后重试，或重启启动器。`, "error");
     return;
   }
+  // 占用只是附加信息：拉不到就沿用上一份快照，不因此挡住整页渲染。
+  await refreshUsage().catch(() => undefined);
   const body = document.getElementById("pbody");
   const head = document.getElementById("phead");
   if (body && head && body.dataset.view === "home") {

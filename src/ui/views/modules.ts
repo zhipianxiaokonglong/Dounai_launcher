@@ -17,6 +17,7 @@ import {
   confirmLocalSource,
   prepareInstanceEnv,
   type InstanceRuntimeView,
+  type InstanceUsage,
   type Role,
 } from "../../bridge.js";
 import {
@@ -34,6 +35,8 @@ import {
   describeError,
   endEnvJob,
   envJobOf,
+  formatBytes,
+  formatPercent,
   hasLiveProcess,
   isExternal,
   isRunning,
@@ -41,6 +44,7 @@ import {
   refreshViews,
   runCounts,
   store,
+  usageOf,
   type EnvJob,
 } from "../store.js";
 import {
@@ -263,11 +267,12 @@ function buildCard(moduleId: string, views: InstanceRuntimeView[]): HTMLElement 
   else if (unverified) meta.push('<span class="warn">未验证</span>');
 
   const desc = viewDescription(views[0], role);
+  const facts = moduleFacts(views);
 
   card.innerHTML = `
     <div class="mcard-left">
       <div class="mcard-main">
-        <span class="mcard-ico" aria-hidden="true">${roleIcon(role, 14)}</span>
+        <span class="mcard-ico" aria-hidden="true">${roleIcon(role, 17)}</span>
         <div class="mcard-title">
           <div class="mcard-name">
             <b title="${esc(moduleName(moduleId))}">${esc(moduleName(moduleId))}</b>
@@ -275,6 +280,7 @@ function buildCard(moduleId: string, views: InstanceRuntimeView[]): HTMLElement 
           </div>
           <p class="mcard-desc">${esc(desc)}</p>
           <div class="mcard-meta">${meta.join("")}</div>
+          ${facts.length > 0 ? `<div class="mcard-facts">${facts.map((fact) => `<span>${esc(fact)}</span>`).join("<em>·</em>")}</div>` : ""}
         </div>
       </div>
       <div class="mcard-acts"></div>
@@ -291,6 +297,36 @@ function buildCard(moduleId: string, views: InstanceRuntimeView[]): HTMLElement 
   if (foot) foot.innerHTML = cardFootHtml(moduleId, views);
 
   return card;
+}
+
+/**
+ * 卡片左栏的事实条：安装时长、判级、依赖状态。
+ *
+ * 三项都取自实例本身，不另算一份。取 active 那个实例与版本号、来源同一口径——
+ * 同一模块的两个实例安装时间可能不同，混着显示会自相矛盾。
+ */
+function moduleFacts(views: InstanceRuntimeView[]): string[] {
+  const counter = views.find((view) => view.active) ?? views[0];
+  if (!counter) return [];
+  const facts: string[] = [];
+  const ago = installedAgo(counter.instance.installed_at);
+  if (ago) facts.push(ago);
+  facts.push(`判级 ${counter.instance.verdict}`);
+  // shell 不跑 Python，说「依赖已就绪」会让人以为它也会装 venv。
+  if (counter.instance.role === "shell") facts.push("不需要运行时");
+  else facts.push(counter.prepared ? "依赖已就绪" : "依赖未装");
+  return facts;
+}
+
+/** 「已装 3 天」这类相对时间；装到今天则精确到小时。 */
+function installedAgo(installedAt: string): string {
+  const at = Date.parse(installedAt);
+  if (Number.isNaN(at)) return "";
+  const elapsed = Math.max(0, Date.now() - at);
+  const hours = Math.floor(elapsed / 3_600_000);
+  if (hours < 1) return "刚装上";
+  if (hours < 24) return `已装 ${hours} 小时`;
+  return `已装 ${Math.floor(hours / 24)} 天`;
 }
 
 /** CSS 里的角色令牌后缀：auxiliary 的变量名短一截。 */
@@ -382,6 +418,7 @@ function buildInstanceBlock(view: InstanceRuntimeView): HTMLElement {
       <span class="mi-name" title="${esc(view.instance.instance_id)}">${esc(view.instance.instance_id)}</span>
       ${chips.join("")}
     </div>
+    ${usageRow(view)}
     <div class="mi-line">
       ${health}
       ${detail ? `<span class="mi-meta">${esc(detail)}</span>` : ""}
@@ -392,6 +429,45 @@ function buildInstanceBlock(view: InstanceRuntimeView): HTMLElement {
   `;
   paintEnvJob(block, view.instance.instance_id);
   return block;
+}
+
+/**
+ * 实例的资源占用行。
+ *
+ * 节点始终存在，没有读数时带 `hidden`：结构随读数出现/消失而变，patch 就得
+ * 重建 DOM，滚动位置与按钮焦点都会丢。
+ */
+function usageRow(view: InstanceRuntimeView): string {
+  const usage = usageOf(view.instance.instance_id);
+  const live = Boolean(usage && usage.working_set_bytes !== null);
+  const body = usage ? usageInner(usage) : "";
+  return `<div class="mi-usage" data-usage="${esc(view.instance.instance_id)}"${live ? "" : " hidden"}>${body}</div>`;
+}
+
+function usageInner(usage: InstanceUsage): string {
+  return `
+    <span>mem <b>${esc(formatBytes(usage.working_set_bytes))}</b></span>
+    <em>·</em>
+    <span>cpu <b>${esc(formatPercent(usage.cpu_percent))}</b></span>
+    <em>·</em>
+    <span><b>${usage.process_count ?? "—"}</b> proc</span>
+  `;
+}
+
+/** 采样推送到达时只改占用行，不重绘卡片。 */
+export function patchModuleUsage(): void {
+  for (const node of Array.from(document.querySelectorAll<HTMLElement>("[data-usage]"))) {
+    const id = node.dataset.usage;
+    if (!id) continue;
+    const usage = usageOf(id);
+    const live = Boolean(usage && usage.working_set_bytes !== null);
+    node.hidden = !live;
+    if (!live || !usage) {
+      node.innerHTML = "";
+      continue;
+    }
+    node.innerHTML = usageInner(usage);
+  }
 }
 
 /* ------------------------------------------------------------------ */

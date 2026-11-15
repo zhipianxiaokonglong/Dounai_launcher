@@ -827,6 +827,57 @@ export async function listInstanceViews(): Promise<InstanceRuntimeView[]> {
   return call<InstanceRuntimeView[]>("list_instance_views");
 }
 
+/* ------------------------------------------------------------------ */
+/* 资源占用（M7）                                                      */
+/* ------------------------------------------------------------------ */
+
+/** 一个采样点：CPU 百分比与整棵树的工作集。 */
+export interface UsagePoint {
+  cpu_percent: number | null;
+  working_set_bytes: number;
+}
+
+/**
+ * 单个实例的占用。
+ *
+ * 读不到时字段为 `null`（不是 0）：外部启动的实例不在 Job 里，启动器根本
+ * 采不到；首轮也没有差分基准。界面据此写「—」。
+ */
+export interface InstanceUsage {
+  instance_id: string;
+  cpu_percent: number | null;
+  working_set_bytes: number | null;
+  process_count: number | null;
+  pids: number[];
+  /** 旧 → 新，最多 60 点（2 分钟）。 */
+  points: UsagePoint[];
+}
+
+export interface UsageTotals {
+  instances: number;
+  processes: number;
+  working_set_bytes: number;
+  cpu_percent: number | null;
+}
+
+export interface UsageSnapshot {
+  at_ms: number;
+  totals: UsageTotals;
+  items: InstanceUsage[];
+}
+
+/** 只读当前快照。采样由后端线程按 2 秒推进，这里不触发新一轮。 */
+export async function instanceUsage(): Promise<UsageSnapshot> {
+  return call<UsageSnapshot>("instance_usage");
+}
+
+/** 订阅每轮采样的全量快照。 */
+export function onUsageUpdated(handler: (snapshot: UsageSnapshot) => void): () => void {
+  return listenEvent<UsageSnapshot>("usage-updated", (payload) => {
+    if (payload && Array.isArray(payload.items)) handler(payload);
+  });
+}
+
 export async function restartInstance(instanceId: string): Promise<RunView> {
   return call<RunView>("restart_instance", { instanceId });
 }

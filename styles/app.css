@@ -2747,41 +2747,32 @@ select.input:focus-visible {
   flex: 0 0 auto;
 }
 
+/* CPU 与内存两列：一条 52×14 的趋势线 + 右对齐的当前值。
+   线尾就是当前值，所以不再另画占比条——三样东西在 132px 里放不下。 */
 .res-gauge {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
   min-width: 0;
 }
 
-.res-gauge .bar {
-  flex: 1;
-  height: 4px;
-  border-radius: 2px;
-  background: var(--panel-3);
-  overflow: hidden;
-  min-width: 30px;
-}
-
-.res-gauge .bar i {
-  display: block;
-  height: 100%;
-  border-radius: 2px;
-  background: var(--role, var(--accent));
-  opacity: 0.72;
+.res-gauge .spark {
+  flex: 0 0 52px;
+  color: var(--role, var(--accent));
+  opacity: 0.75;
 }
 
 .res-gauge .val {
-  flex: 0 0 auto;
-  min-width: 54px;
+  flex: 1 1 auto;
   text-align: right;
   font-family: var(--mono);
   font-size: 10.5px;
   color: var(--fg-2);
+  white-space: nowrap;
 }
 
-.res-row.is-idle .res-gauge .bar i {
-  opacity: 0.32;
+.res-row.is-idle .res-gauge .spark {
+  opacity: 0.28;
 }
 
 .res-row.is-idle .res-gauge .val {
@@ -2796,13 +2787,6 @@ select.input:focus-visible {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-/* 采样未接入的占位格：写「—」，不留一个看着像 0% 的空条 */
-.res-na {
-  font-family: var(--mono);
-  font-size: 10.5px;
-  color: var(--stop-weak);
 }
 
 .res-foot {
@@ -2926,9 +2910,9 @@ select.input:focus-visible {
 }
 
 .mcard-ico {
-  width: 26px;
-  height: 26px;
-  border-radius: 7px;
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
   flex: 0 0 auto;
   display: grid;
   place-items: center;
@@ -2959,14 +2943,14 @@ select.input:focus-visible {
 }
 
 .mcard-desc {
-  display: block;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
   margin: 3px 0 0;
   font-size: 11.5px;
   color: var(--fg-2);
   line-height: 1.5;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .mcard-meta {
@@ -2987,6 +2971,23 @@ select.input:focus-visible {
 
 .mcard-meta .warn {
   color: var(--warn-fg);
+}
+
+/* 事实条：安装时长、判级、依赖状态。填的是左栏本来空着的那一段 */
+.mcard-facts {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--fg-3);
+}
+
+.mcard-facts em {
+  font-style: normal;
+  color: var(--stop-weak);
 }
 
 .mcard-acts {
@@ -3047,6 +3048,33 @@ select.input:focus-visible {
   font-size: 10px;
   color: var(--fg-3);
   white-space: nowrap;
+}
+
+/* 实例的资源占用：一行等宽小字，跟着身份信息所在的那一列走 */
+.mi-usage {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--fg-3);
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+/* `[hidden]` 的 UA 样式是 display:none，会被上面的 flex 覆盖 */
+.mi-usage[hidden] {
+  display: none;
+}
+
+.mi-usage b {
+  font-weight: 500;
+  color: var(--fg-2);
+}
+
+.mi-usage em {
+  font-style: normal;
+  color: var(--stop-weak);
 }
 
 /* ================================================================

@@ -11,27 +11,38 @@ import {
   isDesktop,
   onEnvProgress,
   onLifecycleChanged,
+  onUsageUpdated,
 } from "../bridge.js";
 import { esc, must, toast } from "./dom.js";
 import { initTheme } from "./theme.js";
 import {
   applyEnvProgress,
+  applyUsage,
   describeError,
+  formatBytes,
+  formatPercent,
   refreshDevMode,
   refreshEnv,
   refreshSettings,
+  refreshUsage,
   refreshViews,
   runCounts,
   store,
+  usageTotals,
 } from "./store.js";
 import { adminLifecycleChanged, disposeAdmin, renderAdmin } from "./views/admin.js";
 import { renderChains } from "./views/chains.js";
 import { renderEnv } from "./views/env.js";
 import { renderDownload } from "./views/download.js";
-import { refreshHome, renderHome } from "./views/home.js";
+import { patchHomeUsage, refreshHome, renderHome } from "./views/home.js";
 import { renderImport } from "./views/import.js";
 import { disposeLogs, focusInstance, renderLogs } from "./views/logs.js";
-import { patchEnvJob, refreshModules, renderModules } from "./views/modules.js";
+import {
+  patchEnvJob,
+  patchModuleUsage,
+  refreshModules,
+  renderModules,
+} from "./views/modules.js";
 import { renderSettings } from "./views/settings.js";
 import { startTour } from "./tour.js";
 
@@ -90,6 +101,8 @@ async function renderView(view: ViewId, arg?: string): Promise<void> {
         } catch (error) {
           toast(`读取实例状态失败：${describeError(error)}`, "error");
         }
+        // 占用只是附加信息，拉不到就沿用上一份快照（首屏时是空，写「—」）。
+        await refreshUsage().catch(() => undefined);
         renderHome(slots);
         break;
       case "modules":
@@ -101,6 +114,7 @@ async function renderView(view: ViewId, arg?: string): Promise<void> {
         } catch (error) {
           toast(`读取实例状态失败：${describeError(error)}`, "error");
         }
+        await refreshUsage().catch(() => undefined);
         renderModules(slots);
         break;
       case "download":
@@ -146,6 +160,26 @@ function markNav(view: ViewId): void {
   });
 }
 
+/**
+ * 状态栏的占用合计。
+ *
+ * 只在有读数时出现：一个实例都没跑的时候写「内存 0 KB」只是噪音。
+ */
+function usageBits(): string {
+  const totals = usageTotals();
+  if (!totals) return "";
+  const parts = [`内存 ${formatBytes(totals.working_set_bytes)}`];
+  if (totals.cpu_percent !== null) parts.push(`cpu ${formatPercent(totals.cpu_percent)}`);
+  return parts.join(" · ");
+}
+
+/** 采样推送：只改当前页的占用数字与状态栏，不重绘整页。 */
+function applyUsageTick(): void {
+  updateChrome();
+  if (current === "home") patchHomeUsage();
+  else if (current === "modules") patchModuleUsage();
+}
+
 /** 导航计数与状态栏。任何会改变事实的动作之后都要调一次。 */
 function updateChrome(): void {
   const counts = runCounts();
@@ -160,6 +194,8 @@ function updateChrome(): void {
   if (counts.starting > 0) bits.push(`${counts.starting} 启动中`);
   if (counts.failed > 0) bits.push(`<span class="warn-text">${counts.failed} 需处理</span>`);
   if (counts.external > 0) bits.push(`${counts.external} 外部启动`);
+  const usage = usageBits();
+  if (usage) bits.push(usage);
 
   const env = store.env;
   if (env) {
@@ -325,6 +361,13 @@ function wireEvents(): void {
   });
 
   onLifecycleChanged(() => scheduleRefresh());
+
+  // 资源占用：后端每 2 秒推一次全量快照。只刷数字，不动结构——
+  // 这个频率下任何整页重绘都会让滚动位置和 hover 状态一直被打断。
+  onUsageUpdated((snapshot) => {
+    applyUsage(snapshot);
+    applyUsageTick();
+  });
 
   // 依赖安装进度：只改对应卡片上的那一行。整页重绘会把滚动位置、展开的菜单
   // 都打回原样，而这个事件在装包时每 150ms 就可能来一次。
