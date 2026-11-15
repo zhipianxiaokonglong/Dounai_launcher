@@ -842,27 +842,12 @@ code,
   }
 }
 
-.card-foot {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-  margin-top: auto;
-  padding-top: 2px;
-  flex-wrap: wrap;
-}
-
-.card-foot .sp {
-  margin-left: auto;
-}
-
 /* 更多动作：原生 details，点击外部由 JS 收起 */
 .menu {
   position: relative;
-}
-
-/* 卡片底栏里 ⋯ 要贴右：菜单面板是按它的右边缘向左展开的，
-   若它跟着「详情」靠左，面板会越出卡片左边界盖住正文。 */
-.card-foot .menu {
+  /* 面板按按钮右边缘向左展开。按钮必须贴在动作行最右，否则面板左边缘
+     会越出卡片被裁掉，菜单项只剩右半截。这里刻意不写父容器类名：早先
+     按 .card-foot 写的选择器从未命中，实际容器叫 .mcard-acts。 */
   margin-left: auto;
 }
 
@@ -900,6 +885,12 @@ code,
 /* 浅色主题下 0.35 的黑影太重，边界靠一圈实线更清楚。 */
 :root[data-theme="light"] .menu-body {
   box-shadow: 0 8px 22px rgba(15, 23, 42, 0.14);
+}
+
+/* 上方空间不够时由 toggle 处理标成 down，避免整块浮层被滚动容器上沿裁掉。 */
+.menu[data-dir="down"] .menu-body {
+  top: calc(100% + 4px);
+  bottom: auto;
 }
 
 .menu-body button {
@@ -2887,6 +2878,15 @@ select.input:focus-visible {
   overflow: hidden;
 }
 
+/* 菜单浮层要能越出卡片边界。只在菜单打开的那一张卡上解除裁剪，
+   其余卡片保持原样；同时抬层，浮层不会被后一张卡的背景盖住。
+   :has 走纯 CSS 立即生效，JS 的类名是不支持 :has 时的兜底。 */
+.mcard:has(.menu[open]),
+.mcard--menu-open {
+  overflow: visible;
+  z-index: 6;
+}
+
 /* 左边一条 role 色：扫一眼就知道这张卡属于哪一层 */
 .mcard::before {
   content: "";
@@ -2895,6 +2895,7 @@ select.input:focus-visible {
   top: 0;
   bottom: 0;
   width: 2px;
+  border-radius: var(--r-m) 0 0 var(--r-m);
   background: var(--role, var(--line-2));
   opacity: 0.85;
 }

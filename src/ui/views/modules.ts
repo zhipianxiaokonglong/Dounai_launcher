@@ -683,6 +683,30 @@ function bindBodyActions(body: HTMLElement): void {
       menu.open = false;
     });
   });
+
+  // details 的 toggle 不冒泡，只能捕获。菜单默认向上展开，上方空间不够时
+  // 改成向下，否则整块浮层会落在滚动容器上沿之外；同时把所在卡片抬层，
+  // 免得浮层被后一张卡的背景盖住。
+  body.addEventListener(
+    "toggle",
+    (event) => {
+      const menu = event.target as HTMLDetailsElement | null;
+      if (!menu?.classList.contains("menu")) return;
+      const card = menu.closest(".mcard");
+      card?.classList.toggle("mcard--menu-open", menu.open);
+      if (!menu.open) {
+        menu.removeAttribute("data-dir");
+        return;
+      }
+      const summary = menu.querySelector("summary");
+      const panel = menu.querySelector<HTMLElement>(".menu-body");
+      if (!summary || !panel) return;
+      const above = summary.getBoundingClientRect().top;
+      const needed = Math.max(panel.offsetHeight, panel.getBoundingClientRect().height) + 8;
+      menu.dataset.dir = above < needed ? "down" : "up";
+    },
+    true,
+  );
 }
 
 /**
