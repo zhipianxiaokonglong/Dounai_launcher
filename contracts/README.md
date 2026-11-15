@@ -2,7 +2,7 @@
 
 启动器 v2 的角色、包格式与本地状态以本目录为单一真源。Rust 侧类型定义、跨仓一致性 CI 与发布工具都以这里的文件为准。修改任一文件后，先运行校验，再同步依赖这些文件的代码与样例。
 
-**契约在正式完工前不冻结。** M0 那次「先冻结再实现」让后续每个阶段都在为早期形状擦屁股；现在按需要直接改字段，不叠加兼容分支、不为改一个字段升文件名版本号。文件名里的 `v1`/`v2` 只标识格式代次，不表示已冻结。唯一约束是改完必须同步校验器、CI、样例、Rust 类型与文档，不允许只改一半。
+**契约在正式完工前不冻结。** M0 那次“先冻结再实现”让后续每个阶段都在为早期形状擦屁股；现在按需要直接改字段，不叠加兼容分支、不为改一个字段升文件名版本号。文件名里的 `v1`/`v2` 只标识格式代次，不表示已冻结。唯一约束是改完必须同步校验器、CI、样例、Rust 类型与文档，不允许只改一半。
 
 ## 文件
 
@@ -43,14 +43,14 @@
 
 | 时机 | 行为 |
 |---|---|
-| 安装（在线目录 / 本地 zip） | 槽为空就把刚装的这个实例设为 active，`InstallResponse.activated` 回传它的 ID |
+| 安装（在线目录 / 本地 zip） | 槽为空就把刚装的这个实例设为 active，`InstallResponse.activated` 回传该实例的 ID |
 | 导入本地目录 | 同上。用户亲手指定的目录等同于一次显式指名，C 类也允许上位 |
 | 卸载或解除登记 | 卸掉的若是 active，按 `instance_id` 字典序补一个同 role 的实例 |
 | 启动器启动 | 扫一遍 `input`/`llm`/`output`，把历史遗留的空槽一次性补上 |
 
-槽已占用时新装的实例不动槽位，退居备用实例，由用户在卡片菜单里显式切换。`C` 类签名包不享受安装时的自动上位——用户对它的确认针对的是“安装”，不是“让它接管链路”；只有亲手挑的本地目录算显式指名。
+槽已占用时新装的实例不动槽位，退居备用实例，由用户在卡片菜单里显式切换。`C` 类签名包不享受安装时的自动上位——用户对该包的确认针对的是“安装”，不是“让该包接管链路”；只有亲手挑的本地目录算显式指名。
 
-`health` 有两个超时，含义不同：`timeout_ms` 是单次 GET 的请求超时；`startup_timeout_ms` 是从 spawn 到「health 必须通过」的总预算（`input` 60 秒，`llm` 与 `output` 90 秒，缺省 60 秒）。冷启动要加载解释器与全部 import，用单次请求超时当启动预算会在服务真正起来之前就判失败。预算用尽只表示「没在预期时间内就绪」，不杀进程：进程仍在时快照保留 `pid`、阶段记 `failed` 并写明超时原因，用户可先停止再启动；若事后探测发现进程一直健康，`mark_recovered` 把状态收回到 `running`（`contract` 仍为 `not_checked`）。
+`health` 有两个超时，含义不同：`timeout_ms` 是单次 GET 的请求超时；`startup_timeout_ms` 是从 spawn 到“health 必须通过”的总预算（`input` 60 秒，`llm` 与 `output` 90 秒，缺省 60 秒）。冷启动要加载解释器与全部 import，用单次请求超时当启动预算会在服务真正起来之前就判失败。预算用尽只表示“没在预期时间内就绪”，不杀进程：进程仍在时快照保留 `pid`、阶段记 `failed` 并写明超时原因，用户可先停止再启动；若事后探测发现进程一直健康，`mark_recovered` 把状态收回到 `running`（`contract` 仍为 `not_checked`）。
 
 ## 第三方界面
 
@@ -84,7 +84,7 @@ node contracts/validate.mjs
 node contracts/check-upstreams.mjs
 ```
 
-`validate.mjs` 零依赖，按 `module-v2.schema.json` 校验五份样例与三份状态样例，并核对角色枚举与样例的端口、health、依赖。当前 129 项断言全部通过。CI 另用 ajv 编译七份状态 schema，并对 manifest 与状态样例做数据级校验。
+`validate.mjs` 零依赖，按 `module-v2.schema.json` 校验五份样例与三份状态样例，并核对角色枚举与样例的端口、health、依赖。当前 153 项断言全部通过。CI 另用 ajv 编译七份状态 schema，并对 manifest 与状态样例做数据级校验。
 
 负例覆盖未知 role、路径穿越、缺 `pubkey` 与未验证实例自动更新。M1 新增的负例覆盖相对路径、哈希格式与未知 `kind`。M8 新增的负例覆盖 catalog 自述 `pubkey`、缺 `signer_fp`、源条目缺指纹、内置源可删除、社区源可自动更新、公共后缀白名单与撤销后仍启用。
 
@@ -93,6 +93,30 @@ node contracts/check-upstreams.mjs
 [contracts.yml](../.github/workflows/contracts.yml) 在每次 push 与 PR 检出四个上游仓。job 依次运行两份校验器。ajv 接着编译七份状态 schema，校验五份 manifest 样例与三份状态样例。workflow 不设跳过条件，也不使用 `continue-on-error`。
 
 `validate.mjs` 不校验 `format` 关键字。draft 2020-12 把 `format` 当注释，所以时间字段另用 `pattern` 断言 UTC 格式。CI 的 ajv 带 `-c ajv-formats` 编译七份状态 schema，对五份 manifest 样例与三份状态样例做数据级校验，`date-time` 在 CI 生效。本地复核命令见 workflow，需装 `ajv-cli@5` 与 `ajv-formats@3`。
+
+## 导入期 v1 → v2 转换边界
+
+上游五仓的 `manifest.json` 是 v1：没有 `schema_version`、`role`、`variant`、`runtime`，签名段只有 `algo` 与 `value`。启动时用 module-v2 的 `PackageManifest` 解析这份清单，会报 `missing field pubkey`。此前目录登记只把这句原文丢给用户，还附带“确认 manifest.json 存在且可读”，把人往文件没读到的方向引。现在区分两种做法：
+
+- **运行时不兼容**。`build_start_request`、`prepare_instance`、卡片展示与管理页地址都只读 module-v2，没有“碰到 v1 就换一套解析”的分支。
+- **导入期转换**。本地目录导入向导把 v1 当预填素材，用户补齐缺的字段后生成一份完整 v2 清单。运行时读的是生成物，从头到尾没见过 v1。这是数据转换，不是兼容层。
+
+只开三个入口：`scan_local_modules`、`add_local_module`、`add_local_modules_bulk`，以及新增的 `preview_v1_manifest` 与 `convert_v1_manifest`。`install_module`（catalog）与 `install_local_package`（zip）一行不动，v1 包照旧硬拒。
+
+| 来源 | 处理 |
+|---|---|
+| 用户拍板 | `module_id` 的 namespace、`role`、`variant`、`ports`、依赖准备方式 |
+| 自动推导，确认前可改 | `entry.command`、`runtime.python`、依赖文件名 |
+| v1 原样带过 | `name`、`version`、`entry.env` 的非端口值、`health`、`permissions.devices`、`admin_ui` 的白名单字段、`model_packs` |
+| 强制代换 | `category: optional`、`signature: null`、`files: {}`、`publisher_fp` 不写、`verdict: C`、不自动更新；`{repo}` 换成 `{module_dir}`，写死的端口换成 `{port}`，源码目录里的 `.venv` 换成 `{venv_python}` |
+
+后两项不给输入框。“让用户补字段”若能把 `category`、`signature` 或 `publisher_fp` 也补上，就成了把本地目录伪装成官方签名包的通道。裁掉 v1 `admin_ui` 的 `config_source`、`endpoints`、`note`，也是因为 v2 的 `admin_ui` 是封闭对象，多一个键就过不了校验。
+
+生成物写 `data_root/instances/<instance_key>/manifest-v2.json`，`installed.json` 的实例记录多一个可选 `manifest_path` 指向生成物。源码目录只读，`git status` 保持干净。运行时所有读清单的位置统一走 `AppStateV2::manifest_file()`：有 `manifest_path` 读生成物，否则读模块根的 `manifest.json`。zip 实例不得写这个字段，`source-v1.schema.json` 有对应约束。解除登记时只删这份生成物，不碰源码目录。
+
+**语义不只是字符串替换**。v1 假设用户已在源码目录建好 `.venv`；v2 由启动器按依赖快照在实例目录重建，首次启动要重新装依赖。向导必须写明这一点，否则启动失败会被当成转换坏了。目录确认门禁（`head_confirmed`）仍观察源码目录，不把生成物算进指纹。
+
+预览与确认之间用 v1 原文的 SHA-256 比对，源码被改动就要求重新预览。生成前用 `PackageManifest::parse` 与 `ModuleManifestV2` 各校验一次，校验不过不落盘，登记失败则删掉刚写的生成物。
 
 ## 发布工具
 
@@ -117,7 +141,7 @@ cargo run --bin sign_catalog -- verify --pubkey k5.pub --catalog signed.json
 以下口径按代码事实收紧或补全：
 
 1. `version` 只接受 SemVer 三段，不含预发布与构建元数据。`0.3.3-agent` 是合法 SemVer 预发布串，光写“严格 SemVer”挡不住把变体塞进版本串。变体由 `variant` 单独声明。
-2. `runtime` 对 `shell` 不必填，`entry.command` 用 `{module_dir}` 指向包内 exe。`shell` 只启动本地 exe，其余角色必须含 `{venv_python}`。zip 包解压在 `data_root/instances/<key>/package`，`{install_root}` 是只读程序根，指向它会导致首个 shell 发布包启动失败。
+2. `runtime` 对 `shell` 不必填，`entry.command` 用 `{module_dir}` 指向包内 exe。`shell` 只启动本地 exe，其余角色必须含 `{venv_python}`。zip 包解压在 `data_root/instances/<key>/package`，`{install_root}` 是只读程序根，指向该目录会导致首个 shell 发布包启动失败。
 3. `model_packs` 设为可选字段。字段沿用 v1，待后续细化。
 4. v1 的 `reserved` 段未纳入 v2。默认禁用等语义改由 `category: reserved` 与验签结果裁定。
 5. `active` 对象不含 `auxiliary` 键。该角色没有 active 上限，用槽位表达会产生假的单选约束。
@@ -126,13 +150,14 @@ cargo run --bin sign_catalog -- verify --pubkey k5.pub --catalog signed.json
 8. 官方 `module_id` 采用 `dounai/` 加 v1 标识。namespace 只是命名，不表示信任；“官方”标签只由内置 K1 指纹验通授予。
 9. `roles.json` 定名为 `roles-v1.json`，文件名带版本，便于后续不兼容升级。
 10. 五份样例的 `signature` 为 `null`、`files` 为 `{}`。样例只用于 schema 校验，不可安装；`category` 表示目标发布形态，正式包须由 K1 签名后才生效。
-11. `entry.command` 允许写 `{venv_python} -m <pkg>`：引擎同步依赖时不安装项目自身（`--no-install-project`），由启动器在包根存在 `src/` 时把该目录前置进 `PYTHONPATH`。发布方因此可以按「包根 + src 布局 + uv.lock」组织代码，无需在包内再写一份安装步骤。flat 布局不加路径，`-m` 本来就能从工作目录解析包；`entry.env` 自己声明 `PYTHONPATH` 时启动器把 `src/` 拼在原值前面，不覆盖。
+11. `entry.command` 允许写 `{venv_python} -m <pkg>`：引擎同步依赖时不安装项目自身（`--no-install-project`），由启动器在包根存在 `src/` 时把该目录前置进 `PYTHONPATH`。发布方因此可以按“包根 + src 布局 + uv.lock”组织代码，无需在包内再写一份安装步骤。flat 布局不加路径，`-m` 本来就能从工作目录解析包；`entry.env` 自己声明 `PYTHONPATH` 时启动器把 `src/` 拼在原值前面，不覆盖。
 
 ## 变更规则
 
 - `roles-v1.json` 增加或删除 `role` 时，同步改 `module-v2.schema.json` 的 `role` 枚举、`source-v1.schema.json` 的 `active` 键集合、`catalog-v2.schema.json` 的条目枚举与五份样例。
 - 字段语义不兼容时直接改本份契约并同步所有消费者，不叠加兼容分支。只有存在**已分发制品**且需要同时读新旧两代格式时才升文件名版本号；正式完工前没有这种制品。
-- M8 直接改 `catalog-v2` 与 `source-v1`：`signature.key_id` 从 `K5` 常量放开为展示用字符串，新增必填 `signature.signer_fp`；`catalog_state.sequence/expires` 从必填改为「M8 起停止写入」的废弃字段，实例新增可选 `source_id`。新增 `sources-v1.schema.json` 与 `examples/state/sources.json`。官方 catalog 尚未签发，没有已分发制品，因此不升文件名版本号、不写读取旧 catalog 的兼容分支；旧 `installed.json` 里残留的 `sequence/expires` 只读不判。
+- M8 直接改 `catalog-v2` 与 `source-v1`：`signature.key_id` 从 `K5` 常量放开为展示用字符串，新增必填 `signature.signer_fp`；`catalog_state.sequence/expires` 从必填改为“M8 起停止写入”的废弃字段，实例新增可选 `source_id`。新增 `sources-v1.schema.json` 与 `examples/state/sources.json`。官方 catalog 尚未签发，没有已分发制品，因此不升文件名版本号、不写读取旧 catalog 的兼容分支；旧 `installed.json` 里残留的 `sequence/expires` 只读不判。
+  <!-- stc-disable-next-line: 下一行含 M6 产品术语，STC G6 判为套话属误报 -->
 - M6 新增 `chains-v1.schema.json` 与 `examples/state/chains.json`，不改既有 schema：`chains` 空数组合法（默认链路不落盘，由实例表隐式生成），`steps` 只存 `instance_id`，最多 32 步且不得重复，悬空引用合法并由读取方标记而非回写。运行进度不写入该文件。`validate.mjs` 断言 131 → 148，CI 同步加 schema 编译与样例校验。
 - 签名算法标识由 `SHA-256 + Ed25519` 改为 `Ed25519`。改动发生在任何包或 catalog 对外发布之前，没有已分发制品，不升文件名版本号；`validate.mjs` 用负例断言拒收旧值。发布后如需再改，必须升版本。
 - `module-v2.schema.json` 的 shell 分支由 `{install_root}` 收紧为 `{module_dir}`，同步改 `m2/manifest.rs`、`examples/dounai-ui.v2.json`、两处测试夹具与 `validate.mjs` 的负例。收紧时已分发的三个 zip 都是数据面模块，不含 shell，因此不影响旧制品，不升文件名版本号、不写兼容分支；首个 shell 包（`dounai-ui 0.3.1`）在收紧之后才发布，按新规则打包。
@@ -140,10 +165,11 @@ cargo run --bin sign_catalog -- verify --pubkey k5.pub --catalog signed.json
 - M1 新增 `install-v1.schema.json` 与 `deps-v1.schema.json`。`module-v2.schema.json` 只改 `runtime.deps` 与 `runtime.snapshot_sha256` 的 `description`，字段类型、必填与取值未变，不升文件名版本号。
 - M2 把 `deps-v1` 的落盘路径改成内容寻址 generation，只改 `description`，字段与取值不变，不升文件名版本号。
 - M2 收紧 `module-v2` 的 `entry.env` 键名与 `runtime.deps.path`、`deps-v1` 的 `instance_id`、`install-v1` 的绝对路径。新增约束只挡原先允许的非法值，不改已有合法样例，不升文件名版本号。
+- M5 前置的 v1 导入期转换给 `source-v1` 的实例加可选 `manifest_path`，并写清 `module-v2` 的 `schema_version` 只约束运行时、不禁止导入期转换。字段可选，旧 `installed.json` 不用迁移；zip 实例写这个字段由新增的 `allOf` 硬拒。`validate.mjs` 断言 150 → 153。
 
 警告：把 `unknown_role_policy` 改成降级为 `auxiliary`，第三方模块会绕过契约自检。不要改这个值。
 
-说明：本版不读取 v1 manifest，不设兼容层；`permissions` 只作声明，启动器不做能力沙箱；目录实例固定按未验证处理，不承诺入口文件哈希，也不自动更新。
+说明：**运行时**不读取 v1 manifest，不设兼容层；但本地目录导入向导允许在用户逐项确认后，把 v1 清单补成完整的 v2 清单，生成物另存数据根，源码目录不写。边界见下节。`permissions` 只作声明，启动器不做能力沙箱；目录实例固定按未验证处理，不承诺入口文件哈希，也不自动更新。
 
 ## M0 实施状态
 
@@ -186,7 +212,7 @@ M1 新增两份状态 schema，不改 M0 已冻结的约束。
 
 `runtime.json` 引用的 generation 必须先落盘，写入后永不改写。同一 generation 重复提交是幂等的，元数据保留首次生成时间。残留 generation 的清理由 M2 旧版保留策略统一处理，不在环境引擎里删。
 
-`prepare_instance` 按实例的 `source_kind` 决定快照语义。zip 包的签名 manifest 声明了 `runtime.snapshot_sha256` 时必须与解析结果一致，不符硬拒；**没声明则放行**，记成 `runtime.json` 里的 `snapshot_pinned = false`，界面标注「快照未锚定」。`kind = uv_lock` 的包本来就有签名包内 `uv.lock` 作锚点，缺这个字段不算问题。dir 允许重解析，哈希变化时把 `previous_sha256`、`current_sha256` 与观察时间记进 `runtime.json`，交 M4 提示重新确认。
+`prepare_instance` 按实例的 `source_kind` 决定快照语义。zip 包的签名 manifest 声明了 `runtime.snapshot_sha256` 时必须与解析结果一致，不符硬拒；**没声明则放行**，记成 `runtime.json` 里的 `snapshot_pinned = false`，界面标注“快照未锚定”。`kind = uv_lock` 的包本来就有签名包内 `uv.lock` 作锚点，缺这个字段不算问题。dir 允许重解析，哈希变化时把 `previous_sha256`、`current_sha256` 与观察时间记进 `runtime.json`，交 M4 提示重新确认。
 
 ## M2 契约收紧
 

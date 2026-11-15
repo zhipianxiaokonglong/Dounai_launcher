@@ -99,16 +99,16 @@ Windows 专属代码圈进 `process/win` 单一模块边界。`launcher-core` �
 1. 所有路径由 `launcher-core::paths` 一处计算。UI 与 Rust 都不自己拼字符串。
 2. `paths` 由安装模式与便携标志共同初始化，结果写进 `state/install.json`。后续启动一律读取，不重新推断。v2.3 只有 `both` 一种安装模式分支，安装时选择落在 `install_mode`。
 
-   `install.json` 的写入语义在 2026-11-13 扩成「**安装器优先写，启动器兜底补**」。M5 的安装器还没做，此前没有第二个写入者，`prepare_instance_env` 一读就是 `os error 2`，整条环境链路不可用。兜底逻辑在 `InstallState::ensure`，只碰 uv 三元组与两个根，四种情况：
+   `install.json` 的写入语义在 2026-11-13 扩成“**安装器优先写，启动器兜底补**”。M5 的安装器还没做，此前没有第二个写入者，`prepare_instance_env` 一读就是 `os error 2`，整条环境准备流程不可用。兜底逻辑在 `InstallState::ensure`，只碰 uv 三元组与两个根，四种情况：
 
    | 现状 | 行为 |
    |---|---|
-   | 文件不存在 | 按本次运行的两个根与内置 uv 新建，并在设置页说明「已由启动器补写」 |
-   | 四项全部一致 | 不写盘（保持「写一次」的常态） |
+   | 文件不存在 | 按本次运行的两个根与内置 uv 新建，并在设置页说明“已由启动器补写” |
+   | 四项全部一致 | 不写盘（保持“写一次”的常态） |
    | 只差 uv 三元组（升级了随包 uv） | 只改 `uv_path` / `uv_sha256` / `uv_version`，两个根原样保留 |
    | 读不出来、版本不对或两个根不一致 | 先把旧文件备份成 `install.json.bak`，再重写 |
 
-   最后一条是刻意的选择：`install.json` 是从可执行文件位置派生出来的事实，不是用户手写的数据。让它 brick 启动过程（窗口都出不来）换取「不覆盖」的纯度不值得，留 `.bak` 已足够事后追。设置页「install.json」一行会把补写原因原样显示出来，用户能看出「安装器没跑，是启动器兜的」。
+   最后一条是刻意的选择：`install.json` 是从可执行文件位置派生出来的事实，不是用户手写的数据。让文件缺失 brick 启动过程（窗口都出不来）换取“不覆盖”的纯度不值得，留 `.bak` 已足够事后追。设置页“install.json”一行会把补写原因原样显示出来，用户能看出“安装器没跑，是启动器兜的”。
 3. `perMachine` 只放只读二进制。Python、venv、模块与状态每个 Windows 用户各一份，避免 ACL 问题与“一个用户装模块影响所有人”。
 4. `UV_PYTHON_INSTALL_DIR` 与 `UV_CACHE_DIR` 都指向数据根。便携版优先 exe 同级，写探针失败再回退到 `%LOCALAPPDATA%`。
 
@@ -136,15 +136,15 @@ M3 结束时 v1 的进程管理、状态库与命令面已全部删除。下表�
 | `state.rs` 的 `StateStore` | 已删除 | 由 `state_v2.rs` 的 `AppStateV2` 与 `state/installed.json` 取代 |
 | `commands.rs` 旧命令体 | 已删除 | 由 `commands_v2.rs` 的 21 个同名命令取代，另加 11 个 v2 命令 |
 | `tests/` 六份 v1 集成测试 | 已删除 | 断言绑死 v1 状态格式，不再适用 |
-| `install.rs` 安装事务 | 已删除 | 产品侧零调用；`fuzz_invariants` 已改压 `m2::package::{verify_zip, install_package}`，并补了一条「真实包落盘后目标目录外无产物」的正向用例 |
-| `catalog.rs` 旧解析与白名单 | 已删除 | 不验签、可回退磁盘缓存，与「只认本次会话验签过的 doc」直接冲突；解析 fuzz 已改压 `CatalogDocument::parse` |
+| `install.rs` 安装事务 | 已删除 | 产品侧零调用；`fuzz_invariants` 已改压 `m2::package::{verify_zip, install_package}`，并补了一条“真实包落盘后目标目录外无产物”的正向用例 |
+| `catalog.rs` 旧解析与白名单 | 已删除 | 不验签、可回退磁盘缓存，与“只认本次会话验签过的 doc”直接冲突；解析 fuzz 已改压 `CatalogDocument::parse` |
 | `trust.rs` 二态策略 | 已删除 | 零调用；判级在 `core::m2::trust::classify`（A/B/C/D 四级） |
 | `module_probe.rs` | 已删除 | 零调用；第三个手写 HTTP 客户端，管理页地址改由 `roles` 的规范端口拼 |
 | `download.rs` / `http_client.rs` | 保留，接在线安装 | 断点续传、镜像回退与 sha256 校验仍在用；命令面收敛成 `install_from_catalog` 一条，不再暴露裸 `download_package` |
 | `security.rs` / `signature.rs` | 保留重导出 | `fuzz_invariants` 与 `sign_real_manifests` 依赖；v2 验签走 `m2::manifest` 与 core `signature` |
 | `core/src/admin_host.rs` | 保留 | M0 冻结契约，M4 的内嵌子 WebView 要用；当前只有独立窗口实现，删了等于让 M4 重新推一遍 |
 | `src/manifest.ts` + `manifests/` | 已删除 | v1 schema（module_id 无 namespace），与实例的 v2 id 永不相等，查表恒落空；展示名与 `admin_ui` 改由 `list_instance_views` 提供 |
-| `src/bundle.ts` + `bundles/` + 套装页 | 已删除 | 数据模型是 v1 的 module_id 列表，安装单位为 `module_id@variant`；「开始安装」一直是 disabled，删除后导航变五个视图 |
+| `src/bundle.ts` + `bundles/` + 套装页 | 已删除 | 数据模型是 v1 的 module_id 列表，安装单位为 `module_id@variant`；“开始安装”一直是 disabled，删除后导航变五个视图 |
 | `src/localinstall.ts` | 已删除 | base64 IPC 装包通道；v2 传路径由 Rust 读文件 |
 | `env_probe.rs` | 保留 | 只读体检 |
 | `bin/sign_manifests.rs` | 已删除，替换为 `pack.rs` 与 `sign_catalog.rs` | 原工具只签单个 JSON，无 `files` 清单、无打包，没有给 catalog 签名的工具 |
@@ -158,7 +158,7 @@ M3 结束时 v1 的进程管理、状态库与命令面已全部删除。下表�
 
 环境引擎只用随包自带的 uv，固定 0.13.7。系统 PATH 里的 uv 不接管，版本失控会让注册表与离线验收失去意义。`env_probe.rs` 只保留只读体检。
 
-**uv 三元组的唯一真源是 `core/src/env/bootstrap.rs` 的三个常量**：`UV_VERSION`、`UV_SHA256`、`UV_BYTES`。`install.json` 的 `uv_sha256` 由它初始化，`locate_uv` 拿它比对每个候选文件，三者任何一处漂移都会让启动器把随包文件判成「被篡改」。升 uv 必须同时改常量、`src-tauri/bin/README.md` 与取数脚本里的哈希，`state_v2::tests::pinned_uv_hash_matches_the_staged_binary` 会在仓库里存在该文件时逐字节核对。
+**uv 三元组的唯一真源是 `core/src/env/bootstrap.rs` 的三个常量**：`UV_VERSION`、`UV_SHA256`、`UV_BYTES`。`install.json` 的 `uv_sha256` 由三个常量初始化，`locate_uv` 拿 `UV_SHA256` 比对每个候选文件，三者任何一处漂移都会让启动器把随包文件判成“被篡改”。升 uv 必须同时改常量、`src-tauri/bin/README.md` 与取数脚本里的哈希，`state_v2::tests::pinned_uv_hash_matches_the_staged_binary` 会在仓库里存在该文件时逐字节核对。
 
 文件怎么走到 `bin/uv.exe` 分三段，缺一段就只剩联网兜底：
 
@@ -168,11 +168,11 @@ M3 结束时 v1 的进程管理、状态库与命令面已全部删除。下表�
 | 开发/本地构建 | `build.rs` 的 `stage_bundled_uv`，大小没变就跳过 | `target/<profile>/bin/uv.exe`，与 exe 同级 |
 | 安装包 | `tauri.conf.json` 的 `bundle.resources` 映射 `bin/uv.exe → bin/uv.exe` | `$INSTDIR/bin/uv.exe` |
 
-`Paths::bundled_uv_path()` 只认「exe 同级的 `bin/uv.exe`」，所以前面两段只是把文件摆到安装后的同一位置，运行时的候选顺序不需要按环境分叉：程序根 → `install.json` 记录的位置 → 数据根下载副本。
+`Paths::bundled_uv_path()` 只认“exe 同级的 `bin/uv.exe`”，所以前面两段只是把文件摆到安装后的同一位置，运行时的候选顺序不需要按环境分叉：程序根 → `install.json` 记录的位置 → 数据根下载副本。
 
-缺文件时的补齐顺序是 `UV_DOWNLOAD_URLS`：GitHub release 资产优先，阿里云 PyPI 的 `uv-0.13.7-py3-none-win_amd64.whl` 兜底。加这个兜底不是锦上添花——目标机器上 `github.com` 实测超时 21 秒，只靠官方资产等于补不上。wheel 里 `uv.exe` 在 `uv-0.13.7.data/scripts/` 下，`extract_uv_exe` 按「任意层级下的 `uv.exe`」匹配，两种包布局共用一套解包。
+缺文件时的补齐顺序是 `UV_DOWNLOAD_URLS`：GitHub release 资产优先，阿里云 PyPI 的 `uv-0.13.7-py3-none-win_amd64.whl` 兜底。加这个兜底不是锦上添花——目标机器上 `github.com` 实测超时 21 秒，只靠官方资产等于补不上。wheel 里 `uv.exe` 在 `uv-0.13.7.data/scripts/` 下，`extract_uv_exe` 按“任意层级下的 `uv.exe`”匹配，两种包布局共用一套解包。
 
-「安装依赖」的联网默认值在 2026-11-13 由离线改成联网：首次装依赖必然要拉解释器与 wheel，离线默认等于按钮天生不可用。想强制离线仍可显式选择（模块菜单「安装依赖（离线）」），此时 `EnvOptions.offline` 为真，全程带 `--offline`。
+“安装依赖”的联网默认值在 2026-11-13 由离线改成联网：首次装依赖必然要拉解释器与 wheel，离线默认等于按钮天生不可用。想强制离线仍可显式选择（模块菜单“安装依赖（离线）”），此时 `EnvOptions.offline` 为真，全程带 `--offline`。
 
 托管 Python 装到数据根，固定 3.12，补丁版本由 uv 选当前最新版：
 
@@ -205,9 +205,9 @@ uv python install 3.12 --install-dir <data_root>/runtime/python --no-registry --
 
 venv 也按 generation 分目录，路径是 `instances/<instance_key>/venvs/<sha 前 16 位>/`。新建时先落在同级 `.staging` 目录。`uv venv`、依赖同步与离线 dry-run 全部通过后，才 rename 成正式目录。失败只删 `.staging`，旧 generation 的 venv 保持原样。`runtime.json` 切换前，没有任何正式目录会被改写。
 
-`prepare_instance` 按 `source_kind` 处理快照。zip 包的签名 manifest 若声明了 `runtime.snapshot_sha256`，就必须与解析结果一致，不符报 `SnapshotMismatch` 并硬拒。**没声明则放行**，把这次的快照记成「未锚定」（`runtime.json` 的 `snapshot_pinned = false`），界面在实例行上标一枚「快照未锚定」。
+`prepare_instance` 按 `source_kind` 处理快照。zip 包的签名 manifest 若声明了 `runtime.snapshot_sha256`，就必须与解析结果一致，不符报 `SnapshotMismatch` 并硬拒。**没声明则放行**，把这次的快照记成“未锚定”（`runtime.json` 的 `snapshot_pinned = false`），界面在实例行上标一枚“快照未锚定”。
 
-为什么缺字段不再硬拒：`kind = uv_lock` 的包，锚点就是签名包内那份 `uv.lock`——zip 的 sha256 在装包时验过，同步前引擎还会再比对一次项目根 `uv.lock` 与解析结果。发布者再写一个 `snapshot_sha256` 只是重复。真实发布的三包都不写这个字段，按旧口径硬拒等于所有在线安装都装不了依赖。`requirements` / `pyproject` 的 zip 包仍在本地解析，没有 pinned 时同理降级为未锚定，并在卡片上提示「重装可恢复锚定」。
+为什么缺字段不再硬拒：`kind = uv_lock` 的包，锚点就是签名包内那份 `uv.lock`——zip 的 sha256 在装包时验过，同步前引擎还会再比对一次项目根 `uv.lock` 与解析结果。发布者再写一个 `snapshot_sha256` 只是重复。真实发布的三包都不写这个字段，按旧口径硬拒等于所有在线安装都装不了依赖。`requirements` / `pyproject` 的 zip 包仍在本地解析，没有 pinned 时同理降级为未锚定，并在卡片上提示“重装可恢复锚定”。
 
 dir 允许重解析，哈希变化写进 `runtime.json` 的 `snapshot_change`，由 M4 提示重新确认。运行时生成的哈希不写回包内。
 
@@ -215,7 +215,7 @@ dir 允许重解析，哈希变化写进 `runtime.json` 的 `snapshot_change`，
 
 每次 `prepare_instance` 在同步后追加一次离线 dry-run 复核。哈希变化时报 `SnapshotMismatch`，不静默重建，也不回退联网。`verify_instance` 只读状态、比对哈希与安装根，不启动任何子进程。缓存缺 wheels 时报 `OfflineCacheMiss`。
 
-界面把「装依赖」当独立一步，不只是启动失败后的一句报错。`list_instance_views` 带 `prepared`（对数据面实例调 `verify_instance` 探真实 venv，shell 角色恒真），未就绪时实例行的主按钮是「安装依赖」，`startOne` 也会先补这一步再启动。启动本身不重跑 prepare：装包与装依赖都是长任务，塞进启动会让「点一下就能跑」变成不可预期的等待，失败也分不清是环境问题还是代码问题。`start_all`、`stop_all`、`restart_instance`、`prepare_instance_env`、`switch_active` 一律走阻塞池——这些都是秒级到分钟级的等待，放主线程会把窗口冻住。
+界面把“装依赖”当独立一步，不只是启动失败后的一句报错。`list_instance_views` 带 `prepared`（对数据面实例调 `verify_instance` 探真实 venv，shell 角色恒真），未就绪时实例行的主按钮是“安装依赖”，`startOne` 也会先补这一步再启动。启动本身不重跑 prepare：装包与装依赖都是长任务，塞进启动会让“点一下就能跑”变成不可预期的等待，失败也分不清是环境问题还是代码问题。`start_all`、`stop_all`、`restart_instance`、`prepare_instance_env`、`switch_active` 一律走阻塞池——这些都是秒级到分钟级的等待，放主线程会把窗口冻住。
 
 警告：断网重跑必须全程带 `--offline`。只把 `UV_OFFLINE` 当可选项，验收会失败。
 
@@ -229,17 +229,17 @@ dir 允许重解析，哈希变化写进 `runtime.json` 的 `snapshot_change`，
 
 启动器选一源拉索引、验签、按 URL 下包、验包哈希，不需要理解发布平台的 API。
 
-已知约束：GitHub REST API 未认证时每小时每 IP 限 60 次，不能每次启动查 `/releases/latest`；asset 会重定向，白名单要覆盖目标域名。SourceForge 的下载域现在**全链路 302**：`master.dl`/`downloads.sourceforge.net` 跳 `xxx.dl.sourceforge.net`，没有稳定 host。处理方式是「逐跳跟随 + 每跳都校验域名后缀」，上限 5 跳，任何一跳落在白名单外立即中止；最终仍以 sha256 为准。实现见 `m2_http.rs` 与 `http_client.rs`：两处都必须手动跟跳，用 reqwest 的自动跟随会因为看不到中间跳而绕过白名单。当前确定使用 SourceForge，GitHub 适配器保留为第二源但目录未上传。
+已知约束：GitHub REST API 未认证时每小时每 IP 限 60 次，不能每次启动查 `/releases/latest`；asset 会重定向，白名单要覆盖目标域名。SourceForge 的下载域现在**每一跳都是 302**：`master.dl`/`downloads.sourceforge.net` 跳 `xxx.dl.sourceforge.net`，没有稳定 host。处理方式是“逐跳跟随 + 每跳都校验域名后缀”，上限 5 跳，任何一跳落在白名单外立即中止；最终仍以 sha256 为准。实现见 `m2_http.rs` 与 `http_client.rs`：两处都必须手动跟跳，用 reqwest 的自动跟随会因为看不到中间跳而绕过白名单。当前确定使用 SourceForge，GitHub 适配器保留为第二源但目录未上传。
 
-`SourceAdapter` 按源注册，官方两源内置，第三方源由用户在「下载」页显式添加后生效。添加源必须同时登记该源的 catalog 签名公钥——**信任一个下载位置与信任一个发布者是两件事，前者不能顺带变成后者**。接口与不变式见 [contracts/source-adapter-v1.md](../contracts/source-adapter-v1.md)。
+`SourceAdapter` 按源注册，官方两源内置，第三方源由用户在“下载”页显式添加后生效。添加源必须同时登记该源的 catalog 签名公钥——**信任一个下载位置与信任一个发布者是两件事，前者不能顺带变成后者**。接口与不变式见 [contracts/source-adapter-v1.md](../contracts/source-adapter-v1.md)。
 
-**M8 已落地（2026-11-14）**：源注册表是 `state/sources.json`，schema 见 [contracts/sources-v1.schema.json](../contracts/sources-v1.schema.json)。每个源条目自带 `catalog_fingerprint`、独立的 `sequence` / `expires` 与自己的域名白名单。添加源是原子操作：URL + 公钥 → 展示完整 SHA-256 指纹 → 确认框（默认焦点在「取消」）→ 公钥写入源条目并绑定该指纹 → 源启用。验签公钥只认本地注册表，**不采信 catalog 自述的 `signature.pubkey`**；未登记公钥签的 catalog 一律硬拒，界面没有「仍然继续」。
+**M8 已完成（2026-11-14）**：源注册表是 `state/sources.json`，schema 见 [contracts/sources-v1.schema.json](../contracts/sources-v1.schema.json)。每个源条目自带 `catalog_fingerprint`、独立的 `sequence` / `expires` 与自己的域名白名单。添加源是原子操作：URL + 公钥 → 展示完整 SHA-256 指纹 → 确认框（默认焦点在“取消”）→ 公钥写入源条目并绑定该指纹 → 源启用。验签公钥只认本地注册表，**不采信 catalog 自述的 `signature.pubkey`**；未登记公钥签的 catalog 一律硬拒，界面没有“仍然继续”。
 
-这把公钥与包签名公钥在存储和判定上物理隔离：catalog 公钥只存在 `sources.json`，验 catalog 的代码只查这张表；`state/trust.json`、`TrustedKey` 与 `is_trusted()` 一行未改，包的四级判定读不到这把钥匙。理由是 `is_trusted(fp)` 同时查 `builtin` 与 `trusted` 且不看 `purpose`（`KeyPurpose` 只用于 `BuiltinKey`），若把源的 catalog 公钥按 `confirm_trusted_key` 写进 `trust.json`，同一个指纹会命中包判定的 A 类「已信任发布者」——等于给用户信任一个下载位置的同时，顺手信任了该发布者签的任意包。
+这把公钥与包签名公钥在存储和判定上物理隔离：catalog 公钥只存在 `sources.json`，验 catalog 的代码只查这张表；`state/trust.json`、`TrustedKey` 与 `is_trusted()` 一行未改，包的四级判定读不到这把钥匙。理由是 `is_trusted(fp)` 同时查 `builtin` 与 `trusted` 且不看 `purpose`（`KeyPurpose` 只用于 `BuiltinKey`），若把源的 catalog 公钥按 `confirm_trusted_key` 写进 `trust.json`，同一个指纹会命中包判定的 A 类“已信任发布者”——等于给用户信任一个下载位置的同时，顺手信任了该发布者签的任意包。
 
 留了一条已知限制：内置 K5 标着 `catalog_signing`，却也在 `is_trusted` 的查询表里，理论上同一把钥匙签的包也会判 A 类。K5 私钥离线保管且不用于签包，这条判定链属 M2，M8 不动，按已知限制披露。
 
-catalog 用 K5 签名，签的是索引、版本单调性与新鲜度。K1 只用于签官方 zip 包。社区源用自己的钥匙签它自己的 catalog，官方 K5 继续只服务官方源。
+catalog 用 K5 签名，签的是索引、版本单调性与新鲜度。K1 只用于签官方 zip 包。社区源用自己的钥匙签自己的 catalog，官方 K5 继续只服务官方源。
 
 两钥分离修掉一处自证漏洞。共用一把钥匙时，K1 泄露后攻击者能签一份不含 `revoked` 的 catalog。`revoked` 撤不掉同一把密钥签出的旧 catalog。
 
@@ -254,10 +254,10 @@ catalog 用 K5 签名，签的是索引、版本单调性与新鲜度。K1 只�
 
 K1 与 K5 均已于 2026-11-13 生成并内置，规程见 [SIGNING.md](SIGNING.md)。
 
-远程分发已于 2026-11-13 接通，链路在 M8 后固定为：
+远程分发已于 2026-11-13 接通，分发流程在 M8 后固定为：
 
 ```
-下载视图（左侧导航 →「下载」）
+下载视图（左侧导航 →“下载”）
   ① refresh_catalog()                按 sources.json 里已启用的源集合拉，无会话级 URL
        官方主源与镜像：二选一，同一 sequence/expires 组
        社区源：各自独立验签、各自裁决，失败不影响其它源
@@ -265,11 +265,11 @@ K1 与 K5 均已于 2026-11-13 生成并内置，规程见 [SIGNING.md](SIGNING.
        entry_key 由用户点选的那一行决定，跨源同名不做隐式优选
        按该条目所属源取 sources → 逐条 validate_download_url → download（断点续传/重试/哈希）
        大小与目录声明比对 → commit_install（同一条本地包安装链路）
-  ③ 需要确认的 B/C 类包由 Rust 拒绝并说明原因，界面把同一按钮改成「确认并安装」再带 true 重试
+  ③ 需要确认的 B/C 类包由 Rust 拒绝并说明原因，界面把同一按钮改成“确认并安装”再带 true 重试
   ④ 装完只读会话缓存刷新状态（catalog_cache），不重发网络请求
 ```
 
-会话级 URL 参数已删除。它是一条绕过源注册表的通道：能从白名单外的主机拉 catalog，且绕过按源验签。
+会话级 URL 参数已删除。这个参数是一条绕过源注册表的通道：能从白名单外的主机拉 catalog，且绕过按源验签。
 
 三处用的是**同一个** sha256 与 size：目录条目、下载校验、安装校验。界面不负责判断可信，只负责把用户的决定回传。下载到的包落在 `<data_root>/downloads/<module_id_>@<variant>.zip`，重装与离线排障可以直接复用。
 
@@ -297,7 +297,7 @@ zip 根下放 `manifest.json` 与模块文件。签名放 manifest 的 `signatur
 2. 用 `peek_manifest_from_zip` 读 manifest，不落盘。
 3. 判定信任结果。需确认的走确认框，硬拒的立即终止。
 4. 解压到 staging。保留现有两遍路径与符号链接检查，补解压前按 zip 元数据算总大小上限。
-5. 逐文件核 `files` 哈希。多一个、少一个、不符都回滚。路径统一用 `/`，禁 `..`、绝对路径、反斜杠与 Windows 保留名；点开头的文件名（`.gitignore`、`.env.example`）允许，因为上游仓库普遍带这类开发配置，禁掉只会让打包方在装包时才收到报错。这条规则只有一份：`core::m2::manifest::validate_relative_path`，`pack` 工具的 `safe_package_path` 直接调用它，打包与安装不会各判一套。
+5. 逐文件核 `files` 哈希。多一个、少一个、不符都回滚。路径统一用 `/`，禁 `..`、绝对路径、反斜杠与 Windows 保留名；点开头的文件名（`.gitignore`、`.env.example`）允许，因为上游仓库普遍带这类开发配置，禁掉只会让打包方在装包时才收到报错。这条规则只有一份：`core::m2::manifest::validate_relative_path`，`pack` 工具的 `safe_package_path` 直接调用这个校验函数，打包与安装不会各判一套。
 6. 提交事务。启动前再核入口文件哈希，堵住验签与 spawn 之间的 TOCTOU。
 
 `files` 只为 zip 发布包服务，由 `pack` 工具生成。目录实例不校验 `files`，也不参与信任判定。字段在 manifest v2 里一律存在，目录实例可用空对象，这样两种来源共用一份 schema。
@@ -323,7 +323,7 @@ zip 根下放 `manifest.json` 与模块文件。签名放 manifest 的 `signatur
 
 第三方实例与目录实例都不能自动成为 active，用户显式切换才允许。默认各实例数据隔离，“共享会话数据用于对比”列为显式高级选项，SQLite 并发写会冲突。
 
-**空槽补位。** 槽空着不是一种可用状态：非 active 实例一律跑 `18101` 起的备用端口，而组装层只认 8101-8103，装完也用不起来。真机上三个模块的 `active` 全是 `{}`，界面显示一切正常，链路一条都连不上。`InstalledState::fill_vacant_active` 统一处理这件事，四处调用：安装（在线目录、本地 zip）把刚装的实例顶上，导入本地目录同样（用户亲手指定的目录等于一次显式指名，C 类也放行），卸载或解除登记时若卸掉的是 active 就按 `instance_id` 字典序补一个，启动器启动时对 `input`/`llm`/`output` 各扫一次把历史遗留的空槽修好——不加这最后一条，升级上来的实例表要再装一遍才会正。槽已占用时什么都不做，新实例退居备用，由用户在卡片菜单里切。C 类签名包不自动上位：装 B/C 类包时的确认针对“安装”，不是“让它接管链路”。补位失败只当没补上，不影响安装结果本身。
+**空槽补位。** 槽空着不是一种可用状态：非 active 实例一律跑 `18101` 起的备用端口，而组装层只认 8101-8103，装完也用不起来。真机上三个模块的 `active` 全是 `{}`，界面显示一切正常，三个角色一条都连不上。`InstalledState::fill_vacant_active` 统一处理这件事，四处调用：安装（在线目录、本地 zip）把刚装的实例顶上，导入本地目录同样（用户亲手指定的目录等于一次显式指名，C 类也放行），卸载或解除登记时若卸掉的是 active 就按 `instance_id` 字典序补一个，启动器启动时对 `input`/`llm`/`output` 各扫一次把历史遗留的空槽修好——不加这最后一条，升级上来的实例表要再装一遍才会正。槽已占用时什么都不做，新实例退居备用，由用户在卡片菜单里切。C 类签名包不自动上位：装 B/C 类包时的确认针对“安装”，不是“让它接管链路”。补位失败只当没补上，不影响安装结果本身。
 
 旧版保留以 `state/retention.json` 的 `keep_versions` 为准，默认 3，设为 0 表示不保留。清理只删包文件、venv 与日志，且只在新版成功激活后异步执行。正在运行的非 active 实例跳过。
 
@@ -344,51 +344,54 @@ M3 已按 role 拓扑启动、Job Object 托管与异步探测重写生命周期
 
 第三方模块、目录实例与官方模块走同一状态机。卸载先检查实例是否运行，运行中直接拒绝；`remove_files` 时清掉 zip 实例的包目录、venv 与日志，dir 实例的源码目录永不删除，`data_dir` 不自动清理。凡写 venv 与删目录的路径共用同一把实例级互斥锁，同一实例的并发准备不会互相删除 `.staging`。目录实例启动前调 `observe_source` 与 `require_confirmed`，源码变更未确认时不自启。
 
+<!-- stc-disable-next-line: 下一行含 M6 产品术语，STC G6 判为套话属误报 -->
 ### 链路编排（M6）
 
-链路是用户自己排的一组实例，存在 `state/chains.json`，只记 `{ id, name, steps[] }` 与两个时间戳。`steps` 用 `instance_id`：同一模块可以有 primary 与 standby 两个实例，写 `module_id` 指不到具体那一个。默认链路不写这个文件，每次启动时从「未禁用实例 + `roles-v1.json` 拓扑」现算，装一个实例不用同步改第二份表。运行进度也不落盘，只在内存与 `chain-progress` 事件里。
+<!-- stc-disable-next-line: 下一行含 M6 产品术语，STC G6 判为套话属误报 -->
+链路是用户自己排的一组实例，存在 `state/chains.json`，只记 `{ id, name, steps[] }` 与两个时间戳。`steps` 用 `instance_id`：同一模块可以有 primary 与 standby 两个实例，写 `module_id` 指不到具体那一个。默认链路不写这个文件，每次启动时从“未禁用实例 + `roles-v1.json` 拓扑”现算，装一个实例不用同步改第二份表。运行进度也不落盘，只在内存与 `chain-progress` 事件里。
 
-`start_all` 就是启动默认链路，返回 `ChainRunResult`，与自定义链路共用 `run_chain`。一轮批量提交，步骤之间不插等待点：健康与契约探测仍由 M3 的后台线程收敛，链路只看 spawn 的同步结论。端口按整张实例表一次分配，`start_lock` 仍把实际 spawn 串起来——「同时启动」去掉的是等待，不是把 N 个进程并行拉起。
+<!-- stc-disable-next-line: 下一行含 M6 产品术语，STC G6 判为套话属误报 -->
+`start_all` 就是启动默认链路，返回 `ChainRunResult`，与自定义链路共用 `run_chain`。一轮批量提交，步骤之间不插等待点：健康与契约探测仍由 M3 的后台线程收敛，链路只看 spawn 的同步结论。端口按整张实例表一次分配，`start_lock` 仍把实际 spawn 串起来——“同时启动”去掉的是等待，不是把 N 个进程并行拉起。
 
-单步失败不中止整轮。悬空引用与依赖未准备由 `precheck_step` 判掉，该步标 `dangling` / `blocked` 并跳过，其余照常提交；实例卸载不回写 `chains.json`，卡片显示「缺 N 项」，要删那一步得用户自己点。预探到端口上已有外部健康服务算通过，标 `external`，但它不算启动器托管的进程，所以 `only_started` 的回滚停止不会去停它。
+单步失败不中止整轮。悬空引用与依赖未准备由 `precheck_step` 判掉，该步标 `dangling` / `blocked` 并跳过，其余照常提交；实例卸载不回写 `chains.json`，卡片显示“缺 N 项”，要删那一步得用户自己点。预探到端口上已有外部健康服务算通过，标 `external`，但外部服务不算启动器托管的进程，所以 `only_started` 的回滚停止不会去停外部服务。
 
 `stop_chain` 按 steps 逆序，保留原步骤编号，单步失败不阻断后续。`stop_all` 语义没变，仍是全局逆序停全部托管实例。
 
-界面在导航第三项。命令返回时状态点还没定：进程起来几秒后才失败属异步事件，`lifecycle-changed` 会把 `Failed` 回填到对应那一步。原验收 2 的「停在那一步」因此降级为「定位到那一步」，卡片指出第几步、哪个实例、什么原因，但不会因为中间一步坏掉就不启动后面的。
+界面在导航第三项。命令返回时状态点还没定：进程起来几秒后才失败属异步事件，`lifecycle-changed` 会把 `Failed` 回填到对应那一步。原验收 2 的“停在那一步”因此降级为“定位到那一步”，卡片指出第几步、哪个实例、什么原因，但不会因为中间一步坏掉就不启动后面的。
 
 ### 日志与日志页
 
-日志按实例落在 `<数据根>/instances/<key>/logs/`，文件名带 UTC 时间戳。单个文件超过 2 MiB 轮转，保留最新 3 份，更旧的按文件删除。读取有两条路径：`read_instance_logs` 不给文件名时跨文件回读最近 300 行、最多 256 KiB；给了文件名只读那一份的尾部，名字必须先过 `is_safe_log_name`（单段、只允许字母数字与 `._-`、扩展名 `.log`），因为文件名是从界面回传的。`list_instance_logs` 给出保留窗口内的文件清单（名字、大小、修改时间、是否最新），界面据此把「共 N 份」变成可选的历史文件。`open_instance_logs_dir` 只接受 `instance_id`、路径由后端自己拼，前端传不进任意路径——否则它就是个「打开任意目录」的通用入口。
+日志按实例落在 `<数据根>/instances/<key>/logs/`，文件名带 UTC 时间戳。单个文件超过 2 MiB 轮转，保留最新 3 份，更旧的按文件删除。读取有两条路径：`read_instance_logs` 不给文件名时跨文件回读最近 300 行、最多 256 KiB；给了文件名只读那一份的尾部，名字必须先过 `is_safe_log_name`（单段、只允许字母数字与 `._-`、扩展名 `.log`），因为文件名是从界面回传的。`list_instance_logs` 给出保留窗口内的文件清单（名字、大小、修改时间、是否最新），界面据此把“共 N 份”变成可选的历史文件。`open_instance_logs_dir` 只接受 `instance_id`、路径由后端自己拼，前端传不进任意路径——否则 `open_instance_logs_dir` 就是个“打开任意目录”的通用入口。
 
-日志页是「工具条 + 全宽日志」的单栏布局，不是左右分栏：日志行本身很长，分栏会把等宽内容挤到半屏，一屏看不到 20 行。实例与历史文件都收进下拉，水平空间全部给行区域。
+日志页是“工具条 + 全宽日志”的单栏布局，不是左右分栏：日志行本身很长，分栏会把等宽内容挤到半屏，一屏看不到 20 行。实例与历史文件都收进下拉，水平空间全部给行区域。
 
-- **行结构**：每个 `.logline` 是独立网格（行号 / 本地时间 / 来源 / 正文），四列定宽，换行时仍然对齐。今天的行只显示 `HH:MM:SS`，跨天补 `MM-DD`，避免「昨天 23:59」被当成刚才。时间、来源弱化成次要色，正文吃满剩余宽度。
-- **级别**：`error / warn / ok / info` 由行内容判定，同时决定左侧 2px 色条与正文颜色。判级顺序是错误优先——`failed to warn` 这类行同时命中多组，漏报错误比多报代价高。规则抽在 `src/ui/loglines.ts`，有单测钉住，包括中文「启动失败 / 超时」。
+- **行结构**：每个 `.logline` 是独立网格（行号 / 本地时间 / 来源 / 正文），四列定宽，换行时列位置仍然一致。今天的行只显示 `HH:MM:SS`，跨天补 `MM-DD`，避免“昨天 23:59”被当成刚才。时间、来源弱化成次要色，正文吃满剩余宽度。
+- **级别**：`error / warn / ok / info` 由行内容判定，同时决定左侧 2px 色条与正文颜色。判级顺序是错误优先——`failed to warn` 这类行同时命中多组，漏报错误比多报代价高。规则抽在 `src/ui/loglines.ts`，有单测钉住，包括中文“启动失败 / 超时”。
 - **过滤与搜索**：都在前端做。后端一次给 300 行尾部，改条件不该再走一次 IO。搜索命中用 `<mark>` 高亮，替换发生在 `esc()` 之后、匹配串也先转义，用户输入不会被当成 HTML。
 - **自动刷新**：2 秒一次，只重绘行区域，不动工具条，输入焦点不丢。切页时由 `disposeLogs` 停掉定时器，不在后台空读磁盘。用户往上翻过之后不再强制贴底（`stickToBottom` 由滚动位置推出）。
-- **子进程输出开关**：日志页的 chip 与设置页的「诊断」分组是同一个开关，落盘在 `state/diagnostics.json`。只影响之后拉起的实例——改管道要重启进程，会打断正在用的模块，界面明说「重启后生效」，不偷偷重启。初始值可由 `DOUNAI_LOG_CHILD_OUTPUT` 覆盖，排障时不必先进设置页。
-- **空态与失败态**：没有日志时给「开启子进程输出」与「打开日志目录」两个真入口，并写出日志目录绝对路径；读过但被过滤空时提示「当前 N 行都不满足条件」，与「一份都没有」区分开。
+- **子进程输出开关**：日志页的 chip 与设置页的“诊断”分组是同一个开关，落盘在 `state/diagnostics.json`。只影响之后拉起的实例——改管道要重启进程，会打断正在用的模块，界面明说“重启后生效”，不偷偷重启。初始值可由 `DOUNAI_LOG_CHILD_OUTPUT` 覆盖，排障时不必先进设置页。
+- **空态与失败态**：没有日志时给“开启子进程输出”与“打开日志目录”两个真入口，并写出日志目录绝对路径；读过但被过滤空时提示“当前 N 行都不满足条件”，与“一份都没有”区分开。
 
 启动前短探按 roles 的 health 路径对分配到的端口发一次请求，不通就走正常启动。探通时把实例记进 `Supervisor.external`，快照合成 `Running` 加 `Healthy`、`pid` 为 null，不拉起第二个进程。`running()` 只数自己托管的进程；停止、重启、卸载、解除登记与清包目录对外部实例一律明确拒绝，管理页允许打开。标记只在内存里，下次启动前重探，探不通即清除。
 
-标记有两个来源：用户点「启动」时的启动前短探，以及采样线程每 2 秒的方向相反的发现——对既不在进程表里、也还没标外部、且未停用的实例按分配端口各探一次，探通即标成外部运行。少了后一条，用户在启动器之外手工把模块跑起来时界面一动不动，只能靠点一次「启动」才能认出来。发现用 600 ms 预算而不是 1200 ms：它是轮询不是启动门禁，端口没人监听时本机连接立即被拒，只有「端口开着但不响应」才会吃满超时，把采样的节拍拖长。正在 `Starting` 与 `Stopping` 的实例跳过，那几毫秒里端口上短暂出现的监听者可能就是启动器自己的进程，抢在这个空档标成外部会连带丢掉停止权。`health: null` 的角色（组装层 shell）没有可探的门禁，外部拉起的这类实例发现不了，仍要用户点一次「启动」来认领。
+标记有两个来源：用户点“启动”时的启动前短探，以及采样线程每 2 秒的方向相反的发现——对既不在进程表里、也还没标外部、且未停用的实例按分配端口各探一次，探通即标成外部运行。少了后一条，用户在启动器之外手工把模块跑起来时界面一动不动，只能靠点一次“启动”才能认出来。发现用 600 ms 预算而不是 1200 ms：这类探测是轮询不是启动门禁，端口没人监听时本机连接立即被拒，只有“端口开着但不响应”才会吃满超时，把采样的节拍拖长。正在 `Starting` 与 `Stopping` 的实例跳过，那几毫秒里端口上短暂出现的监听者可能就是启动器自己的进程，抢在这个空档标成外部会连带丢掉停止权。`health: null` 的角色（组装层 shell）没有可探的门禁，外部拉起的这类实例发现不了，仍要用户点一次“启动”来认领。
 
-探测请求一律带 `Connection: close` 并读掉响应体（最多 8 KiB）。只要状态码就丢连接，等于在服务端还在写的时候关 socket，对端会吃到 RST；uvicorn 在 Windows 的 Proactor 事件循环上把它记成未捕获异常，会往自己控制台打一整段栈。外部实例是用户在自己终端里跑起来的，那段栈直接刷在用户眼前，看起来像启动器把服务弄崩了。让服务端先收尾，谁都不必吃 RST。
+探测请求一律带 `Connection: close` 并读掉响应体（最多 8 KiB）。只要状态码就丢连接，等于在服务端还在写的时候关 socket，对端会吃到 RST；uvicorn 在 Windows 的 Proactor 事件循环上把 RST 记成未捕获异常，会往自己控制台打一整段栈。外部实例是用户在自己终端里跑起来的，那段栈直接刷在用户眼前，看起来像启动器把服务弄崩了。让服务端先收尾，谁都不必吃 RST。
 
-启动后的健康探测按 `roles` 的 `startup_timeout_ms` 定预算（`input` 60 秒、`llm` 与 `output` 90 秒），不再用固定的 4 秒。冷启动要加载解释器与全部 import，Python 服务十几秒才有第一个监听是常态，用单次请求超时当启动预算会在服务真正起来之前就判失败——真机上表现为「点启动报失败，六秒后 health 已是 200」。探测间隔前 5 秒用 50 ms、之后降到 400 ms：冷启动窗口里抓得紧，长预算下又不至于每分钟发上千个请求。
+启动后的健康探测按 `roles` 的 `startup_timeout_ms` 定预算（`input` 60 秒、`llm` 与 `output` 90 秒），不再用固定的 4 秒。冷启动要加载解释器与全部 import，Python 服务十几秒才有第一个监听是常态，用单次请求超时当启动预算会在服务真正起来之前就判失败——真机上表现为“点启动报失败，六秒后 health 已是 200”。探测间隔前 5 秒用 50 ms、之后降到 400 ms：冷启动窗口里抓得紧，长预算下又不至于每分钟发上千个请求。
 
-预算用尽只判「没起来」，不杀进程。快照保留 `pid`、阶段记 `failed`、`last_error` 写明超时秒数，界面把这类实例显示成「启动超时」而不是「启动失败」，并按「进程还在」给「停止」按钮。`Supervisor::owns` 与 `LifecycleState::mark_recovered` 补上另一条路径：再点启动时若发现自己托管的进程其实已经健康，就把状态从 `failed` 收回到 `running`（`contract` 保持 `not_checked`，只确认了 health），不再拉起第二个；仍不健康则明确要求先停止。`mark_external` 也加了守卫：自己持有进程时绝不标成「外部启动」，否则会连停止权一起丢掉。
+预算用尽只判“没起来”，不杀进程。快照保留 `pid`、阶段记 `failed`、`last_error` 写明超时秒数，界面把这类实例显示成“启动超时”而不是“启动失败”，并按“进程还在”给“停止”按钮。`Supervisor::owns` 与 `LifecycleState::mark_recovered` 补上另一条路径：再点启动时若发现自己托管的进程其实已经健康，就把状态从 `failed` 收回到 `running`（`contract` 保持 `not_checked`，只确认了 health），不再拉起第二个；仍不健康则明确要求先停止。`mark_external` 也加了守卫：自己持有进程时绝不标成“外部启动”，否则会连停止权一起丢掉。
 
 启动后进程常常几秒内自行退出，最常见的两个原因都已在本轮修掉：
 
-- **包自身没装进 venv。** `uv sync` 带 `--no-install-project`（见 7.1），`python -m <pkg>` 只能从工作目录找包，`src/<pkg>` 布局的包必然报 `No module named <pkg>` 后退出（退出码 1，界面只看到「启动失败」）。启动器现在把 `<包根>/src` 前置进 `PYTHONPATH`；flat 布局不加，避免包根遮蔽标准库同名模块。manifest 自己设了 `PYTHONPATH` 就拼在原值前面。
+- **包自身没装进 venv。** `uv sync` 带 `--no-install-project`（见 7.1），`python -m <pkg>` 只能从工作目录找包，`src/<pkg>` 布局的包必然报 `No module named <pkg>` 后退出（退出码 1，界面只看到“启动失败”）。启动器现在把 `<包根>/src` 前置进 `PYTHONPATH`；flat 布局不加，避免包根遮蔽标准库同名模块。manifest 自己设了 `PYTHONPATH` 就拼在原值前面。
 - **备用端口撞车。** 备用端口按整张实例表顺序分配，只拿当前实例算的话每个非 active 实例都会分到 `18101`，第二个启动的直接绑不上端口退出（真机日志里是 `exited code=3`）。单实例启动、一键启动与实例视图现在都用同一份全集，每个实例拿到不同端口。
 
-`Supervisor::owns` 也改成看进程存活而不是看进程表里有没有键。`--no-install-project` 之类的早退不会留下句柄，但任何一次「启动即退出」都会：watcher 只更新状态、不清进程表，`owns` 于是永远为真，用户再点启动被回「进程还在运行，先点停止」，而快照里 `pid` 已被清成 null，界面只给「启动」——真机上就是这个死循环。现在 `owns` 用 `try_wait` 复核，dead 句柄就地摘掉；`stop` 也先看存活，不再对一个早已结束的进程报「停止失败」；一键停止额外收掉「判超时但进程还活着」的实例。
+`Supervisor::owns` 也改成看进程存活而不是看进程表里有没有键。`--no-install-project` 之类的早退不会留下句柄，但任何一次“启动即退出”都会：watcher 只更新状态、不清进程表，`owns` 于是永远为真，用户再点启动被回“进程还在运行，先点停止”，而快照里 `pid` 已被清成 null，界面只给“启动”——真机上就是这个死循环。现在 `owns` 用 `try_wait` 复核，dead 句柄就地摘掉；`stop` 也先看存活，不再对一个早已结束的进程报“停止失败”；一键停止额外收掉“判超时但进程还活着”的实例。
 
 探测线程同样会提前收工：watcher 清空子进程槽之后，探测不再跑满预算（真机上崩溃的实例白白污染了 90 秒日志与一次 `health=Unhealthy`）。
 
-前端的事件委托改为幂等：容器（页头、正文）是常驻的，`bindActions` 重复调用只替换 action 表、不再叠加监听器。此前每次状态刷新都 `addEventListener`，一次点击会触发 N 个处理函数——真机日志里一条启动命令打了四行 `start`，三个回「实例已在启动中」，就是这个原因。启动、停止、重启另有按实例的在途标记，一键启停共用一个闸门，避免双击重复发请求。
+前端的事件委托改为幂等：容器（页头、正文）是常驻的，`bindActions` 重复调用只替换 action 表、不再叠加监听器。此前每次状态刷新都 `addEventListener`，一次点击会触发 N 个处理函数——真机日志里一条启动命令打了四行 `start`，三个回“实例已在启动中”，就是这个原因。启动、停止、重启另有按实例的在途标记，一键启停共用一个闸门，避免双击重复发请求。
 
 `origin/main` 在 2026-11-12 推了四个修复提交。v2 取其中四项：
 
@@ -419,7 +422,7 @@ M3 已按 role 拓扑启动、Job Object 托管与异步探测重写生命周期
 
 **外部启动的实例采不到**：`external` 快照没有 pid，也没有 Job。界面显示 `—` 并写明原因，不退化成 0。路线图原写的“退回按 pid 单进程采样”在外部实例上不成立。
 
-外部进程退出时没有任何事件能通知启动器，所以采样线程每 2 秒顺带按 `roles` 的 health 路径探一次活。连续两轮探不到才摘掉标记并推一次「未运行」，单次超时可能只是服务正忙。摘标记后的推送不能靠「读当前快照」：外部实例常常从未被启动器托管，状态机里查无此人，快照是 `None`，通用 `emit_snapshot` 会直接返回，后端已经摘了标记、前端却收不到事件。取不到快照时显式推一条 `Stopped` 事件，界面才会真正刷新。
+外部进程退出时没有任何事件能通知启动器，所以采样线程每 2 秒顺带按 `roles` 的 health 路径探一次活。连续两轮探不到才摘掉标记并推一次“未运行”，单次超时可能只是服务正忙。摘标记后的推送不能靠“读当前快照”：外部实例常常从未被启动器托管，状态机里查无此人，快照是 `None`，通用 `emit_snapshot` 会直接返回，后端已经摘了标记、前端却收不到事件。取不到快照时显式推一条 `Stopped` 事件，界面才会真正刷新。
 
 ### 关闭窗口与系统托盘
 
@@ -441,7 +444,7 @@ M3 已按 role 拓扑启动、Job Object 托管与异步探测重写生命周期
 
 ### 7.6 界面
 
-原设计稿（保留用于对照；实现时既没有走完整条链，也没有停在四屏，最终形态见「入门引导」一节）：装完还不能聊的根因是默认套装的 `model_packs` 为空、模型层系统提示词为空，所以向导原本要走完整条链：
+原设计稿（保留用于对照；实现时既没有走完整条链，也没有停在四屏，最终形态见“入门引导”一节）：装完还不能聊的根因是默认套装的 `model_packs` 为空、模型层系统提示词为空，所以向导原本要走完整条链：
 
 1. 体检。
 2. 确认安装目录，说明双模式与 UAC。
@@ -470,38 +473,48 @@ M3 已按 role 拓扑启动、Job Object 托管与异步探测重写生命周期
 
 管理页看起来像启动器自带的页面，容易让人误解密钥归属。启动器主 UI 要渲染一条常驻横幅，写明边界。
 
-实现状态（2026-11-14 更新）：界面分为骨架、共享层与九个视图。`index.html` 只放左侧栏、页头、正文容器、状态栏与模态挂点；`styles/app.css` 存两套语义令牌；`src/ui/main.ts` 做内存路由与全局刷新。九个视图在 `src/ui/views/`：概览、模块、下载、链路、环境、日志、管理、设置、导入本地。原「套装」页已删除：它按 v1 的 `module_id` 列表规划安装，而 v2 的安装单位是 `module_id@variant`，页面上的「开始安装」从来没接通。在线安装在 M8 后独立成侧栏「下载」视图，见 7.7；链路是 M6 新增的导航第三项，见 7.5 的「链路编排」。共享层三件：`store.ts` 管数据与派生查询，`dom.ts` 管转义、toast 与模态，`theme.ts` 管深浅切换。
+<!-- stc-disable-next-line: 下一行含 M6 产品术语，STC G6 判为套话属误报 -->
+实现状态（2026-11-14 更新）：界面分为骨架、共享层与九个视图。`index.html` 只放左侧栏、页头、正文容器、状态栏与模态挂点；`styles/app.css` 存两套语义令牌；`src/ui/main.ts` 做内存路由与全局刷新。九个视图在 `src/ui/views/`：概览、模块、下载、链路、环境、日志、管理、设置、导入本地。原“套装”页已删除：该页按 v1 的 `module_id` 列表规划安装，而 v2 的安装单位是 `module_id@variant`，页面上的“开始安装”从来没接通。在线安装在 M8 后独立成侧栏“下载”视图，见 7.7；链路是 M6 新增的导航第三项，见 7.5 的“链路编排”。共享层三件：`store.ts` 管数据与派生查询，`dom.ts` 管转义、toast 与模态，`theme.ts` 管深浅切换。
 
 数据只认一处来源：实例与端口取 `list_instance_views`，环境取 `probe_environment`，信任表与保留数取 `settings_snapshot`。界面层不推算端口、不拼指纹，避免与后端分叉。
 
+<!-- stc-disable-next-line: 下一行含 M6 产品术语，STC G6 判为套话属误报 -->
 概览与模块两个视图分工固定：概览回答“现在什么状态”，模块负责具体动作。概览自上而下四段：状态卡、链路、资源占用表、环境与最近活动。状态卡给一句话结论、四个事实与一键启动；链路按 role 排节点，缺的层画虚线占位，点节点进模块页；资源表按实例列出状态与进程号。最近活动只有两个来源：实例的 `installed_at` 与本次环境自检时间。启动器没有持久事件流，不写“几点启动了谁”。
 
+<!-- stc-disable-next-line: 下一行含 M6 产品术语，STC G6 判为套话属误报 -->
 概览按一屏设计。页头 60 与状态栏 30 是固定值，正文可用高度由视口决定，密度档位因此用 `max-height` 媒体查询表达，与量 `#pbody` 高度等价。档位只减条数与内边距：先掉最近活动条数，再掉“环境与目录”的次要项，最后收成状态卡、链路与资源表三块，不减信息类型。资源表的 CPU 与内存两列是预留位，没有进程采样就写“—”，页脚写明未接入；不显示 0%，那会被当成实时值。
 
-资源占用出现在三处，分工按“看整体 / 看单个 / 随时知道”排。概览资源表给每个实例一条 60 点趋势线与当前值，页脚给合计与采样时间。进程列是根 pid 与整棵树的进程数。模块卡片在实例名下面给一行 `mem · cpu · proc`，只给数字不画线：卡片是用来决定“要不要点进去”的。状态栏给合计，窗口宽度不足 1100 时整段省略，优先保住版本号。环境页不加这张表：它的职责是 Python / Node / uv / GPU 那份环境事实，塞进去只会是同一份数据第二处呈现。
+资源占用出现在三处，分工按“看整体 / 看单个 / 随时知道”排。概览资源表给每个实例一条 60 点趋势线与当前值，页脚给合计与采样时间。进程列是根 pid 与整棵树的进程数。模块卡片在实例名下面给一行 `mem · cpu · proc`，只给数字不画线：卡片是用来决定“要不要点进去”的。状态栏给合计，窗口宽度不足 1100 时整段省略，优先保住版本号。环境页不加这张表：该页负责 Python / Node / uv / GPU 那份环境事实，塞进去只会是同一份数据第二处呈现。
 
 采样推送只改数字，不重绘。资源表重建行体、卡片改占用行的 `innerHTML`、状态栏重建外壳，三处都不动周围的 DOM。2 秒一次的整页重绘会让滚动位置与 hover 状态一直被打断。卡片左栏另补一条事实条（安装时长 · 判级 · 依赖状态）与两行描述。两项都填原先空着的那段，卡片高度不变。
 
-环境检测是 `async` 命令，真正的探测跑在阻塞线程池里。Tauri 的同步命令执行在主线程，而一次体检要起六个子进程，同步跑就是窗口整段拖不动、画不出——这是「检测硬件时界面卡死」的成因。六项探测之间没有依赖，改成并行后总耗时等于最慢的一项，而不是累加。所有被拉起的子进程（PowerShell、Python、Node、nvidia-smi、curl、taskkill）都带 `CREATE_NO_WINDOW`，否则从 GUI 进程 spawn 控制台程序会让 Windows 逐个弹黑窗。
+环境检测是 `async` 命令，真正的探测跑在阻塞线程池里。Tauri 的同步命令执行在主线程，而一次体检要起六个子进程，同步跑就是窗口整段拖不动、画不出——这是“检测硬件时界面卡死”的成因。六项探测之间没有依赖，改成并行后总耗时等于最慢的一项，而不是累加。所有被拉起的子进程（PowerShell、Python、Node、nvidia-smi、curl、taskkill）都带 `CREATE_NO_WINDOW`，否则从 GUI 进程 spawn 控制台程序会让 Windows 逐个弹黑窗。
 
-主题是深色、浅色、跟随系统三档，切换只改 `<html data-theme>`，不重建 DOM，所以滚动位置与展开状态不丢。两套配色共用同一组语义令牌：主色只表示「可点 / 当前」，绿色只表示「进程健康」。
+主题是深色、浅色、跟随系统三档，切换只改 `<html data-theme>`，不重建 DOM，所以滚动位置与展开状态不丢。两套配色共用同一组语义令牌：主色只表示“可点 / 当前”，绿色只表示“进程健康”。
 
-「导入本地」有两条互不相同的路，页面上分成两块，不靠一个输入框猜意图：
+“导入本地”有两条互不相同的路，页面上分成两块，不靠一个输入框猜意图：
 
-- **本地包（.zip）**：三种给法都通——把文件拖到窗口任意位置、点「选择文件…」、或直接粘贴完整路径（按 Enter 也能检查）。拿到路径后由 `inspect_local_package` 读包内清单并判级，展示模块、版本、角色、签名状态与整包哈希，用户点安装后走 `install_local_package`。检查与安装分开，因为「导入」在别处通常意味着「直接生效」，而装进一个未验证的包会以用户权限运行。确认框对 B/C 类展示完整公钥指纹；D 类不给确认按钮。安装时带的是检查时看到的哈希，文件中途被换掉会直接失败。
+- **本地包（.zip）**：三种给法都通——把文件拖到窗口任意位置、点“选择文件…”、或直接粘贴完整路径（按 Enter 也能检查）。拿到路径后由 `inspect_local_package` 读包内清单并判级，展示模块、版本、角色、签名状态与整包哈希，用户点安装后走 `install_local_package`。检查与安装分开，因为“导入”在别处通常意味着“直接生效”，而装进一个未验证的包会以用户权限运行。确认框对 B/C 类展示完整公钥指纹；D 类不给确认按钮。安装时带的是检查时看到的哈希，文件中途被换掉会直接失败。
 - **本地目录（源码）**：扫描 → 登记，只写 `installed.json`，不复制也不删除文件。
+- **旧版 v1 清单**：上游五仓的 `manifest.json` 没有 `schema_version`、`role`、`runtime`，签名段也只有 `algo` 与 `value`。扫描结果把这类目录标成“旧版清单”，点“补齐清单”打开向导；直接填路径点“登记目录”也会自动转到向导，不再甩一句 `missing field pubkey`。
 
-拖拽走 Tauri 的 `tauri://drag-enter|drag-over|drag-leave|drag-drop` 四个事件：拖拽在操作系统层就被拦下，浏览器的 `dragover` / `drop` 不会触发，因此不能只靠 HTML5 拖放。监听在模块加载时注册一次（事件挂在窗口上，重复注册会叠加回调），拖入时高亮投放区，落到别的页面则先切到导入页再检查。只认第一个 `.zip`，拖进目录或别的文件会说明「模块包是 .zip，不是解压后的目录」。
+补齐向导只让你拍板 v1 真正缺、又猜不出来的东西：`module_id` 的 namespace、`role`、`variant`、`ports` 与依赖准备方式。`entry.command` 和依赖文件名按目录内容预填，确认前可以改，右侧同时显示完整 JSON。其余字段由 v1 带过或固定：`category` 恒 `optional`、`signature` 恒 `null`、`files` 恒 `{}`、`publisher_fp` 不写、判定恒 C 类。这几项不给输入框，否则“补字段”会变成把本地目录伪装成官方签名包的通道。v1 把解释器写死在源码目录的 `.venv`，转换时换成 `{venv_python}`；写死的端口换成 `{port}`，`{repo}` 换成 `{module_dir}`。
+
+生成物是 `data_root/instances/<key>/manifest-v2.json`，`installed.json` 记一个可选 `manifest_path` 指向生成物，源码目录一个字节都不改。运行时从 `AppStateV2::manifest_file()` 取清单，有 override 读生成物，否则读模块根的 `manifest.json`；启动、依赖准备、卡片展示与管理页地址六处共用这一个入口。catalog 安装与 zip 导入不经过转换，v1 包照旧硬拒。目录确认门禁仍观察源码目录，生成物不算进指纹。
+
+这不只是把字段补齐：v2 由启动器在实例目录重建虚拟环境，首次启动要重新装依赖，向导里写明。预览与确认之间比对 v1 原文的 SHA-256，源码被改过就要求重新预览；生成物过不了两道解析不落盘，登记失败会把刚写的文件删掉。扫描、登记、预览、确认四个命令都跑在运行时线程池，几秒的目录遍历与哈希不会让窗口点不动。
+
+拖拽走 Tauri 的 `tauri://drag-enter|drag-over|drag-leave|drag-drop` 四个事件：拖拽在操作系统层就被拦下，浏览器的 `dragover` / `drop` 不会触发，因此不能只靠 HTML5 拖放。监听在模块加载时注册一次（事件挂在窗口上，重复注册会叠加回调），拖入时高亮投放区，落到别的页面则先切到导入页再检查。只认第一个 `.zip`，拖进目录或别的文件会说明“模块包是 .zip，不是解压后的目录”。
 
 文件选择器用 `tauri-plugin-dialog`，能力只开 `dialog:allow-open`：插件只负责返回路径，读文件仍由 Rust 命令自己做，没有放开 `fs` 插件。包从磁盘读，不走 base64 过桥——1.7 MB 的包翻成 base64 会多占内存且没有必要。
 
 图标一律内联 SVG。先前用 `▦ ◫ ◈` 这类几何字符，缺字体的机器上会渲染成方块，换 SVG 后只依赖 `currentColor`。
 
-界面文案按 STC 的 `for-web-dev` 规则写：称读者只用「你」，按钮以动词开头，报错写清发生了什么与下一步，空状态说明这里会出现什么、怎么开始。
+界面文案按 STC 的 `for-web-dev` 规则写：称读者只用“你”，按钮以动词开头，报错写清发生了什么与下一步，空状态说明这里会出现什么、怎么开始。
 
 ### 入门引导
 
-引导是聚光灯，不是流程。第一版做成了四屏向导（本机现状 → 选模块 → 装依赖 → 完成），实现完被否掉了：它把「配置」和「上手」拆成前后两段，用户必须按顺序走完才能用主界面，而装依赖那一步可能要几分钟。中途想回模块页看一眼刚装了什么，只能先关掉。
+引导是聚光灯，不是流程。第一版做成了四屏向导（本机现状 → 选模块 → 装依赖 → 完成），实现完被否掉了：四屏向导把“配置”和“上手”拆成前后两段，用户必须按顺序走完才能用主界面，而装依赖那一步可能要几分钟。中途想回模块页看一眼刚装了什么，只能先关掉。
 
 现在的形态是浮在真实界面上的聚光灯层，两条硬约束：
 
@@ -513,26 +526,26 @@ M3 已按 role 拓扑启动、Job Object 托管与异步探测重写生命周期
 实现要点：
 
 - 挖洞是一个元素加 `box-shadow: 0 0 0 9999px` 画暗区，不是四片遮罩拼。目标移动时只改一个盒子的位置，暗区自动跟随，不用同步四个元素。
-- 每 120ms 校一次位：目标可能因数据刷新移动，也可能被重绘掉。连续 4 次找不到就降级成居中气泡并提示「这一步要指的位置现在不在页面上」，给「切回去」按钮——静默卡在一个空位置上是最糟的降级。
+- 每 120ms 校一次位：目标可能因数据刷新移动，也可能被重绘掉。连续 4 次找不到就降级成居中气泡并提示“这一步要指的位置现在不在页面上”，给“切回去”按钮——静默卡在一个空位置上是最糟的降级。
 - 层级 `z-index: 55`，在模态（60）之下：用户在引导里点开确认框时，模态要盖在引导之上正常可用，而不是被暗色遮罩压住。
-- 只自动弹一次，条件是「桌面端 + 没看过 + 一个实例都没装」。第三条是给老用户的：升级后已经装过模块的人不需要再被教一遍「模块是什么」，想看去设置页。
-- 状态仍存 `state/onboarding.json`，字段不变。走完记 `skipped: false`，中途关掉记 `skipped: true`，两种都不再自动弹。设置页页头常驻「走一遍引导」（五个分组下都可见，不藏在「诊断」里），且重看不改状态（不会把已完成的打回未完成）。
+- 只自动弹一次，条件是“桌面端 + 没看过 + 一个实例都没装”。第三条是给老用户的：升级后已经装过模块的人不需要再被教一遍“模块是什么”，想看去设置页。
+- 状态仍存 `state/onboarding.json`，字段不变。走完记 `skipped: false`，中途关掉记 `skipped: true`，两种都不再自动弹。设置页页头常驻“走一遍引导”（五个分组下都可见，不藏在“诊断”里），且重看不改状态。
 - 气泡定位、挖洞、居中与视口判定都是纯函数（`placePop` / `holeOf` / `centerPop` / `viewport`），16 项单测钉住四种贴边、首选侧装不下时的退让、视口夹取与冷启动的错误尺寸。
 - **不拿 layout viewport 定位**。WebView 冷启动时 `innerHeight` 可能远大于真实窗口（实测上万像素），第一版用 CSS `top: 50%` 居中，气泡因此落在窗口下方，要用户拖一下窗口才出现。`viewport()` 取 `innerHeight` / `visualViewport` / `outerHeight` / `screen.availHeight` 四者最小值——真实可见区域不会比其中任何一个更大。居中坐标也由 JS 算成像素写进 style，跟着每 120ms 的校位一起重算，窗口尺寸一同步，下一拍就纠正。
-- 首版的「首次下载量估算」与「选模块批量装」随之删掉：下载视图已经显示每个包的体积，再在引导里估一遍只会和真实占用对账不上。`onboarding_facts` 改名 `storage_facts`，内容（数据根、实例数、解释器与缓存字节、数据根总占用）搬进设置页「存储与清理」——那里才是它该出现的地方。
+- 首版的“首次下载量估算”与“选模块批量装”随之删掉：下载视图已经显示每个包的体积，再在引导里估一遍只会和真实占用对账不上。`onboarding_facts` 改名 `storage_facts`，内容（数据根、实例数、解释器与缓存字节、数据根总占用）搬进设置页“存储与清理”——那里才是这些数据该出现的地方。
 
 ### 7.7 子 WebView
 
-渲染路径：主窗口保留自己的 WebView，管理页作为 `Window::add_child` 挂上来的**原生子视图**，覆盖内容区 `#admin-slot` 的坐标。原设计写的是「主窗口用 `Window::builder` 建无 WebView 的壳、主 UI 也作为子 WebView」，实现时没有走这条：那要改 `tauri.conf.json` 的窗口定义、主 UI 的挂载方式与整个 capability 适配，而验收只要求管理页在启动器窗口内。保留主 WebView 不动，五个既有视图零回归。管理页仍是顶层 WebView，不是 iframe，三个上游的 `X-Frame-Options: DENY` 不受影响。
+渲染路径：主窗口保留自己的 WebView，管理页作为 `Window::add_child` 挂上来的**原生子视图**，覆盖内容区 `#admin-slot` 的坐标。原设计写的是“主窗口用 `Window::builder` 建无 WebView 的壳、主 UI 也作为子 WebView”，实现时没有走这条：那要改 `tauri.conf.json` 的窗口定义、主 UI 的挂载方式与整个 capability 适配，而验收只要求管理页在启动器窗口内。保留主 WebView 不动，五个既有视图零回归。管理页仍是顶层 WebView，不是 iframe，三个上游的 `X-Frame-Options: DENY` 不受影响。
 
 四条行为约束：
 
-1. URL 只能来自 `admin_url_v2`（读 manifest 的 `admin_ui.web_ui.path` 与端口表），前端不传地址；`admin_host::validate_mount_request` 再验一次回环、端口与路径。子 WebView 还挂了 `on_navigation`，只允许同 host 同端口的站内跳转——否则管理页能跳到本机另一个模块的服务当跳板。端口取该实例的实际分配端口，备用端口同样成立。校验允许 `path = "/"`：官方样例 `dounai-input` 与 `moodvoice` 的管理页就在服务根。M4 真机首测发现旧校验把根路径判成「缺少路径」、使这两个模块全部降级成独立窗口，现只挡路径里的 `..`，并加了遍历三个官方样例 manifest 的回归测试。
+1. URL 只能来自 `admin_url_v2`（读 manifest 的 `admin_ui.web_ui.path` 与端口表），前端不传地址；`admin_host::validate_mount_request` 再验一次回环、端口与路径。子 WebView 还挂了 `on_navigation`，只允许同 host 同端口的站内跳转——否则管理页能跳到本机另一个模块的服务当跳板。端口取该实例的实际分配端口，备用端口同样成立。校验允许 `path = "/"`：官方样例 `dounai-input` 与 `moodvoice` 的管理页就在服务根。M4 真机首测发现旧校验把根路径判成“缺少路径”、使这两个模块全部降级成独立窗口，现只挡路径里的 `..`，并加了遍历三个官方样例 manifest 的回归测试。
 2. 创建在独立线程里跑（`TauriAdminHost::mount` 起线程 + channel + 15s 超时）。Windows 上 Webview2 的 COM 初始化会死锁在 `about:blank`，命令线程里建窗是已知的死锁源；连续切换多个实例也不该在命令线程里排队。
-3. **capability 按 webview label 授权**。`default.json` 用 `"webviews": ["main"]` 而不是 `"windows": ["main"]`：Tauri 的 ACL 判定是「webviews 匹配 **或** windows 匹配」，而内嵌页挂在 `main` 窗口下，用 `windows` 会让它继承主窗口的全部命令权限。改成按 label 后，内嵌页（`admin-embed-*`）与独立窗口（`admin-*`）都不匹配，没有任何权限。两条路径仍共用一份 `initialization_script_for_all_frames` 清掉 `__TAURI__` / `__TAURI_INTERNALS__` 等注入——capability 是硬隔离，清注入是纵深防御，不能只做一半。`for_all_frames` 是必须的，上游页面可能用 iframe 加载子页面。
-4. 生命周期绑定进程状态。实例未启动显示本地占位页（不显示连接错误）；health 从非健康变健康时 reload 一次；进程退出时隐藏子视图并回到占位；卸载时 `admin_host_unmount` 销毁。切到别的视图用 `hide` 而不是 `close`——原生视图不会跟着 DOM 消失，不藏就会浮在下一页上，而隐藏能保住页面里填了一半的表单。label 按 `instance_id` 派生（非法字符替换后加哈希），重复点击复用同一个子视图。
+3. **capability 按 webview label 授权**。`default.json` 用 `"webviews": ["main"]` 而不是 `"windows": ["main"]`：Tauri 的 ACL 判定是“webviews 匹配 **或** windows 匹配”，而内嵌页挂在 `main` 窗口下，用 `windows` 会让内嵌页继承主窗口的全部命令权限。改成按 label 后，内嵌页（`admin-embed-*`）与独立窗口（`admin-*`）都不匹配，没有任何权限。两条路径仍共用一份 `initialization_script_for_all_frames` 清掉 `__TAURI__` / `__TAURI_INTERNALS__` 等注入——capability 是硬隔离，清注入是纵深防御，不能只做一半。`for_all_frames` 是必须的，上游页面可能用 iframe 加载子页面。
+4. 生命周期绑定进程状态。实例未启动显示本地占位页，不显示连接错误；health 从非健康变健康时 reload 一次；进程退出时隐藏子视图并回到占位；卸载时 `admin_host_unmount` 销毁。切到别的视图用 `hide` 而不是 `close`——原生视图不会跟着 DOM 消失，不藏就会浮在下一页上，而隐藏能保住页面里填了一半的表单。label 按 `instance_id` 派生（非法字符替换后加哈希），重复点击复用同一个子视图。
 
-`admin_host.rs` 是 M0 冻结契约，M4 起由 `TauriAdminHost` 真正实现 `AdminHost` 的 mount / unmount / reload 三方法。勘误（2026-11-13 真机）：`validate_mount_request` 原本还要求「路径非空」，与官方样例 `web_ui.path = "/"` 冲突；这条规则在 M4 之前没有消费者，第一次落地即暴露。现只保留回环、端口与 `..` 三项检查——host 与 port 仍锁死，放行服务根不放宽安全边界。resize 与 visible 没有生命周期语义，作为宿主自己的方法，不进 trait。`web_ui.embed = false` 的模块按声明开独立窗口，不算降级失败；子 WebView 创建失败时同样自动退化为独立窗口，URL 不变、模块服务仍在跑，不丢状态。
+`admin_host.rs` 是 M0 冻结契约，M4 起由 `TauriAdminHost` 真正实现 `AdminHost` 的 mount / unmount / reload 三方法。勘误（2026-11-13 真机）：`validate_mount_request` 原本还要求“路径非空”，与官方样例 `web_ui.path = "/"` 冲突；这条规则在 M4 之前没有消费者，第一次接入消费者即暴露。现只保留回环、端口与 `..` 三项检查——host 与 port 仍锁死，放行服务根不放宽安全边界。resize 与 visible 没有生命周期语义，作为宿主自己的方法，不进 trait。`web_ui.embed = false` 的模块按声明开独立窗口，不算降级失败；子 WebView 创建失败时同样自动退化为独立窗口，URL 不变、模块服务仍在跑，不丢状态。
 
 坐标由 UI 一处算、core 一处下发：`clampAdminBounds` 把容器矩形夹进可见视口（负坐标与零尺寸会被 `validate_mount_request` 硬拒），窗口缩放时 120ms 一拍重下发，所以这一页不滚动。6 项前端单测钉住夹取、完全不可见与极小窗口。
 

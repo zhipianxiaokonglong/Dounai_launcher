@@ -85,7 +85,7 @@ cargo run --bin pack -- verify --pubkey <K1 公钥文件> --zip <zip>
 2. 把 zip 上传到项目 Files。当前实际布局是平的 `modules/<文件名>.zip`（例：`modules/dounai-input-0.2.1.zip`），文件名不带路径分隔符。多个版本并存时文件名里必须带版本号，否则新版会覆盖旧版。
 3. 生成 catalog，条目 `sources` 用 `https://downloads.sourceforge.net/project/dounai-releases/modules/<文件名>.zip`，`sha256` 与 `size` 用第 1 步的值。
 4. 用 K5 签 catalog，`expires` 不超过 7 天，再用 K5 公钥自检一次。
-5. 上传 `catalog.json` 到项目根（不是 `modules/`），回读一次核对 `sha256`。
+5. 上传 `catalog.json` 到项目根，不要放进 `modules/`，回读一次核对 `sha256`。
 
 2026-11-13 实际执行过一次，可直接照抄：
 
@@ -121,7 +121,7 @@ sha256sum /tmp/c.json <catalog.json>
 
 `dounai-ui` 是首个 shell 包，内容只有 `tauri build --no-bundle` 产出的单个 `dounai.exe`（前端资源已内嵌），入口写 `{module_dir}/dounai.exe`。这也暴露过一处契约缺口：旧规则要求 shell 的 `entry.command` 含 `{install_root}`，而 `{install_root}` 是只读程序根，zip 包解压在 `data_root/instances/<key>/package`，照旧规则打的包一定起不来。契约已改为 `{module_dir}`。
 
-重签用 `scripts/release-catalog.py`，它拉现网底稿、`sequence+1`、7 天窗、逐条重算包哈希、调 `sign_catalog` 签名并复验。本次新增一条行为：条目自带的 `expires` 跟着 catalog 顶层窗口一起刷新，只刷顶层会让启动器在 catalog 仍有效时把每个条目都判成过期。
+重签用 `scripts/release-catalog.py`，脚本拉现网底稿、`sequence+1`、7 天窗、逐条重算包哈希、调 `sign_catalog` 签名并复验。本次新增一条行为：条目自带的 `expires` 跟着 catalog 顶层窗口一起刷新，只刷顶层会让启动器在 catalog 仍有效时把每个条目都判成过期。
 
 上传通道是 SFTP 与 `rsync`/`scp`。2026-11-13 已把本机 SSH 公钥登记到 SourceForge，实测 `tonyjh07@frs.sourceforge.net` 认证通过，`/home/frs/project/dounai-releases/` 可上传、列出与删除。上传仍未脚本化，发布时逐次执行。K1 私钥、K5 私钥与上传凭据分开保管，任一泄露都按密钥泄露流程处理。
 
@@ -158,7 +158,7 @@ K5 泄露时按以下顺序处理。
 
 ## 7. 当前状态
 
-K1 与 K5 都已生成并内置。模块包与已签名的 `catalog.json` 已上传到 SourceForge 的 `dounai-releases` 项目，在线安装链路已打通。
+K1 与 K5 都已生成并内置。模块包与已签名的 `catalog.json` 已上传到 SourceForge 的 `dounai-releases` 项目，在线安装流程已打通。
 
 | 项 | 状态 |
 |---|---|
@@ -177,7 +177,7 @@ catalog 过期（或 `sequence` 未推进）时 `refresh_catalog` 返回 `unavai
 
 远程分发启用后仍需完成的事。
 
-1. 真机验证四条装链路：从下载页拉取、验签、下包、安装，四个条目各一次。
+1. 真机验证四条安装流程：从下载页拉取、验签、下包、安装，四个条目各一次。
 2. 每 7 天重签一次 catalog，过期窗口内不重签会让自动更新断掉。
 3. shell 包首次激活要单独确认并在界面常驻发布者，装完必须眼过一遍真实窗口，启停与卸载各试一次。
 

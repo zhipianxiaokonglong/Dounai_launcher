@@ -224,7 +224,7 @@ M3 代码落在四处：core 的 `lifecycle/` 纯逻辑、app 的 `process/win.r
 3. `switch_active` 已按 `activation_steps` 执行停旧、起新、探测、提交与回滚。限制有两条：目标实例由外部进程提供时直接拒绝（验不了契约、也无法回滚）；目标已是 active 且在跑时只重新探测，不重启进程。
 4. 卸载的 `remove_files` 会清包目录、venv 与日志，`data_dir` 按契约保留；`purge_local_data` 先停托管实例再删目录，外部实例停不掉，跳过并记进 `errors`。
 5. `purge_local_data` 的 `state` 只重置 catalog 水位，保留实例表，与 v1 的清状态语义不同。
-6. 实例视图只走 `list_instance_views`：它已内嵌生命周期快照、端口、active、prepared 与清单摘要（`name`/`admin_ui`），`list_module_states` 与 `list_instances` 已删除。
+6. 实例视图只走 `list_instance_views`：该命令已内嵌生命周期快照、端口、active、prepared 与清单摘要（`name`/`admin_ui`），`list_module_states` 与 `list_instances` 已删除。
 
 ## M3 收尾四项（2026-11-13）
 
@@ -270,62 +270,62 @@ SourceForge 上传通道已实测。2026-11-13 用本机 SSH 公钥通过 `tonyj
 
 ## M4 界面重写离线验收（2026-11-13）
 
-结论：界面骨架、六个视图与深浅双主题落地，前端门禁全绿。首次向导、内嵌子 WebView 与真机 WebView 冒烟未做。
+结论：界面骨架、六个视图与深浅双主题完成，前端门禁全绿。首次向导、内嵌子 WebView 与真机 WebView 冒烟未做。
 
 结构：`index.html` 只剩骨架（左侧栏 232px、页头 60px、正文、状态栏 30px、模态挂点）。`src/ui/main.ts` 做内存路由与全局刷新，`store.ts` 管数据与派生查询，`dom.ts` 管转义与模态，`theme.ts` 管主题，`icons.ts` 提供内联 SVG。六个视图在 `src/ui/views/`。
 
 新增两个后端只读命令：`list_instance_views`（实例 + 端口 + active + 快照合并成一屏所需的最小集合）与 `settings_snapshot`（信任表、保留策略、K1 与 K5 指纹）。两者都在 `main.rs` 注册，`commands_v2` 有单测覆盖合并且端口分配的边界。
 
-文案：所有界面字符串按 STC `for-web-dev` 的 W1–W10 检查一遍。改动三处——`它们` 改写成「模块」、`去导入` 统一成「登记本地目录」、三条报错补上「接下来能做什么」。
+文案：所有界面字符串按 STC `for-web-dev` 的 W1–W10 检查一遍。改动三处——`它们` 改写成“模块”、`去导入` 统一成“登记本地目录”、三条报错补上“接下来能做什么”。
 
-视觉核对：用无头 Chrome 加载构建产物，逐页截图检查模块、套装、环境、日志、设置、导入本地六页，深浅两套各一轮；另按 860×600 复核窄窗口。修掉三处：几何字符在缺字体环境下渲染成方块（改内联 SVG）、窄窗口安装清单把「必需」拆成两行（行内说明改为省略不换行）、设置页默认停在「信任与公钥」而首项是「外观」。
+视觉核对：用无头 Chrome 加载构建产物，逐页截图检查模块、套装、环境、日志、设置、导入本地六页，深浅两套各一轮；另按 860×600 复核窄窗口。修掉三处：几何字符在缺字体环境下渲染成方块（改内联 SVG）、窄窗口安装清单把“必需”拆成两行（行内说明改为省略不换行）、设置页默认停在“信任与公钥”而首项是“外观”。
 
 门禁：`npm run typecheck` 通过，`npm test` 65 项全过，`vite build` 通过（产物 68 KB JS / 18 KB CSS），`cargo test --offline --workspace --all-targets` 全绿（app lib 97 项），契约 109 项断言未受影响。
 
-未实测：真机窗口内六个视图的实际渲染、子 WebView 相关七条断言、首次向导、第三方模块在真机上的「非沙箱」展示、主题跟随系统在 WebView2 下的行为。截图来自无头 Chrome，不等于 WebView2 渲染结果。按 [ROADMAP.md](ROADMAP.md) 开头的规则，这些不计验收通过。
+未实测：真机窗口内六个视图的实际渲染、子 WebView 相关七条断言、首次向导、第三方模块在真机上的“非沙箱”展示、主题跟随系统在 WebView2 下的行为。截图来自无头 Chrome，不等于 WebView2 渲染结果。按 [ROADMAP.md](ROADMAP.md) 开头的规则，这些不计验收通过。
 
 ## 环境检测卡顿与闪窗修复（2026-11-13）
 
-现象：真机点「重新检测」时界面整段点不动，同时连弹几个命令行黑窗。
+现象：真机点“重新检测”时界面整段点不动，同时连弹几个命令行黑窗。
 
 两条独立成因：
 
-1. **同步命令跑在主线程**。Tauri 的同步 `#[tauri::command]` 在主线程（事件循环所在线程）执行，`probe_environment` 内部是六次子进程探测，串行累加最长可到几十秒——期间 WebView 既不能重绘也不能响应输入。修法：命令改 `async`，探测体放进 `tauri::async_runtime::spawn_blocking`；六项探测互不依赖，用 `std::thread::scope` 并行，总耗时等于最慢的一项而非累加。`EnvReport` 结构不变，前端只补了「检测中」的进行中反馈。
+1. **同步命令跑在主线程**。Tauri 的同步 `#[tauri::command]` 在主线程（事件循环所在线程）执行，`probe_environment` 内部是六次子进程探测，串行累加最长可到几十秒——期间 WebView 既不能重绘也不能响应输入。修法：命令改 `async`，探测体放进 `tauri::async_runtime::spawn_blocking`；六项探测互不依赖，用 `std::thread::scope` 并行，总耗时等于最慢的一项而非累加。`EnvReport` 结构不变，前端只补了“检测中”的进行中反馈。
 2. **子进程没禁止控制台窗口**。Python、Node、nvidia-smi、PowerShell、curl、taskkill 都是控制台程序，从 GUI 进程 spawn 时 Windows 会给每个子进程分配新控制台，于是黑窗逐个闪一下。修法：`env_probe::hidden_command` 统一加 `CREATE_NO_WINDOW`；`core/src/env/console.rs` 提供同一套 helper，`runner.rs`（uv）与 `bootstrap.rs`（curl）接上；`process/win.rs` 的 `taskkill` 补同一标志。core 侧写常量而不引 `windows-sys`，避免为一个 flag 拉进整包绑定。
 
 顺带修首屏：`boot()` 原先在四个后台请求（含环境检测）之后才 `wireNav()`，数据没回来时左侧导航点不动。改为先接导航与事件、先渲染首屏，再等数据回来重绘。
 
-单测：`probe_environment_returns_report_without_panic` 覆盖并行改造后的报告完整性；`missing_runtime` 让探测线程 panic 时退化为「没有跑完」而不是冒充「未安装」，但当前没有稳定的注入点，未写断言。
+单测：`probe_environment_returns_report_without_panic` 覆盖并行改造后的报告完整性；`missing_runtime` 让探测线程 panic 时退化为“没有跑完”而不是冒充“未安装”，但当前没有稳定的注入点，未写断言。
 
 门禁：`cargo fmt --all -- --check`、`clippy --all-targets -- -D warnings` 通过，`cargo test --lib` 100 项全过，`cargo test -p launcher-core` 全绿，`npm run typecheck`、`npm test` 65 项、`vite build` 通过，`cargo tauri build` 产出 2.90 MiB NSIS 安装包。
 
-未实测：闪窗消失与卡顿解除需要在真机 GUI 会话里点一次「重新检测」确认；并发多次检测的行为未压测。
+未实测：闪窗消失与卡顿解除需要在真机 GUI 会话里点一次“重新检测”确认；并发多次检测的行为未压测。
 
 ## 本地包导入入口（2026-11-13）
 
-现象：界面只有「扫描目录 / 登记目录」，找不到装本地 .zip 的地方；模块页空状态却写着「或用离线包安装」。
+现象：界面只有“扫描目录 / 登记目录”，找不到装本地 .zip 的地方；模块页空状态却写着“或用离线包安装”。
 
-根因是这条链路从来没接上过：`install_module` 命令与 `bridge.ts` 的封装都在，但新界面里没有任何调用点——`install_module` 要的是 `zip_base64`，前端得先把文件读成 base64，而桌面端既没有文件选择器也没有读文件的权限，所以那半个入口一直悬空。
+根因是这条流程从来没接上过：`install_module` 命令与 `bridge.ts` 的封装都在，但新界面里没有任何调用点——`install_module` 要的是 `zip_base64`，前端得先把文件读成 base64，而桌面端既没有文件选择器也没有读文件的权限，所以那半个入口一直悬空。
 
 修法：
 
 - 新增 `inspect_local_package` / `install_local_package` 两条命令，直接收**路径**，由 Rust 自己读文件、算哈希、解包、判级，不走 base64 过桥。两者共用一个 `inspect_bytes`，判级只有一份。
-- 检查与安装分离：先看清单、角色、签名状态与整包哈希，再决定装不装。安装时带上检查得到的哈希，文件在中途被替换会以「整包哈希不符」失败。
+- 检查与安装分离：先看清单、角色、签名状态与整包哈希，再决定装不装。安装时带上检查得到的哈希，文件在中途被替换会以“整包哈希不符”失败。
 - B/C 类走确认框并展示完整公钥指纹，D 类不给确认按钮。
 - 原本 `install_module` 的收尾逻辑抽成 `commit_install`，离线包与本地包共用，避免两套判级各自漂移。
 - 文件选择器接 `tauri-plugin-dialog`，能力只加 `dialog:allow-open`；不放开 `fs` 插件，路径拿到后由命令自己读。
 
 单测：`local_package_needs_confirmation_then_installs`（C 类拒绝未确认、确认后装成功、重复安装返回 replaced）、`local_package_hash_mismatch_is_rejected`（检查后文件被换掉必须失败）。app lib 102 项。
 
-未实测：真机点「选择文件…」弹出的系统对话框、装完后的启动与依赖准备。命令层测试覆盖了判级与落盘，覆盖不了系统对话框。
+未实测：真机点“选择文件…”弹出的系统对话框、装完后的启动与依赖准备。命令层测试覆盖了判级与落盘，覆盖不了系统对话框。
 
 ## 本地包的拖拽与路径输入（2026-11-13）
 
-只做「选择文件…」不够用：从浏览器下载完的包，用户手上就是一个路径，再走一次系统对话框是多余的一步。
+只做“选择文件…”不够用：从浏览器下载完的包，用户手上就是一个路径，再走一次系统对话框是多余的一步。
 
 - **拖拽**：Tauri 在 OS 层拦截拖拽，HTML5 的 `dragover` / `drop` 不会触发，必须听 `tauri://drag-enter|drag-over|drag-leave|drag-drop`（事件由 `emit_to_webview` 发出，`listen` 不带 target 即可收到，`paths` 就是绝对路径）。监听在模块加载时注册一次——事件挂在窗口上，每次重渲染都注册会叠加回调。拖入时按 `data-drag` 高亮投放区；落在别的页面则先切到导入页再检查，否则用户看不到结果。
-- **路径输入**：检查前从输入框读值，而不是只信 `input` 事件——右键粘贴可能不触发，按 Enter 也能直接检查。Rust 侧剔掉首尾引号，兼容「复制为路径」带引号的形态。
-- 只认第一个 `.zip`；拖进目录或其它文件时说明「模块包是一个 .zip，不是解压后的目录」。
+- **路径输入**：检查前从输入框读值，而不是只信 `input` 事件——右键粘贴可能不触发，按 Enter 也能直接检查。Rust 侧剔掉首尾引号，兼容“复制为路径”带引号的形态。
+- 只认第一个 `.zip`；拖进目录或其它文件时说明“模块包是一个 .zip，不是解压后的目录”。
 
 门禁：`npm run typecheck`、`npm test` 65 项、`vite build` 通过。截图核对（无头 Chrome 1200×780，深浅两套）确认投放区、检查结果与两处路径输入框的排版正常。
 
@@ -333,80 +333,80 @@ SourceForge 上传通道已实测。2026-11-13 用本机 SSH 公钥通过 `tonyj
 
 ## 自打包装不上自己的包：包内路径两套规则（2026-11-13）
 
-现象：导入 `dounai-input-0.2.1.zip` 时界面报「读包失败：契约数据不合法：非法的包内路径：.dockerignore」。
+现象：导入 `dounai-input-0.2.1.zip` 时界面报“读包失败：契约数据不合法：非法的包内路径：.dockerignore”。
 
 根因不是包坏了，是两处规则各写了一套：
 
-- `core::m2::manifest::validate_relative_path` 要求每个包内路径**首字符是字母或下划线**，安装与检查都走它，`.dockerignore` 直接拒；
+- `core::m2::manifest::validate_relative_path` 要求每个包内路径**首字符是字母或下划线**，安装与检查都走这个校验函数，`.dockerignore` 直接拒；
 - `release::safe_package_path` 是打包侧另一套，字符白名单里含 `.`，`release.rs` 的测试里还明确断言 `.gitignore` **应当通过**。
 
 于是 `pack` 打出的包天然过不了 `pack` 自己的校验，只是打包后那次自检走的是 `verify_zip`，没经过清单解析，所以没暴露。任何带 `.gitignore`、`.dockerignore`、`.env.example` 的上游仓库都会踩。
 
 修法：规则收敛到一处。`validate_relative_path` 改为按段校验——空路径、反斜杠、控制字符、首尾斜杠、空段与 `.`/`..` 一律拒，绝对路径、盘符与 Windows 保留名交给 `security::safe_join`，点开头的名字放行；`release::safe_package_path` 不再自己实现，直接调用 core 那个函数并转换错误类型。安全性没有下降：拦穿越的是 `safe_join`，首字符限制从来没负责过这件事。
 
-单测：core 新增 `relative_paths_accept_dot_files`、`relative_paths_reject_traversal_and_devices`、`manifest_parses_when_files_contain_dot_names`；app 侧把 `unsigned_package()` 改成带 `.gitignore` 的包，`local_package_needs_confirmation_then_installs` 因此覆盖了「点开头文件能装进去」。另用临时集成测试把三个真实包（77 / 69 / 104 个文件）过了一遍清单解析，确认全部通过后已删除该测试文件。
+单测：core 新增 `relative_paths_accept_dot_files`、`relative_paths_reject_traversal_and_devices`、`manifest_parses_when_files_contain_dot_names`；app 侧把 `unsigned_package()` 改成带 `.gitignore` 的包，`local_package_needs_confirmation_then_installs` 因此覆盖了“点开头文件能装进去”。另用临时集成测试把三个真实包（77 / 69 / 104 个文件）过了一遍清单解析，确认全部通过后已删除该测试文件。
 
 门禁：core 155 项、app lib 102 项、`clippy --all-targets -- -D warnings`、契约 109 项通过。
 
 未实测：真机重新导入这三个包并启动模块。规则层已证明可通过，端到端仍要在界面上点一次。
 
-## 启动链路三个连着的毛病（2026-11-13）
+## 启动流程三个连着的毛病（2026-11-13）
 
-真机反馈三件事：单实例点「启动」报「模块 dounai/dounai-input@stable 未安装」；一键启动报「已启动 0 / 3 个实例」，随后窗口卡十几秒；装完包不装依赖也能点启动。
+真机反馈三件事：单实例点“启动”报“模块 dounai/dounai-input@stable 未安装”；一键启动报“已启动 0 / 3 个实例”，随后窗口卡十几秒；装完包不装依赖也能点启动。
 
 **一、启动按 module_id 找实例，界面传的是 instance_id**
 
-`start_module` / `stop_module` 收参数叫 `module_id`，内部调 `resolve_instance(module_id)`，只按 `module_id` 过滤。M4 重写后界面按实例操作，传的是 `dounai/dounai-input@stable`，于是永远匹配不到，报「未安装」。
+`start_module` / `stop_module` 收参数叫 `module_id`，内部调 `resolve_instance(module_id)`，只按 `module_id` 过滤。M4 重写后界面按实例操作，传的是 `dounai/dounai-input@stable`，于是永远匹配不到，报“未安装”。
 
-修法：`resolve_instance` 先按 `instance_id` 精确匹配，再退回 `module_id`（active 优先）。两个命令面共用一套解析，界面传哪种键都对；找不到时的文案改成「没有找到实例或模块」，不再冒充「未安装」。
+修法：`resolve_instance` 先按 `instance_id` 精确匹配，再退回 `module_id`（active 优先）。两个命令面共用一套解析，界面传哪种键都对；找不到时的文案改成“没有找到实例或模块”，不再冒充“未安装”。
 
 **二、生命周期命令跑在主线程**
 
-Tauri 的同步命令在主线程执行。`start_all` 对每个实例先做端口短探（`PRESTART_TIMEOUT_MS`）再 spawn，三个实例串起来就是十几秒不重绘；`prepare_instance_env` 更糟，建 venv、跑 `uv sync` 可能几分钟。上一轮只修了 `probe_environment`，同类问题在启动链路上还在。
+Tauri 的同步命令在主线程执行。`start_all` 对每个实例先做端口短探（`PRESTART_TIMEOUT_MS`）再 spawn，三个实例串起来就是十几秒不重绘；`prepare_instance_env` 更糟，建 venv、跑 `uv sync` 可能几分钟。上一轮只修了 `probe_environment`，同类问题在启动流程上还在。
 
 修法：`start_module` / `stop_module` / `start_all` / `stop_all` / `restart_instance` / `prepare_instance_env` / `switch_active` 一律改 async，实活进 `tauri::async_runtime::spawn_blocking`，状态从 `AppHandle::state` 取。命令名与参数形状不变，`main.rs` 注册表不用动。
 
-**三、「已启动 0 / 3」是计数错了，不是没启动**
+**三、“已启动 0 / 3”是计数错了，不是没启动**
 
-`Supervisor::start` 返回的快照是 `Phase::Starting`，健康检查在后台继续；界面只数 `run === "running"`，正在起的全被算成没起来。改成 `running` 与 `starting` 都算启动成功，并单独说明「其中 N 个正在等健康检查」。
+`Supervisor::start` 返回的快照是 `Phase::Starting`，健康检查在后台继续；界面只数 `run === "running"`，正在起的全被算成没起来。改成 `running` 与 `starting` 都算启动成功，并单独说明“其中 N 个正在等健康检查”。
 
 **四、装完包没有装依赖这一步**
 
-`build_start_request` 早就拒绝未准备的环境，但报错写的是「请先执行 prepare_instance_env」，界面又把「启动」摆在最显眼的位置，用户只能撞到这条开发者措辞。
+`build_start_request` 早就拒绝未准备的环境，但报错写的是“请先执行 prepare_instance_env”，界面又把“启动”摆在最显眼的位置，用户只能撞到这条开发者措辞。
 
-修法：`list_instance_views` 增加 `prepared` 字段（`verify_instance` 探真实 venv，shell 角色恒真）。未就绪时实例行的主按钮就是「安装依赖」，附「依赖未装」徽标；`startOne` 若发现未就绪会先装再启，不让用户先撞一次错。菜单里两个入口：离线安装、允许联网安装。安装完成的提示改成「回模块页先点『安装依赖』」。
+修法：`list_instance_views` 增加 `prepared` 字段（`verify_instance` 探真实 venv，shell 角色恒真）。未就绪时实例行的主按钮就是“安装依赖”，附“依赖未装”徽标；`startOne` 若发现未就绪会先装再启，不让用户先撞一次错。菜单里两个入口：离线安装、允许联网安装。安装完成的提示改成“回模块页先点‘安装依赖’”。
 
 ## 卡片菜单盖住卡片内容（2026-11-13）
 
-现象：打开卡片底部「⋯」后，出现一块白板压住卡片正文，看着像卡片被挖空。
+现象：打开卡片底部“⋯”后，出现一块白板压住卡片正文，看着像卡片被挖空。
 
-实测（无头 Chrome 1200×780，用 `getBoundingClientRect` 取值）：卡片 `x=254 w=290`，菜单面板 `x=181 w=168`——**面板左边越出卡片 73px**。原因是 `.menu-body` 用 `right: 0` 按 `⋯` 的右边缘向左展开，而 `.card-foot` 里的 `⋯` 紧跟「详情」排，没有贴右，于是面板整体左移压在正文上；浅色主题下 `rgba(0,0,0,.35)` 的投影几乎看不出来，边界只剩一圈 0.2 透明度的边，视觉上就成了「白板」。
+实测（无头 Chrome 1200×780，用 `getBoundingClientRect` 取值）：卡片 `x=254 w=290`，菜单面板 `x=181 w=168`——**面板左边越出卡片 73px**。原因是 `.menu-body` 用 `right: 0` 按 `⋯` 的右边缘向左展开，而 `.card-foot` 里的 `⋯` 紧跟“详情”排，没有贴右，于是面板整体左移压在正文上；浅色主题下 `rgba(0,0,0,.35)` 的投影几乎看不出来，边界只剩一圈 0.2 透明度的边，视觉上就成了“白板”。
 
-修法：`.card-foot .menu { margin-left: auto }` 让 `⋯` 贴右，面板随之落回卡片内（实测 `x=513 w=168`，卡片右界 695）；浅色主题的投影改成 `rgba(15,23,42,.14)`；菜单项内边距 6→5px，面板高度 205→193px，展开后上边缘与卡片顶对齐不再顶到分组标题；`.cards` 的 `minmax(288px,…)` 提到 320px，实例行允许换行，`dounai/dounai-input@stable` 不再被截成 `…@s…`。
+修法：`.card-foot .menu { margin-left: auto }` 让 `⋯` 贴右，面板随之落回卡片内（实测 `x=513 w=168`，卡片右界 695）；浅色主题的投影改成 `rgba(15,23,42,.14)`；菜单项内边距 6→5px，面板高度 205→193px，展开后上边缘与卡片顶平齐，不再顶到分组标题；`.cards` 的 `minmax(288px,…)` 提到 320px，实例行允许换行，`dounai/dounai-input@stable` 不再被截成 `…@s…`。
 
 门禁：app lib 103 项、core 155 项、契约 109 项、`tsc`、`npm test` 65 项、`vite build`、`clippy -D warnings` 通过。深浅两套截图核对过菜单、依赖未装状态与实例行排版。
 
-未实测：真机点「安装依赖」跑通 `uv sync`、以及三个实例真起来后的健康检查；无头浏览器造不出子进程与系统对话框。
+未实测：真机点“安装依赖”跑通 `uv sync`、以及三个实例真起来后的健康检查；无头浏览器造不出子进程与系统对话框。
 
 ## 遗留代码清理与在线安装接通（2026-11-13）
 
-这一轮先做了只读审计，再按「零引用 → 有测试引用 → 数据模型」的顺序改，每一步都跑门禁。
+这一轮先做了只读审计，再按“零引用 → 有测试引用 → 数据模型”的顺序改，每一步都跑门禁。
 
 **一、删掉的死代码**
 
 `install.rs`（v1 安装事务）、`catalog.rs`（v1 清单解析，不验签且可回退磁盘缓存）、`trust.rs`（二态信任策略）、`module_probe.rs`（第三个手写 HTTP 客户端）、`src/localinstall.ts`（base64 装包通道）在审计里都已没有产品侧调用者。删前把 `fuzz_invariants` 的不变量搬到 v2 活路径上：
 
-- 任意字节不 panic → `verify_zip`，并新增「验包阶段不落盘」的断言；
-- 恶意条目名整体拒绝 → `verify_zip`，另加一条**正向**用例：用 `valid_package()` 造一个字段完整、`files` 哈希正确的包，走 `install_package` 落盘，断言目标目录的父目录下只多出目标目录本身。没有这条，「全部拒绝」也能让 fuzz 通过；
+- 任意字节不 panic → `verify_zip`，并新增“验包阶段不落盘”的断言；
+- 恶意条目名整体拒绝 → `verify_zip`，另加一条**正向**用例：用 `valid_package()` 造一个字段完整、`files` 哈希正确的包，走 `install_package` 落盘，断言目标目录的父目录下只多出目标目录本身。没有这条，“全部拒绝”也能让 fuzz 通过；
 - `parse_catalog` 不 panic → `CatalogDocument::parse`。
 
 `install.rs` 一删，`base64_decode` 与 `install_module` 就近失去了唯一调用者，一起收掉。
 
 **二、删掉的死命令**
 
-`list_module_states`、`install_module`、`list_instances`、`hash_file`、`get_lifecycle_snapshot`、`download_package` 六个命令在注册表里，但界面零调用。逐个确认后删除；`ModuleView` / `InstallStateView` / `InstallResponse` 三个 DTO 保留，`add_local_module` 与 `install_local_package` 仍在用。`admin_host` **没删**：它是 M0 冻结契约，M4 的内嵌子 WebView 要用，删了等于让 M4 重新推一遍。
+`list_module_states`、`install_module`、`list_instances`、`hash_file`、`get_lifecycle_snapshot`、`download_package` 六个命令在注册表里，但界面零调用。逐个确认后删除；`ModuleView` / `InstallStateView` / `InstallResponse` 三个 DTO 保留，`add_local_module` 与 `install_local_package` 仍在用。`admin_host` **没删**：该模块是 M0 冻结契约，M4 的内嵌子 WebView 要用，删了等于让 M4 重新推一遍。
 
-**三、SourceForge 全链路 302**
+**三、SourceForge 每一跳都返回 302**
 
 接通在线安装时先撞到这一条：`master.dl.sourceforge.net` → `downloads.sourceforge.net` → `zenlayer.dl.sourceforge.net`，每一跳都是 301/302。原先两个客户端都是 `redirect: none` 且把 3xx 当错误，于是**目录和包都取不到**。
 
@@ -414,17 +414,17 @@ Tauri 的同步命令在主线程执行。`start_all` 对每个实例先做端�
 
 **四、清单数据模型对不上，管理页按钮永远不出现**
 
-`manifests/*.json` 是 v1 清单：`module_id` 是 `dounai-input`，而实例是 `dounai/dounai-input`；`store.manifests` 用前者建键，`manifestOf(instance.module_id)` 于是恒为 null。连带三处症状：卡片描述退化、**「打开管理界面」按钮永不渲染**、未安装清单把已装模块又列一遍。
+`manifests/*.json` 是 v1 清单：`module_id` 是 `dounai-input`，而实例是 `dounai/dounai-input`；`store.manifests` 用前者建键，`manifestOf(instance.module_id)` 于是恒为 null。连带三处症状：卡片描述退化、**“打开管理界面”按钮永不渲染**、未安装清单把已装模块又列一遍。
 
 修法：`InstanceRuntimeView` 增加 `name` 与 `admin_ui`（读自模块根 manifest 的 `admin_ui.web_ui`），前端不再自备一份清单；`manifests/`、`src/manifest.ts`、`tests/admin-ui.test.ts` 与未安装清单一起删除。`sign_real_manifests.rs` 改指 `contracts/examples/*.v2.json`，并补上 v2 必填字段与 `module_id` 必须含一个 `/` 的断言。
 
 **五、套装页删除，在线安装改放模块目录**
 
-套装页的数据是 v1 的 `module_id` 列表，安装单位是 `module_id@variant`，「开始安装」一直是 disabled。按决定删掉整套功能（`bundle.ts`、`bundles/*.json`、`views/bundles.ts`、导航入口、对应测试），视图由六个变五个；在线安装放进模块页右上角的「模块目录」弹窗。
+套装页的数据是 v1 的 `module_id` 列表，安装单位是 `module_id@variant`，“开始安装”一直是 disabled。按决定删掉整套功能（`bundle.ts`、`bundles/*.json`、`views/bundles.ts`、导航入口、对应测试），视图由六个变五个；在线安装放进模块页右上角的“模块目录”弹窗。
 
 **六、`enable_dev_mode` 从未被调用**
 
-四个本地模块命令都 `require_dev_mode`，但前端只显示状态、按钮只是跳转，等于「登记本地目录」整条支线不可达。设置页那颗按钮现在会先真的开开关，再跳转。
+四个本地模块命令都 `require_dev_mode`，但前端只显示状态、按钮只是跳转，等于“登记本地目录”整条支线不可达。设置页那颗按钮现在会先真的开开关，再跳转。
 
 **门禁**
 
@@ -441,7 +441,7 @@ app lib 67 项、core 6 项、其余集成 20 项（`live_source` 2 项按设计
 
 即：线上 catalog 用内置 K5 验签通过、三个条目的 sha256/size 与本地打包产物一致、整包下载后哈希与目录声明一致且能过 `verify_zip`。这两条不进 CI——CI 不该依赖第三方站点可用性。
 
-**未实测**：真机点「模块目录」→「安装」→ 自动装依赖 → 启动的完整一条；catalog 7 天过期后的表现只能靠改系统时间或等过期验证。
+**未实测**：真机点“模块目录”→“安装”→ 自动装依赖 → 启动的完整一条；catalog 7 天过期后的表现只能靠改系统时间或等过期验证。
 
 ## M1 收口：install.json 自举与内置 uv（2026-11-13）
 
@@ -449,39 +449,39 @@ app lib 67 项、core 6 项、其余集成 20 项（`live_source` 2 项按设计
 
 **一、为什么不能只补一条 `initialize`**
 
-`initialize` 遇到已存在的文件会返回 `AlreadyExists`，而现有用户的数据根里 `installed.json`、`trust.json`、`retention.json` 都在、只缺 `install.json`，看起来「接近正常」。真正需要区分的是四种情况，于是加了 `InstallState::ensure`：缺失则新建；四项一致则不写盘；只差 uv 三元组（升级了随包 uv）则只改三元组；读不出来或两个根不一致则先备份 `install.json.bak` 再重写。第三条的实现踩过一次坑——`fresh` 先被 `Ok((fresh, ...))` 移走、后面又借它拼说明字符串，编译器直接拒了，改成先拼字符串后移动。
+`initialize` 遇到已存在的文件会返回 `AlreadyExists`，而现有用户的数据根里 `installed.json`、`trust.json`、`retention.json` 都在、只缺 `install.json`，看起来“接近正常”。真正需要区分的是四种情况，于是加了 `InstallState::ensure`：缺失则新建；四项一致则不写盘；只差 uv 三元组（升级了随包 uv）则只改三元组；读不出来或两个根不一致则先备份 `install.json.bak` 再重写。第三条的实现踩过一次坑——`fresh` 先被 `Ok((fresh, ...))` 移走、后面又借 `fresh` 拼说明字符串，编译器直接拒了，改成先拼字符串后移动。
 
 **二、uv.exe 从哪来**
 
-目标机器连不上 `github.com`（实测 21 秒超时），而 `locate_uv` 的兜底正是从 GitHub 下载，所以「允许联网补齐」也是死的。实际取数：阿里云 PyPI 的 `uv-0.13.7-py3-none-win_amd64.whl`（wheel sha256 `2835e2ab…`），里面 `uv-0.13.7.data/scripts/uv.exe` 就是 31 803 184 字节的可执行文件，`sha256:1791d7a9…`，实跑输出 `uv 0.13.7 (316c827e0 2026-11-03 x86_64-pc-windows-msvc)`。
+目标机器连不上 `github.com`（实测 21 秒超时），而 `locate_uv` 的兜底正是从 GitHub 下载，所以“允许联网补齐”也是死的。实际取数：阿里云 PyPI 的 `uv-0.13.7-py3-none-win_amd64.whl`（wheel sha256 `2835e2ab…`），里面 `uv-0.13.7.data/scripts/uv.exe` 就是 31 803 184 字节的可执行文件，`sha256:1791d7a9…`，实跑输出 `uv 0.13.7 (316c827e0 2026-11-03 x86_64-pc-windows-msvc)`。
 
-`extract_uv_exe` 原本就按「任意层级下的 `uv.exe`」匹配，wheel 的脚本目录因此不需要改解包逻辑，直接可用。补齐顺序改成 `UV_DOWNLOAD_URLS`：GitHub 优先，镜像兜底，任一成功即停。
+`extract_uv_exe` 原本就按“任意层级下的 `uv.exe`”匹配，wheel 的脚本目录因此不需要改解包逻辑，直接可用。补齐顺序改成 `UV_DOWNLOAD_URLS`：GitHub 优先，镜像兜底，任一成功即停。
 
-**三、三段落地，缺一段就白搭**
+**三、三段实现，缺一段就白搭**
 
-`Paths::bundled_uv_path()` 只认「exe 同级的 `bin/uv.exe`」。NSIS 安装后由 `bundle.resources` 落到 `$INSTDIR/bin/`，但 `tauri dev` 与直接跑 `target/release/*.exe` 时没有任何东西负责这个位置——不做 `build.rs` 这一段，开发与本地验收下的「随包 uv」等于不存在，测试会一直走联网分支而不自知。`build.rs` 于是把 `bin/uv.exe` 复制到 `target/<profile>/bin/`（大小没变就跳过）。实测 `target/debug/bin/uv.exe` 已生成，与源文件逐字节一致。
+`Paths::bundled_uv_path()` 只认“exe 同级的 `bin/uv.exe`”。NSIS 安装后由 `bundle.resources` 落到 `$INSTDIR/bin/`，但 `tauri dev` 与直接跑 `target/release/*.exe` 时没有任何东西负责这个位置——不做 `build.rs` 这一段，开发与本地验收下的“随包 uv”等于不存在，测试会一直走联网分支而不自知。`build.rs` 于是把 `bin/uv.exe` 复制到 `target/<profile>/bin/`（大小没变就跳过）。实测 `target/debug/bin/uv.exe` 已生成，与源文件逐字节一致。
 
 二进制按决定不入库：`.gitignore` 掉 `*.exe`，取数脚本 `scripts/fetch-uv.py` 校验两层哈希后原子写入。清空 `bin/uv.exe` 后重跑脚本，产物与原文件 `cmp` 逐字节相同。
 
 **四、默认联网**
 
-`prepare_instance_env` 的 `allow_online` 缺省从 `false` 改成 `true`。首次装依赖必然要拉解释器与 wheel，离线默认等于按钮天生不可用。界面侧：主按钮「安装依赖」默认联网，模块菜单保留「安装依赖（离线）」显式选择；`startOne` 在缺依赖时先装（联网）再启。
+`prepare_instance_env` 的 `allow_online` 缺省从 `false` 改成 `true`。首次装依赖必然要拉解释器与 wheel，离线默认等于按钮天生不可用。界面侧：主按钮“安装依赖”默认联网，模块菜单保留“安装依赖（离线）”显式选择；`startOne` 在缺依赖时先装（联网）再启。
 
 **五、验证方式**
 
 `tests/bundled_uv.rs` 三条，都走生产代码，程序根取仓库 `src-tauri`、数据根取临时目录，不碰用户真实数据：
 
-1. `AppStateV2::new` 补写 `install.json` → `InstallState::load` 读回三元组 → `locate_uv` 命中随包文件 → `uv --version` 真跑通。注入的 `UvFetcher` 一旦被调用就 panic，所以「没联网」是断言出来的，不是假设。
+1. `AppStateV2::new` 补写 `install.json` → `InstallState::load` 读回三元组 → `locate_uv` 命中随包文件 → `uv --version` 真跑通。注入的 `UvFetcher` 一旦被调用就 panic，所以“没联网”是断言出来的，不是假设。
 2. 删掉 `install.json` 再启动能自愈（M1 验收第 7 条）。
 3. 把文件改成非法 JSON 再启动：`install.json.bak` 存在且内容就是被改坏的原文，随后正常重写。
 
-另加一条常量对账：`state_v2::tests::pinned_uv_hash_matches_the_staged_binary` 在仓库里存在 `bin/uv.exe` 时核对长度与 sha256，防的是「升级了文件忘了改常量」。
+另加一条常量对账：`state_v2::tests::pinned_uv_hash_matches_the_staged_binary` 在仓库里存在 `bin/uv.exe` 时核对长度与 sha256，防的是“升级了文件忘了改常量”。
 
 **门禁**
 
 core 159 项 lib + 23 项集成、app lib 69 项、`bundled_uv` 3 项、契约 109 项、`tsc`、`npm test` 20 项、`vite build`、`clippy --workspace --all-targets -D warnings` 全绿。
 
-**未实测**：真机上从「安装依赖」到三个模块 health 200 的完整一条（需要用户机器上跑，且要真的联网拉包）；NSIS 安装包体积增量待构建结果填入 ROADMAP。
+**未实测**：真机上从“安装依赖”到三个模块 health 200 的完整一条（需要用户机器上跑，且要真的联网拉包）；NSIS 安装包体积增量待构建结果填入 ROADMAP。
 
 ## M1 返修：zip 包缺 pinned 快照 + 依赖安装进度（2026-11-13）
 
@@ -489,56 +489,56 @@ core 159 项 lib + 23 项集成、app lib 69 项、`bundled_uv` 3 项、契约 1
 
 **一、口径为什么改，而不是给包补字段**
 
-`kind = uv_lock` 的包，锚点本来就是签名包内那份 `uv.lock`：装包时验过 zip 的 sha256，同步前 `prepare_venv` 还会再比对一次「项目根 uv.lock」与解析出的快照哈希。发布者再写一个 `snapshot_sha256` 只是把同一个哈希抄两遍。旧口径（缺字段即硬拒）等于让所有 `uv_lock` 的在线包都装不了依赖，而字段本身是可选的。
+`kind = uv_lock` 的包，锚点本来就是签名包内那份 `uv.lock`：装包时验过 zip 的 sha256，同步前 `prepare_venv` 还会再比对一次“项目根 uv.lock”与解析出的快照哈希。发布者再写一个 `snapshot_sha256` 只是把同一个哈希抄两遍。旧口径（缺字段即硬拒）等于让所有 `uv_lock` 的在线包都装不了依赖，而字段本身是可选的。
 
-改成：声明了就必须一致，不一致照旧硬拒（那才是篡改信号）；没声明则放行，把这次快照记成 `snapshot_pinned = false`，界面在实例行标「快照未锚定」，详情里说明「重装可恢复锚定」。`requirements` / `pyproject` 的 zip 包没有天然锚点，缺字段同样降级记录，不静默假装锚定。
+改成：声明了就必须一致，不一致照旧硬拒（那才是篡改信号）；没声明则放行，把这次快照记成 `snapshot_pinned = false`，界面在实例行标“快照未锚定”，详情里说明“重装可恢复锚定”。`requirements` / `pyproject` 的 zip 包没有天然锚点，缺字段同样降级记录，不静默假装锚定。
 
 `InstanceRuntime` 新增 `snapshot_pinned`，读旧 `runtime.json` 时缺省为 `true`——能写进去的 zip 实例当时都过了 pinned 比对。`list_instance_views` 只读一次 `runtime.json` 填 `env_pinned`，不参与任何判定。
 
 **二、进度为什么要走旁路**
 
-`EnvContext` 是 8 处结构体字面量的公开构造点，往里加回调字段会把「怎么显示进度」扩散到每个测试夹具。改用线程本接收器：`prepare_instance_with` 在同一个线程同步跑完，组装层用 `with_sink` 挂回调（带 Drop guard，panic 也不泄漏），没有接收器时全部空操作，单测与 `env_smoke` 行为不变。
+`EnvContext` 是 8 处结构体字面量的公开构造点，往里加回调字段会把“怎么显示进度”扩散到每个测试夹具。改用线程本接收器：`prepare_instance_with` 在同一个线程同步跑完，组装层用 `with_sink` 挂回调（带 Drop guard，panic 也不泄漏），没有接收器时全部空操作，单测与 `env_smoke` 行为不变。
 
-阶段固定六步：`uv` → `python` → `resolve` → `sync` → `verify` → `done`，每步一节标题加一行细节。**不做百分比**：uv 不提供「已装 N 个」的稳定接口，按输出行猜出来的数字是假的，宁可只按阶段推进。
+阶段固定六步：`uv` → `python` → `resolve` → `sync` → `verify` → `done`，每步一节标题加一行细节。**不做百分比**：uv 不提供“已装 N 个”的稳定接口，按输出行猜出来的数字是假的，宁可只按阶段推进。
 
-「正在装哪个包」靠流式读 stderr：有接收器时 `SystemUvRunner` 改成 spawn + 读线程，`sync_request` 追加 `-v`（没有接收器不加，测试参数不变）。行过滤只认「带 `==` 的 installing/downloading/prepared 行」，认不出就丢；同一行去重，整条准备最多 400 行。组装层再按 150ms 合并细节变化——阶段或标题变了立刻发。
+“正在装哪个包”靠流式读 stderr：有接收器时 `SystemUvRunner` 改成 spawn + 读线程，`sync_request` 追加 `-v`，没有接收器时不加，测试参数不变。行过滤只认“带 `==` 的 installing/downloading/prepared 行”，认不出就丢；同一行去重，整条准备最多 400 行。组装层再按 150ms 合并细节变化——阶段或标题变了立刻发。
 
-前端只做两个端点加一条渲染：`beginEnvJob` 在点下去时先落「准备开始」，invoke 返回或抛错就是结束；失败原因留在卡片上（toast 会消失），成功整行抹掉。进度事件只改对应卡片那一行 DOM，不整页重绘——装包时这个事件每 150ms 就可能来一次，整页重绘会把滚动位置和展开的菜单都打回原样。
+前端只做两个端点加一条渲染：`beginEnvJob` 在点下去时先落“准备开始”，invoke 返回或抛错就是结束；失败原因留在卡片上（toast 会消失），成功整行抹掉。进度事件只改对应卡片那一行 DOM，不整页重绘——装包时这个事件每 150ms 就可能来一次，整页重绘会把滚动位置和展开的菜单都打回原样。
 
 **三、验证**
 
-core 新增 5 项：缺 pinned 放行且记 `snapshot_pinned = false`（用 `instance_snapshot_pinned` 复核）、pinned 不符仍 Hard reject 且不写 `runtime.json`、六阶段全部上报且最后一阶段是 `Done`、`lock_packages` 读 uv.lock 与 requirements 两种格式、`LineReporter` 只留包名行且去重。原 `zip_instance_requires_pinned_snapshot_and_rejects_mismatch` 拆成两条，旧的「缺字段 → 硬拒」断言按新口径改写。
+core 新增 5 项：缺 pinned 放行且记 `snapshot_pinned = false`（用 `instance_snapshot_pinned` 复核）、pinned 不符仍 Hard reject 且不写 `runtime.json`、六阶段全部上报且最后一阶段是 `Done`、`lock_packages` 读 uv.lock 与 requirements 两种格式、`LineReporter` 只留包名行且去重。原 `zip_instance_requires_pinned_snapshot_and_rejects_mismatch` 拆成两条，旧的“缺字段 → 硬拒”断言按新口径改写。
 
 前端新增 `tests/env-job.test.ts` 3 项：begin 立刻可显示、新事件保留开始时间并清掉旧错误、成功抹掉/失败留原因。
 
 **门禁**：core 166 lib + 23 集成、app lib 69、`bundled_uv` 3、契约 109、`tsc`、`npm test` 23、`clippy --workspace --all-targets -D warnings` 全绿。
 
-**未实测**：真机上「安装依赖」全程跑完并让三个模块 health 200——需要用户在安装包上跑一次，且要真的联网拉 wheel。`-v` 的包名行格式按 uv 0.13.7 的 stderr 写的，若上游改格式，表现为卡片只显示阶段不显示包名，不影响安装本身。
+**未实测**：真机上“安装依赖”全程跑完并让三个模块 health 200——需要用户在安装包上跑一次，且要真的联网拉 wheel。`-v` 的包名行格式按 uv 0.13.7 的 stderr 写的，若上游改格式，表现为卡片只显示阶段不显示包名，不影响安装本身。
 
 ## M1 返修：启动被判超时与四倍启动请求（2026-11-13 20:20）
 
-真机日志：12:20:51 四行 `[lifecycle] start role=Input ...`，只有一行 `spawned pid=40112`；12:20:57 `[probe] health=Unhealthy contract=Unhealthy`；随后 health 已能 200，再点启动提示「已在外部运行，本次没有重启」。
+真机日志：12:20:51 四行 `[lifecycle] start role=Input ...`，只有一行 `spawned pid=40112`；12:20:57 `[probe] health=Unhealthy contract=Unhealthy`；随后 health 已能 200，再点启动提示“已在外部运行，本次没有重启”。
 
 **一、四行 start 是前端重复绑定**
 
-`renderModules` 每次刷新都调 `bindBodyActions(body)` / `bindActions(head, …)`，而 `body`、`head` 是常驻元素，`bindActions` 里直接 `addEventListener`。刷新一次多一个监听器，点一次按钮就把 `data-act` 处理函数跑 N 次。状态机 `begin_start` 的互斥把后三个挡成 `AlreadyStarting`，所以只有一个 `spawned`，但用户看到的是「启动失败：实例已在启动中」。
+`renderModules` 每次刷新都调 `bindBodyActions(body)` / `bindActions(head, …)`，而 `body`、`head` 是常驻元素，`bindActions` 里直接 `addEventListener`。刷新一次多一个监听器，点一次按钮就把 `data-act` 处理函数跑 N 次。状态机 `begin_start` 的互斥把后三个挡成 `AlreadyStarting`，所以只有一个 `spawned`，但用户看到的是“启动失败：实例已在启动中”。
 
 改法：`bindActions` 用 `WeakMap<HTMLElement, Map<act, run>>` 存表，容器只挂一个监听器，重复调用只替换表。`startOne`/`stopOne`/`restartOne` 另加按实例的在途标记，一键启停共用 `bulkBusy` 闸门——按钮在异步返回前仍可点，双击同样会发第二个请求。
 
 **二、六秒判 Unhealthy 是预算口径错误**
 
-`PROBE_BUDGET` 固定 4 秒，`timeout_ms`（3000）是单次请求超时，两者都不是「进程起来要多久」。Python 冷启动要加载解释器与全部 import，四五秒才监听是常态。日志里从 spawn 到 `probe` 6 秒，正好是「4 秒预算 + 一次卡满 3 秒的请求」。
+`PROBE_BUDGET` 固定 4 秒，`timeout_ms`（3000）是单次请求超时，两者都不是“进程起来要多久”。Python 冷启动要加载解释器与全部 import，四五秒才监听是常态。日志里从 spawn 到 `probe` 6 秒，正好是“4 秒预算 + 一次卡满 3 秒的请求”。
 
 改为 roles 契约里的 `startup_timeout_ms`：`input` 60 秒，`llm`/`output` 90 秒，缺省 60 秒。探测顺序也改了：先只等 health，通了再探契约——health 都没通时探契约只是白等一个请求超时。间隔前 5 秒 50 ms、之后 400 ms，避免长预算下每分钟上千个请求跟刚起来的进程抢 CPU。
 
 **三、判失败不能丢掉 pid**
 
-旧代码走 `mark_failed`，它把 `pid` 清成 `None`。界面于是认为没有进程，用户再点启动时 `start_instance` 的前置短探发现端口健康，就把这个实例标成「外部启动」——启动器自己拉起的进程，却失去了停止权，也解释不了「已在外部运行」这句提示。
+旧代码走 `mark_failed`，该调用把 `pid` 清成 `None`。界面于是认为没有进程，用户再点启动时 `start_instance` 的前置短探发现端口健康，就把这个实例标成“外部启动”——启动器自己拉起的进程，却失去了停止权，也解释不了“已在外部运行”这句提示。
 
-- 新增 `mark_probe_timeout`：阶段 `failed`、保留 `pid`、`last_error` 写「启动超时：N 秒内健康检查未通过，进程仍在运行」。
-- 新增 `mark_recovered`：只认「`failed` 且 `pid` 还在」的条目，收回到 `running`，`contract` 保持 `not_checked`（只确认了 health）。
+- 新增 `mark_probe_timeout`：阶段 `failed`、保留 `pid`、`last_error` 写“启动超时：N 秒内健康检查未通过，进程仍在运行”。
+- 新增 `mark_recovered`：只认“`failed` 且 `pid` 还在”的条目，收回到 `running`，`contract` 保持 `not_checked`（只确认了 health）。
 - `Supervisor::owns` 与 `start_instance` 的 owns 分支：自己还持有进程时，健康就直接收回状态，不健康就明确要求先停止，绝不 `mark_external`。`mark_external` 自己加守卫，作为第二道保险。
-- 界面 `hasLiveProcess` 让「启动超时」的实例显示「停止」而不是「启动」，模块级 chip 用 `启动超时`（warn）而不是 `启动失败`（fail）。
+- 界面 `hasLiveProcess` 让“启动超时”的实例显示“停止”而不是“启动”，模块级 chip 用 `启动超时`（warn）而不是 `启动失败`（fail）。
 
 **四、验证**
 
@@ -546,9 +546,9 @@ core 新增 5 项：缺 pinned 放行且记 `snapshot_pinned = false`（用 `ins
 - 前端新增 `tests/bind-actions.test.ts` 3 项：重复绑定只留一个监听器、重绑后走最新处理函数、未登记的 act 不触发。
 - 门禁：core 169 lib + 23 集成、app lib 69、契约 109、`tsc`、`npm test` 26、`clippy --workspace --all-targets -D warnings` 全绿。
 
-**未实测**：真机上点一次「启动」只发一个请求、60 秒内转 `running`、以及超时后「先停止再启动」能走通。需要用户在安装包上复跑。
+**未实测**：真机上点一次“启动”只发一个请求、60 秒内转 `running`、以及超时后“先停止再启动”能走通。需要用户在安装包上复跑。
 
-## M1 返修：启动即退出、端口撞车与「没有停止按钮」（2026-11-13 21:15）
+## M1 返修：启动即退出、端口撞车与“没有停止按钮”（2026-11-13 21:15）
 
 真机复现两段日志：
 
@@ -559,7 +559,7 @@ core 新增 5 项：缺 pinned 放行且记 `snapshot_pinned = false`（用 `ins
 [probe] health=Unhealthy contract=Unhealthy after=90316ms
 ```
 
-再点启动返回「进程还在运行，但健康检查没通过。先点「停止」，再启动」，而卡片上只有「启动」。
+再点启动返回“进程还在运行，但健康检查没通过。先点‘停止’，再启动”，而卡片上只有“启动”。
 
 **一、三个包都是 src 布局，而 venv 里没有包自身**
 
@@ -571,22 +571,22 @@ core 新增 5 项：缺 pinned 放行且记 `snapshot_pinned = false`（用 `ins
 
 **二、所有非 active 实例都被分到 18101**
 
-`single_instance_port` 调 `assign_ports(..., std::slice::from_ref(instance))`，而备用端口是「基数 + 序号」分配的：只传一个实例时序号恒为 0，每个非 active 实例都拿到 `18101`。第一个起来的占住端口，后面的绑不上就退出——`netstat` 当时还能看到 `127.0.0.1:18101` 的残留连接。
+`single_instance_port` 调 `assign_ports(..., std::slice::from_ref(instance))`，而备用端口是“基数 + 序号”分配的：只传一个实例时序号恒为 0，每个非 active 实例都拿到 `18101`。第一个起来的占住端口，后面的绑不上就退出——`netstat` 当时还能看到 `127.0.0.1:18101` 的残留连接。
 
-端口分配改为统一按 `all_instances(state)`（整张已登记实例表，含停用的）计算，单实例启动、`start_all` 与实例视图共用同一份结果。`start_all` 原来先过滤停用实例再分配，同样会让「列表显示的端口」与「真正使用的端口」不一致，一并改掉。
+端口分配改为统一按 `all_instances(state)`（整张已登记实例表，含停用的）计算，单实例启动、`start_all` 与实例视图共用同一份结果。`start_all` 原来先过滤停用实例再分配，同样会让“列表显示的端口”与“真正使用的端口”不一致，一并改掉。
 
 **三、死进程句柄让 `owns()` 永远为真**
 
 watcher 只把状态改成 `exited`，`processes` 表里的 `WinProcess` 一直留着；`owns()` 是 `contains_key`，于是：
 
-1. 快照 `pid` 已被 `mark_exited` 清成 null → 前端 `hasLiveProcess` 为假 → 只渲染「启动」；
-2. 后端 `start_instance` 看到 `owns()` 为真 → 去探 health → 不通 → 回「进程还在运行，先点停止」。
+1. 快照 `pid` 已被 `mark_exited` 清成 null → 前端 `hasLiveProcess` 为假 → 只渲染“启动”；
+2. 后端 `start_instance` 看到 `owns()` 为真 → 去探 health → 不通 → 回“进程还在运行，先点停止”。
 
 两边结论相反，用户被卡死。改法：
 
-- `WinProcess::is_alive()`：槽为空即已退出，槽还在时用 `try_wait` 兜住「刚退出、watcher 还没轮到」这段窗口。不清槽，退出原因仍由 watcher 统一记录。
-- `owns()` 复核存活，死的就地摘掉；`stop()` 先看存活，不再对结束的进程报「停止失败」。
-- `stop_all()` 额外收掉「判超时但进程还活着」的实例（它们不在 `running()` 里，但仍是启动器托管的进程）。
+- `WinProcess::is_alive()`：槽为空即已退出，槽还在时用 `try_wait` 兜住“刚退出、watcher 还没轮到”这段窗口。不清槽，退出原因仍由 watcher 统一记录。
+- `owns()` 复核存活，死的就地摘掉；`stop()` 先看存活，不再对结束的进程报“停止失败”。
+- `stop_all()` 额外收掉“判超时但进程还活着”的实例（这些实例不在 `running()` 里，但仍是启动器托管的进程）。
 - 探测线程拿 watcher 槽做哨兵：进程退出后立刻返回，不再空跑满 90 秒预算，日志里也不再出现误导性的 `health=Unhealthy`。
 
 **四、验证**
@@ -599,26 +599,26 @@ watcher 只把状态改成 `exited`，`processes` 表里的 `WinProcess` 一直�
 
 ## M1 返修：active 槽自动补位（2026-11-13 21:35）
 
-启动问题修完后，检查真机状态发现 `installed.json` 的 `active` 是 `{}`：三个实例的 role 分别是 `input`/`llm`/`output`，verdict 全是 `A`，却一个 active 都没有。`assign_ports` 因此把它们全部分到 `18101-18103`，而组装层（Dounai 主程序）只认 8101、8102、8103——界面显示「运行中」，链路实际一条都连不上。
+启动问题修完后，检查真机状态发现 `installed.json` 的 `active` 是 `{}`：三个实例的 role 分别是 `input`/`llm`/`output`，verdict 全是 `A`，却一个 active 都没有。`assign_ports` 因此把三个实例全部分到 `18101-18103`，而组装层（Dounai 主程序）只认 8101、8102、8103——界面显示“运行中”，三个角色实际一条都连不上。
 
 **一、为什么要在四个地方补，而不是只在安装处补**
 
-「有实例、没有 active」不是可用的中间状态，但从四个入口都能造出来：
+“有实例、没有 active”不是可用的中间状态，但从四个入口都能造出来：
 
 1. 在线目录安装 / 本地 zip 安装（`commit_install`）——装完本该上位；
 2. 本地目录导入（`add_local_dir`）——dir 实例恒为 C 类，按契约不自动上位，但用户亲手挑的目录本身就是显式指名；
 3. 卸载或解除登记——卸掉的若是 active，槽位空出来，同 role 剩下的实例还在备用端口；
 4. 升级上来的老实例表——以上三条都不覆盖。
 
-于是逻辑收成一个 core 方法 `InstalledState::fill_vacant_active(path, role, preferred, explicit)`，四个调用点都只负责「传什么」：安装传刚装的实例 ID + `explicit = false`，目录导入传 `explicit = true`，卸载传 `None`，启动时对三个 role 各扫一次。
+于是逻辑收成一个 core 方法 `InstalledState::fill_vacant_active(path, role, preferred, explicit)`，四个调用点都只负责“传什么”：安装传刚装的实例 ID + `explicit = false`，目录导入传 `explicit = true`，卸载传 `None`，启动时对三个 role 各扫一次。
 
 **二、怎么选上位实例**
 
-`preferred` 在册且角色相符就用它（用户刚装的就是要用的），否则按 `instance_id` 字典序取第一个——结果确定，不依赖 `BTreeMap` 之外的东西。槽已占用时直接返回 `None`，绝不抢已经在生效的那个。
+`preferred` 在册且角色相符就用 `preferred`（用户刚装的就是要用的），否则按 `instance_id` 字典序取第一个——结果确定，不依赖 `BTreeMap` 之外的东西。槽已占用时直接返回 `None`，绝不抢已经在生效的那个。
 
 **三、C 类的例外只开一道缝**
 
-`switch_active(..., explicit=false)` 拒绝把 C 类设为 active。`fill_vacant_active` 沿用这个判断，只在 `explicit = true` 时放行。安装 B/C 类 zip 时用户的确认针对的是「安装」，不是「让它接管链路」，所以那条路径传 `false`；本地目录导入是用户亲手指定的一整个源码目录，与菜单里的「设为 active」等价，传 `true`。
+`switch_active(..., explicit=false)` 拒绝把 C 类设为 active。`fill_vacant_active` 沿用这个判断，只在 `explicit = true` 时放行。安装 B/C 类 zip 时用户的确认针对的是“安装”，不是“让它接管链路”，所以那条路径传 `false`；本地目录导入是用户亲手指定的一整个源码目录，与菜单里的“设为 active”等价，传 `true`。
 
 **四、启动时自愈**
 
@@ -626,7 +626,7 @@ watcher 只把状态改成 `exited`，`processes` 表里的 `WinProcess` 一直�
 
 **五、验证**
 
-- core 新增 4 项：槽空时第一个实例上位；槽已占用时新实例不动槽位（且 `active` 仍指旧值）；`preferred` 不在册时按字典序回退、C 类在 `explicit=false` 下拒绝而 `true` 下放行；`shell`/`auxiliary` 永不设槽（`auxiliary` 以前会因 `role_key` 报错，现在按「不设槽」静默返回）。
+- core 新增 4 项：槽空时第一个实例上位；槽已占用时新实例不动槽位（且 `active` 仍指旧值）；`preferred` 不在册时按字典序回退、C 类在 `explicit=false` 下拒绝而 `true` 下放行；`shell`/`auxiliary` 永不设槽（`auxiliary` 以前会因 `role_key` 报错，现在按“不设槽”静默返回）。
 - lib 169 → **173**。门禁其余项不变：core 23 集成、app lib 71、`bundled_uv` 3、契约 109、`tsc`、`npm test` 26、`clippy --workspace --all-targets -D warnings` 全绿。
 
 **六、本机现状已就地修正**
@@ -659,11 +659,11 @@ M8 的 12 条验收要求真机逐条实测，离线断言只证明逻辑层。�
 - `allowlist` 只由已启用源的 host 后缀派生；
 - 样例源表的公钥与 Rust 内嵌 K5 一致。
 
-同时改了三处契约（详见 [ROADMAP.md](ROADMAP.md) M8「契约在 M8 期间改过三处」）：`catalog-v2` 的 `signature.signer_fp` 改必填、`key_id` 降级为展示字段；`source-v1` 的 instance 增 `source_id`、停用 `catalog_state.sequence` / `expires`。
+同时改了三处契约（详见 [ROADMAP.md](ROADMAP.md) M8“契约在 M8 期间改过三处”）：`catalog-v2` 的 `signature.signer_fp` 改必填、`key_id` 降级为展示字段；`source-v1` 的 instance 增 `source_id`、停用 `catalog_state.sequence` / `expires`。
 
 **二、后端**
 
-core 新增 2 项，都针对「源自己的钥匙」：
+core 新增 2 项，都针对“源自己的钥匙”：
 
 - `community_catalog_only_verifies_with_its_own_registered_key`：社区源用自己登记的公钥签的 catalog 能验过；换成另一把钥匙签的同内容 catalog 被拒。
 - `catalog_cannot_smuggle_its_own_pubkey`：catalog 自带的 `signature.pubkey` 不被采信——源表里登记的才是判定依据。
@@ -672,7 +672,7 @@ app 侧改动：`catalog.rs` 的 `parse` 拒收 catalog 自述公钥、改为按
 
 **三、前端**
 
-「下载」是侧栏独立视图，不是模态。新增 `tests/download-view.test.ts` 11 项，钉住两条核心语义：
+“下载”是侧栏独立视图，不是模态。新增 `tests/download-view.test.ts` 11 项，钉住两条核心语义：
 
 - 跨源同名 `module_id` 分成两组，不做隐式优选；
 - 同一 `module_id@variant` 的多个版本并列，按版本从新到旧排，且不依赖传入顺序。
@@ -695,10 +695,10 @@ Rust：app lib 80、core lib 188、pack 6、sign_catalog 2、bundled_uv 3、fuzz
 
 以下都没有跑过真机，不能当作验收通过：
 
-- 「下载」视图的切换、筛选保持与装包时主界面可操作；
-- 添加源向导的完整指纹展示与确认框默认焦点（默认焦点在「取消」这条只写进了代码，没在界面上验过）；
+- “下载”视图的切换、筛选保持与装包时主界面可操作；
+- 添加源向导的完整指纹展示与确认框默认焦点（默认焦点在“取消”这条只写进了代码，没在界面上验过）；
 - 用真源拉取、真机安装（真机安装在新界面上仍未跑过一次）；
-- 撤销源后已装实例标「发布者已不再受信任」的显示；
+- 撤销源后已装实例标“发布者已不再受信任”的显示；
 - 禁用内置官方源后本地 zip 导入仍可用；
 - 两个源同时启用时条目并列与各自标来源；
 - 离线时远程请求数为零；
@@ -709,9 +709,9 @@ Rust：app lib 80、core lib 188、pack 6、sign_catalog 2、bundled_uv 3、fuzz
 
 ## Backlog 清偿与隐藏镜像源（2026-11-14 下午）
 
-ROADMAP「Backlog：现网修复与签发流程欠账」的代码侧 1–4 与源侧第 5 条当天落地，本节记离线结果：
+ROADMAP“Backlog：现网修复与签发流程欠账”的代码侧 1–4 与源侧第 5 条当天完成，本节记离线结果：
 
-- **隐藏 `official-gh`**：`SourceRegistry::builtin` 只注册官方 SourceForge 源；`load` 剔除旧文件里内置的 GitHub 镜像条目（`HIDDEN_OFFICIAL_IDS`）。测试从「两个内置源」改为「一个内置源 + 旧文件剔除」。
+- **隐藏 `official-gh`**：`SourceRegistry::builtin` 只注册官方 SourceForge 源；`load` 剔除旧文件里内置的 GitHub 镜像条目（`HIDDEN_OFFICIAL_IDS`）。测试从“两个内置源”改为“一个内置源 + 旧文件剔除”。
 - **签发预检**：`release.rs` 新增 `preflight_catalog`（`sources[].id` 均匀唯一、条目 `source_id` 必须在顶层 `sources`、id 限于允许集合），`sign_catalog` 的 `sign` 与 `verify` 都在签名/验签前跑预检；release lib 测试增 4 项。
 - **逐源 last_error**：`SourceEntry` 增 `last_error` / `last_error_at`，刷新失败逐源记录、成功清除，全部失败也落盘；下载页源卡显示最近失败原因。契约断言 129 → **131**。
 - **签发脚本**：`scripts/release-catalog.py` 端到端演练通过（拉现网 → sequence+1 → 7 天窗 → 签名 → 复验 → 打印 sftp 命令），产物未上传。
@@ -719,38 +719,42 @@ ROADMAP「Backlog：现网修复与签发流程欠账」的代码侧 1–4 与�
 
 门禁：Rust app lib **84**、core lib **189**（合计与集成共 **325**）通过；前端 **71**；契约 **131**；`tsc` / `vite build` / `clippy -D warnings` / `check-upstreams` 全绿。真机 12 条验收状态不变。
 
+<!-- stc-disable-next-line: 下一行含 M6 产品术语，STC G6 判为套话属误报 -->
 ## M6 链路编排离线验收（2026-11-14 晚）
 
-M6 的六条验收要求真机逐条实测，本节只记离线断言，两者不混。M4 当时记的「六个视图」是那一阶段的事实，M8 加「下载」、M6 加「链路」后当前为八个。
+M6 的六条验收要求真机逐条实测，本节只记离线断言，两者不混。M4 当时记的“六个视图”是那一阶段的事实，M8 加“下载”、M6 加“链路”后当前为八个。
 
 **契约**：新增 `contracts/chains-v1.schema.json` 与 `contracts/examples/state/chains.json`。`validate.mjs` 断言 131 → **148**，17 项覆盖非法 id、空 / 重复 steps、32 步上限、缺 name、时间戳格式、`schema_version` 非 1、未知字段与空注册表；悬空引用在正例里允许保留。CI 编译新 schema 并校验样例。
 
+<!-- stc-disable-next-line: 下一行含 M6 产品术语，STC G6 判为套话属误报 -->
 **core**：`src-tauri/core/src/chain.rs` 共 12 项单测，钉住四件事：注册表 load / save / upsert 的时间戳语义（编辑保留 `created_at`、推进 `updated_at`）、悬空只在读取时算而不回写、默认链路不落盘、`started_ids` 不含外部服务（回滚停止不去停不属于启动器的进程）。
 
+<!-- stc-disable-next-line: 下一行含 M6 产品术语，STC G6 判为套话属误报 -->
 **app**：`commands_v2.rs` 新增 5 项：隐式默认链路按 role 拓扑排序（乱序传入也能拉回 input → llm → output）、逆序停止保留原步骤编号、外部服务标记、`precheck_step` 只跳过坏的那一步、新建 id 不撞已有 id。lib 测试 84 → **89**。
 
-**前端**：新增 `tests/chains-view.test.ts` 12 项，覆盖结果汇总与逐步文案、生命周期失败只回填 `started` 步骤、编辑上下移与勾选、五个命令的参数形状。`tests/running.test.ts` 的 `start_all` 用例从「多个 RunView」改为「默认链路 ChainRunResult」。前端 71 → **83**（9 个文件）。
+**前端**：新增 `tests/chains-view.test.ts` 12 项，覆盖结果汇总与逐步文案、生命周期失败只回填 `started` 步骤、编辑上下移与勾选、五个命令的参数形状。`tests/running.test.ts` 的 `start_all` 用例从“多个 RunView”改为“默认链路 ChainRunResult”。前端 71 → **83**（9 个文件）。
 
 **门禁**：Rust **339** 通过（app lib 89、core lib 201、其余集成 49），`live_source` 2 项与 `env_engine` 1 项按设计 ignored；契约 **148**；前端 **83**；`tsc --noEmit`、`vite build`、`clippy --workspace --all-targets -D warnings`、`check-upstreams` 15 项全绿。
 
 **未实测（六条真机验收全部未执行）**：
 
+  <!-- stc-disable-next-line: 下一行含 M6 产品术语，STC G6 判为套话属误报 -->
 - 三实例链路一键启动后进入 running / starting，步骤清单与状态点；
 - 中间一步端口被占后其余步骤照常拉起、卡片定位第几步；
-- 未装依赖的 `blocked` 步骤不 spawn 与「一键补装」；
-- 删实例后卡片「缺 N 项」与启动跳过；
+- 未装依赖的 `blocked` 步骤不 spawn 与“一键补装”；
+- 删实例后卡片“缺 N 项”与启动跳过；
 - `stop_chain` 逆序、单步失败不阻断、`only_started` 只收本次拉起的；
 - 手改 `chains.json` 出非法 id / 空 steps / 重复项被拒。
 
-「状态点靠 lifecycle-changed 回填」只在纯函数层测过：真机上异步失败能否准确落到那一步，还没验过。
+“状态点靠 lifecycle-changed 回填”只在纯函数层测过：真机上异步失败能否准确落到那一步，还没验过。
 
 ## M7 资源占用离线验收（2026-11-15）
 
 五条验收要真机跑，本节只记离线断言与实测方式，两者不混。
 
-**采样器**：`src-tauri/src/usage.rs` 6 项单测，钉住四件事：首轮只报内存不报 CPU（差分没有基准）、CPU 按逻辑核数换算成整机占比、短于 200ms 的差分沿用上一次的百分比而不给出抖动值、实例从「活着」集合里消失时连 60 点历史一起删。另有两项覆盖环形缓冲只留 60 点、以及「读不到」必须返回 `None` 而不是 0——后者是外部实例与权限不足共同的表现，写 0 会被当成「刚起来没占内存」。
+**采样器**：`src-tauri/src/usage.rs` 6 项单测，钉住四件事：首轮只报内存不报 CPU（差分没有基准）、CPU 按逻辑核数换算成整机占比、短于 200ms 的差分沿用上一次的百分比而不给出抖动值、实例从“活着”集合里消失时连 60 点历史一起删。另有两项覆盖环形缓冲只留 60 点、以及“读不到”必须返回 `None` 而不是 0——后者是外部实例与权限不足共同的表现，写 0 会被当成“刚起来没占内存”。
 
-**Win32 读取**：`process/win.rs` 的 `job_pids` 用变长结构读 Job 的 pid 列表，`ERROR_MORE_DATA` 时按系统回填的数量扩容重试，最多四轮；`sample_pid` 只申请 `PROCESS_QUERY_LIMITED_INFORMATION`，单个 pid 打不开就跳过，不让整轮失败。这两层没有单测：它们的效果只能靠真机的进程树观察，见下面第 2 条。
+**Win32 读取**：`process/win.rs` 的 `job_pids` 用变长结构读 Job 的 pid 列表，`ERROR_MORE_DATA` 时按系统回填的数量扩容重试，最多四轮；`sample_pid` 只申请 `PROCESS_QUERY_LIMITED_INFORMATION`，单个 pid 打不开就跳过，不让整轮失败。这两层没有单测：两者的效果只能靠真机的进程树观察，见下面第 2 条。
 
 **命令与事件**：`instance_usage` 只读内存快照，不触发采样；`usage-updated` 每轮推一次全量（按实例逐个推会把一次 tick 变成 N 条事件）。
 
@@ -764,7 +768,9 @@ M6 的六条验收要求真机逐条实测，本节只记离线断言，两者�
 - 全部停止后跑 `.internal/idle-cpu.ps1`，60.1 秒墙钟内启动器自身 CPU 累计 0.000 秒——**通过**。
 - 模块未运行时资源列显示 `—` 而不是 0，这是设计如此：没有 Job 就没有采样目标。
 
-**外部实例这条已修待复验**：0.4.0 真机暴露四个问题。外部实例退出后（Ctrl+C），界面一直停在“外部运行”。外部标记只在启动时探测一次，之后没有任何东西去撤销。现在采样子线程每 2 秒顺带探活，连续两轮探不到才摘标记并推一次“未运行”。反向也缺一半：启动器开着的时候在外部把模块跑起来，界面没有任何变化，原因是探测只遍历“已标成外部”的名单，自己在跑的实例永远进不了这个名单。现在每轮再按分配端口探一遍既不在进程表里、也没标外部、且未停用的实例，探通即标（600 ms 预算，`Starting`/`Stopping` 跳过）。第三处是 `dounai-ui` 这类 `health` 为 null 的角色，重复点“一键启动”会报“进程还在运行，但健康检查没通过”。没有健康端点就没有这道门禁，已改成幂等返回当前快照；这类角色同样无法被反向发现，外部拉起后仍需点一次“启动”认领。第四处是摘标记本身修好了、界面却不动：外部实例往往从未被启动器托管，状态机里没有它的快照，`broadcast` 拿到 `None` 被通用 `emit_snapshot` 直接丢弃，前端收不到 `lifecycle-changed`，卡片就永远停在“外部启动”。现在取不到快照时显式推一条 `Stopped`；没有快照本身就是「未运行」。
+**外部实例四处修复已复验通过**：0.4.0 真机暴露四个问题。外部实例退出后（Ctrl+C），界面一直停在“外部运行”。外部标记只在启动时探测一次，之后没有任何东西去撤销。现在采样子线程每 2 秒顺带探活，连续两轮探不到才摘标记并推一次“未运行”。反向也缺一半：启动器开着的时候在外部把模块跑起来，界面没有任何变化，原因是探测只遍历“已标成外部”的名单，自己在跑的实例永远进不了这个名单。现在每轮再按分配端口探一遍既不在进程表里、也没标外部、且未停用的实例，探通即标（600 ms 预算，`Starting`/`Stopping` 跳过）。第三处是 `dounai-ui` 这类 `health` 为 null 的角色，重复点“一键启动”会报“进程还在运行，但健康检查没通过”。没有健康端点就没有这道门禁，已改成幂等返回当前快照；这类角色同样无法被反向发现，外部拉起后仍需点一次“启动”认领。第四处是摘标记本身修好了、界面却不动：外部实例往往从未被启动器托管，状态机里没有该实例的快照，`broadcast` 拿到 `None` 被通用 `emit_snapshot` 直接丢弃，前端收不到 `lifecycle-changed`，卡片就永远停在“外部启动”。现在取不到快照时显式推一条 `Stopped`；没有快照本身就是“未运行”。
+
+探测连接顺带修了第五处：原来的短探只看状态码、不读响应体就丢掉 keep-alive 连接，每 2 秒一轮的反向发现会让 uvicorn 在 Windows 的 Proactor 循环里刷 `ConnectionResetError: [WinError 10054]` 栈。现在所有探测带 `Connection: close` 并读掉最多 8 KiB 响应体，外部终端不再刷栈。用户重启启动器复验后回报：外部拉起能自动认出、Ctrl+C 后回“未运行”、终端无栈，这三处都通过。
 
 第 5 条要开任务管理器观察。采样线程在采样表为空时只 sleep、不调 Win32，这一点在离线环境无法自证。
 
@@ -772,7 +778,7 @@ M6 的六条验收要求真机逐条实测，本节只记离线断言，两者�
 
 离线断言：`state_v2::tests::close_behavior_defaults_to_tray_and_survives_restart` 钉住默认值与三个取值的落盘往返，磁盘上存的是 `tray` / `quit` / `ask` 字符串而不是枚举的 Debug 形状。
 
-真机验收待执行：
+**真机验收（2026-11-15）**：用户回报关闭行为与托盘新功能整体通过，没有逐条回传。下面六条保留成可复跑清单，不把“整体通过”当成每条都验过：
 
 - 实例在跑时点窗口右上角 ×，窗口消失、实例继续跑、托盘出现图标；
 - 托盘图标双击或菜单“显示主窗口”，窗口回来且数据仍在；
@@ -780,3 +786,26 @@ M6 的六条验收要求真机逐条实测，本节只记离线断言，两者�
 - 设置改成“停止并退出”后关窗，弹确认框，确认后全停；
 - 设置改成“每次询问”后关窗，弹框选“收进托盘”并勾“记住”，下次关窗不再问；
 - 弹框按 Esc 关掉之后，再点 × 仍会重新问。
+
+## 第 2 轮真机验收回报（2026-11-15）
+
+- **2A-4 通过**：外部拉起能自动认出、Ctrl+C 后回“未运行”，终端不再刷 10054 栈。四处根因与修复见 M7 一节。
+- **2B-1 通过**：四个实例都在跑时再点“一键启动”，返回 4 提交 0 失败。`health: null` 的总装角色没有健康门禁，重复启动改成幂等返回当前快照。
+- **关闭行为与托盘新功能整体通过**，用户没有逐条回传，六条清单按上节保留。
+- **2B-8 暴露两处，已修**：直接填 `E:\Dounai-ai\Dounai_input` 点“登记目录”报 `missing field pubkey`，附带“确认 manifest.json 存在且可读”把人往错方向引；同时点导入后窗口卡住数秒。前者是 v1 清单按 module-v2 解析的代际问题，现在扫描会把这类目录标成“旧版清单”并给“补齐清单”入口，报错也改成点破代际。后者是四个同步命令的目录遍历与快照哈希跑在主线程，现已全部标 `async` 进运行时线程池，导入页在忙时锁按钮并显示进度。
+
+## v1 清单导入期转换（M5 前置，2026-11-15）
+
+**离线断言**：`launcher_core::m2::v1_convert` 5 项，钉住 v1 输入层转出的 v2 能过完整清单与运行时投影两道解析、shell 转出没有 `runtime` 且命令含 `{module_dir}`、v2 样例不被误判成 v1、非法选项在写盘前被拒、改端口会同步重写 health URL。`commands_v2::tests` 3 项覆盖 v1 诊断文案、签名段缺字段与未签名 v2 可登记。`tests/v1-wizard.test.ts` 6 项覆盖 v1 候选单独分组、已登记实例不进待办、选项读回、shell 与 auxiliary 分支、信任相关字段没有输入框、命令占位符。`contracts/validate.mjs` 153 项，新增三条覆盖 `manifest_path` 的正例与两个负例。
+
+**真机验收待执行**，换 exe 后按序跑：
+
+1. 导入页输入 `E:\Dounai-ai\Dounai_input`，点“开启本地目录登记”，再点“登记目录”→ 应直接弹补齐向导，不再出现 `missing field pubkey`；点下去窗口不卡顿。
+2. 核对预填：角色“输入”、端口 8101、命令 `{venv_python} -m dounai_input serve`、依赖 `pyproject.toml`；右侧 JSON 里 `category` 为 `optional`、`signature` 为 `null`、`files` 为 `{}`。
+3. 把端口改成 18101，确认 JSON 里 health URL 与 `DOUNAI_PORT` 同步变化；改回 8101 再生成。
+4. 点“生成并登记”→ 卡片出现 `local/dounai-input`，标 C 类；到 `E:\Dounai-ai\Dounai_input` 跑 `git status --short`，源码目录应是干净的。
+5. 到 `%LOCALAPPDATA%\com.dounai.launcher\launcher\instances\<key>\manifest-v2.json` 核对内容与预览一致；`state/installed.json` 里这条实例有 `manifest_path`。
+6. 模块页点“安装依赖”，再点“启动”：health 通、卡片变运行中，管理页“设置”按钮能打开输入层控制台。首次装依赖会在实例目录重建 venv，不会用源码目录里的 `.venv`。
+7. 解除登记 → 生成物被删、源码目录仍在；重新登记能再走一遍向导。
+8. 对 `E:\Dounai-ai\Dounai`（shell，`health` 为 null）重复 1–5，确认角色“总装”、无 `runtime`、命令含 `{module_dir}`。
+9. 拿一份内含 v1 manifest 的 `.zip` 走“本地包 → 检查”→ 仍应硬拒，确认 catalog 与 zip 两条入口没有被转换通道绕过。

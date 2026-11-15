@@ -33,7 +33,7 @@
 
 启动器用 Tauri 窗口加载该 URL。子 WebView 与独立窗口都是顶层窗口，不受 iframe 限制，模块不必放宽安全头。
 
-实现补记（M4）：默认内嵌。启动器在主窗口里用 `Window::add_child` 挂一个原生子 WebView，它仍是顶层 WebView，不参与 DOM 布局，也不受 iframe 限制。坐标由界面计算、窗口缩放时重下发；切到别的视图时隐藏而不是销毁，所以表单里填了一半的内容不会丢。manifest 声明 `web_ui.embed = false` 的模块改开独立窗口，子 WebView 创建失败时同样自动退化，两种情形都不改变 URL、不重启模块服务。
+实现补记（M4）：默认内嵌。启动器在主窗口里用 `Window::add_child` 挂一个原生子 WebView，该子视图仍是顶层 WebView，不参与 DOM 布局，也不受 iframe 限制。坐标由界面计算、窗口缩放时重下发；切到别的视图时隐藏而不是销毁，所以表单里填了一半的内容不会丢。manifest 声明 `web_ui.embed = false` 的模块改开独立窗口，子 WebView 创建失败时同样自动退化，两种情形都不改变 URL、不重启模块服务。
 
 ## 密钥归属
 
