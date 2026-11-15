@@ -9,6 +9,7 @@
 import {
   addLocalModule,
   addLocalModulesBulk,
+  enableDevMode,
   inspectLocalPackage,
   installLocalPackage,
   isDesktop,
@@ -105,6 +106,17 @@ function renderBody(body: HTMLElement): void {
         <button class="btn btn--primary" type="button" data-act="add">登记目录</button>
       </div>
       <div class="cap">扫描会读取该目录和它下面一层子目录，找出含 <code>manifest.json</code> 的模块。模型权重（.gguf、.safetensors）不是模块，扫描不会列出。</div>
+      ${
+        store.devMode
+          ? ""
+          : `<div class="alert" style="margin:10px 0 0">
+        <b>本地目录登记还没开启</b>
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:6px">
+          <span>开启后本次会话内可以登记任意目录，重启启动器即失效。</span>
+          <button class="btn btn--sm btn--primary" type="button" data-act="enable-dev">开启本地目录登记</button>
+        </div>
+      </div>`
+      }
     </div>
 
     <div class="alert" style="margin:14px 0">
@@ -141,6 +153,21 @@ function renderBody(body: HTMLElement): void {
     { act: "add-path", run: (node) => addOne(node.dataset.path ?? "") },
     { act: "bulk-add", run: () => addAllPending() },
     { act: "unlink", run: (node) => unlink(node.dataset.id ?? "") },
+    {
+      // 本地目录登记原来只藏在「设置 → 诊断」最末一组，用户走不到那里，
+      // 点「登记目录」只会收到「本地模块登记未开启」。开关放到出错的地方。
+      act: "enable-dev",
+      run: async () => {
+        try {
+          const info = await enableDevMode();
+          store.devMode = info.enabled;
+          toast("本地目录登记已开启，本次会话有效", "ok");
+          renderBody(body);
+        } catch (error) {
+          toast(`开启失败：${describeError(error)}`, "error");
+        }
+      },
+    },
   ]);
 
   renderPkgResult();
@@ -508,7 +535,11 @@ async function addOne(path: string): Promise<void> {
     toast(`已登记 ${view.module_id}`, "ok");
     await afterChange(`已登记 ${view.module_id}。模块页里可以启动它。`);
   } catch (error) {
-    dirState.note = `登记失败：${describeError(error)}。确认这个目录里有 manifest.json，并且当前账号可以读取。`;
+    // 后端错误本身可能已经带句号，直接拼会出现「。。」。
+    const reason = describeError(error).replace(/。$/, "");
+    dirState.note = reason.includes("未开启")
+      ? `登记失败：${reason}。点这一节里的「开启本地目录登记」再试。`
+      : `登记失败：${reason}。确认这个目录里有 manifest.json，并且当前账号可以读取。`;
     renderResult();
     toast("登记失败，原因见列表上方说明", "error");
   }
