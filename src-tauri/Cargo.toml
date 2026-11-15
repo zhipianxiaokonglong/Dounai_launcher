@@ -16,7 +16,11 @@ default-run = "dounai-launcher"
 # 还是加载 `devUrl`。缺了它，`cargo build --release` 也能编译通过，但产物会去连
 # `http://localhost:5175`，窗口里只有 Edge 的 ERR_CONNECTION_REFUSED。
 # `cargo tauri build` 会自动加；直接调 cargo 时必须手动带 `--features custom-protocol`。
-default = []
+# `default` 里带 tray：默认关闭行为是「收进托盘」，没有托盘图标用户就找不回窗口。
+default = ["tray"]
+# 系统托盘：关窗收进托盘、托盘菜单「显示主窗口 / 退出」都要它。
+# `image-png` 用来解码内嵌的 PNG 图标。
+tray = ["tauri/tray-icon", "tauri/image-png"]
 custom-protocol = ["tauri/custom-protocol"]
 
 [lib]

@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use launcher_core::chain::{ChainRegistry, ChainRunResult};
@@ -80,6 +80,52 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// 关闭主窗口时的行为。
+///
+/// 启动器是运行期管理者，不是「拉起就走」的启动器：实例的 Job Object 由这个
+/// 进程持有，进程一退，`KILL_ON_JOB_CLOSE` 就把整棵树收掉。所以「关窗」和
+/// 「退出」对用户是两件事，必须显式选一次，不能默认按 Windows 习惯直接退。
+///
+/// 三个取值里只有 `Tray` 能让实例在窗口消失后继续跑——它靠的是进程不退，
+/// 而不是拆掉 Job 的兜底能力。真正退进程还能留住实例，Windows 上没有免费
+/// 的实现路径，见 `docs/DESIGN.md` 的关闭行为一节。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CloseBehavior {
+    /// 窗口收进托盘，实例继续跑；托盘菜单「退出」才真的停。
+    #[default]
+    Tray,
+    /// 停掉全部实例并退出进程。
+    Quit,
+    /// 每次都问，勾了「记住」才落到上面两项之一。
+    Ask,
+}
+
+impl CloseBehavior {
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "tray" => Some(Self::Tray),
+            "quit" => Some(Self::Quit),
+            "ask" => Some(Self::Ask),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Tray => "tray",
+            Self::Quit => "quit",
+            Self::Ask => "ask",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ClosePolicyFile {
+    #[serde(default)]
+    pub behavior: CloseBehavior,
+}
+
 /// 诊断设置：目前只有「是否捕获子进程输出」。
 ///
 /// 子进程的 stdout/stderr 里可能有用户的对话内容，默认丢弃；打开后新拉起的
@@ -143,6 +189,14 @@ pub struct AppStateV2 {
     pub dev_mode: AtomicBool,
     /// 诊断设置（是否捕获子进程输出）。新建实例读取它，改动即时落盘。
     diagnostics: Mutex<Diagnostics>,
+    /// 关闭主窗口时的行为。落盘到 `state/close-behavior.json`。
+    close_behavior: Mutex<CloseBehavior>,
+    /// 已经决定退出。托盘「退出」与用户选「停止并退出」都会置位，
+    /// 窗口关闭事件据此放行——否则「收进托盘」的拦截会把自己的退出也挡掉。
+    pub quitting: AtomicBool,
+    /// 托盘图标是否建成。建不成时「收进托盘」就没有回来的入口，
+    /// 关窗必须退回「停止并退出」，不能让窗口消失得无声无息。
+    tray_ready: AtomicBool,
     /// 首次向导是否走完。界面据此决定开机是否弹向导。
     onboarding: Mutex<Onboarding>,
     /// 启动时补写/校正 `install.json` 的说明；`None` 表示本来就是一致的。
@@ -206,6 +260,10 @@ impl AppStateV2 {
         let onboarding = load_or(&paths.state_dir().join("onboarding.json"), || {
             Ok(Onboarding::default())
         })?;
+        let close_behavior = load_or(&paths.state_dir().join("close-behavior.json"), || {
+            Ok(ClosePolicyFile::default())
+        })?
+        .behavior;
         Ok(Self {
             paths,
             installed: Mutex::new(installed),
@@ -219,6 +277,9 @@ impl AppStateV2 {
             dev_mode: AtomicBool::new(false),
             diagnostics: Mutex::new(diagnostics),
             onboarding: Mutex::new(onboarding),
+            close_behavior: Mutex::new(close_behavior),
+            quitting: AtomicBool::new(false),
+            tray_ready: AtomicBool::new(false),
             install_note,
             instance_locks: Mutex::new(BTreeMap::new()),
         })
@@ -323,6 +384,38 @@ impl AppStateV2 {
             .map_err(|e| format!("保存诊断设置失败：{e}"))?;
         *guard = next;
         Ok(enabled)
+    }
+
+    pub fn close_behavior_path(&self) -> PathBuf {
+        self.paths.state_dir().join("close-behavior.json")
+    }
+
+    pub fn close_behavior(&self) -> CloseBehavior {
+        *lock(&self.close_behavior)
+    }
+
+    pub fn set_close_behavior(&self, behavior: CloseBehavior) -> Result<CloseBehavior, String> {
+        let mut guard = lock(&self.close_behavior);
+        launcher_core::state::write_json(&self.close_behavior_path(), &ClosePolicyFile { behavior })
+            .map_err(|e| format!("保存关闭行为失败：{e}"))?;
+        *guard = behavior;
+        Ok(behavior)
+    }
+
+    pub fn is_quitting(&self) -> bool {
+        self.quitting.load(Ordering::SeqCst)
+    }
+
+    pub fn begin_quit(&self) {
+        self.quitting.store(true, Ordering::SeqCst);
+    }
+
+    pub fn mark_tray_ready(&self) {
+        self.tray_ready.store(true, Ordering::SeqCst);
+    }
+
+    pub fn tray_ready(&self) -> bool {
+        self.tray_ready.load(Ordering::SeqCst)
     }
 
     pub fn onboarding_path(&self) -> PathBuf {
@@ -607,6 +700,29 @@ mod tests {
         // K1 泄露方有能力伪造一份不含 revoked 的索引。
         assert_ne!(BUILTIN_K1_PUBKEY_B64, BUILTIN_K5_PUBKEY_B64);
         assert_ne!(BUILTIN_K1_FINGERPRINT, BUILTIN_K5_FINGERPRINT);
+    }
+
+    /// 默认「收进托盘」是产品决定：关窗不该按 Windows 习惯直接杀掉实例。
+    /// 三个取值都要能落盘再读回来，否则重启后用户的显式选择会退回默认。
+    #[test]
+    fn close_behavior_defaults_to_tray_and_survives_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("app");
+        let data = dir.path().join("data");
+        let state = AppStateV2::new(root, data.clone()).unwrap();
+        assert_eq!(state.close_behavior(), CloseBehavior::Tray);
+        assert!(!state.tray_ready());
+        state.mark_tray_ready();
+        assert!(state.tray_ready());
+
+        for value in [CloseBehavior::Quit, CloseBehavior::Ask, CloseBehavior::Tray] {
+            assert_eq!(state.set_close_behavior(value).unwrap(), value);
+            let reopened = AppStateV2::new(dir.path().join("app"), data.clone()).unwrap();
+            assert_eq!(reopened.close_behavior(), value);
+        }
+        // 磁盘上存的是契约里的字符串，不是枚举的 Debug 形状。
+        let raw = std::fs::read_to_string(state.close_behavior_path()).unwrap();
+        assert!(raw.contains("\"tray\""), "{raw}");
     }
 
     #[test]

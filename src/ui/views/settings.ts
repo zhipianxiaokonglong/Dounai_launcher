@@ -11,8 +11,10 @@ import {
   revokeTrustedKey,
   confirmTrustedKey,
   setChildOutput,
+  setCloseBehavior,
   setKeepVersions,
   storageFacts,
+  type CloseBehavior,
   type StorageFacts,
 } from "../../bridge.js";
 import { confirmModal, esc, openModal, toast } from "../dom.js";
@@ -23,10 +25,11 @@ import { startTour } from "../tour.js";
 import { currentThemeMode, setThemeMode, type ThemeMode } from "../theme.js";
 import type { ViewSlots } from "./modules.js";
 
-type SectionId = "appearance" | "trust" | "storage" | "network" | "diagnostics";
+type SectionId = "appearance" | "window" | "trust" | "storage" | "network" | "diagnostics";
 
 const SECTIONS: Array<{ id: SectionId; label: string }> = [
   { id: "appearance", label: "外观" },
+  { id: "window", label: "窗口与退出" },
   { id: "trust", label: "信任与公钥" },
   { id: "storage", label: "存储与清理" },
   { id: "network", label: "下载与网络" },
@@ -102,6 +105,8 @@ function sectionHtml(section: SectionId): string {
   switch (section) {
     case "appearance":
       return appearanceHtml();
+    case "window":
+      return windowHtml();
     case "trust":
       return trustHtml();
     case "storage":
@@ -138,6 +143,34 @@ function appearanceHtml(): string {
       `<div class="inputbox"><span>紧凑 · 13px 基准</span><span class="hint">固定</span></div>`,
     ) +
     `<p class="cap">「跟随系统」取 Windows 的深浅设置。切换不会打断正在进行的操作，也不会改变模块状态。</p>`
+  );
+}
+
+/* ---------------- 窗口与退出 ---------------- */
+
+const CLOSE_LABEL: Record<CloseBehavior, string> = {
+  tray: "关闭时会收进托盘，实例继续运行",
+  quit: "关闭时会停止全部实例并退出",
+  ask: "关闭时会先问一次",
+};
+
+function windowHtml(): string {
+  const mode = store.closeBehavior;
+  const seg = (value: CloseBehavior, label: string) =>
+    `<button type="button" data-close-set="${value}" class="${mode === value ? "is-on" : ""}">${label}</button>`;
+  return (
+    row(
+      "关闭窗口时",
+      "点右上角 × 之后做什么",
+      `<div class="seg">${seg("tray", "收进托盘")}${seg("quit", "停止并退出")}${seg("ask", "每次询问")}</div>
+       <p class="cap" style="margin:6px 0 0">${esc(CLOSE_LABEL[mode])}</p>`,
+    ) +
+    row(
+      "实例能否脱离启动器运行",
+      "当前不能",
+      `<p class="cap" style="margin:0">每个实例的进程表格由启动器进程持有，启动器一退出（包括被强制结束），Windows 会把整棵进程树一起收掉。<b>收进托盘</b>是唯一能让实例继续跑的方式：窗口消失，进程不退。</p>`,
+    ) +
+    `<p class="cap">托盘图标双击可显示主窗口，右键菜单里有「显示主窗口」与「退出」。选「停止并退出」时，关窗会先停掉全部实例再退出进程。</p>`
   );
 }
 
@@ -351,6 +384,15 @@ function bindSection(form: Element): void {
     });
   });
 
+  form.querySelectorAll<HTMLButtonElement>("[data-close-set]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const value = button.dataset.closeSet;
+      if (value === "tray" || value === "quit" || value === "ask") {
+        void saveCloseBehavior(value);
+      }
+    });
+  });
+
   form.querySelector('[data-act="copy-fp"]')?.addEventListener("click", (event) => {
     const value = (event.currentTarget as HTMLElement).dataset.id ?? "";
     void navigator.clipboard
@@ -518,6 +560,16 @@ async function saveKeepVersions(value: number): Promise<void> {
     await setKeepVersions(value);
     await reload();
     toast(`保留版本数已设为 ${value}`, "ok");
+  } catch (error) {
+    toast(`保存失败：${describeError(error)}`, "error");
+  }
+}
+
+async function saveCloseBehavior(value: CloseBehavior): Promise<void> {
+  try {
+    store.closeBehavior = await setCloseBehavior(value);
+    await reload();
+    toast(CLOSE_LABEL[value], "ok");
   } catch (error) {
     toast(`保存失败：${describeError(error)}`, "error");
   }

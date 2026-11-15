@@ -9,11 +9,13 @@
 import {
   completeOnboarding,
   isDesktop,
+  onCloseRequested,
   onEnvProgress,
   onLifecycleChanged,
   onUsageUpdated,
+  resolveClose,
 } from "../bridge.js";
-import { esc, must, toast } from "./dom.js";
+import { esc, must, openModal, toast } from "./dom.js";
 import { initTheme } from "./theme.js";
 import {
   applyEnvProgress,
@@ -210,8 +212,6 @@ function updateChrome(): void {
     sbar.innerHTML = `
       ${bits.join('<span class="sep">·</span>')}
       <span class="sp"></span>
-      <span class="keyline">启动器不存密钥</span>
-      <span class="sep">|</span>
       <span>launcher ${esc(__APP_VERSION__)}${isDesktop() ? "" : " · 浏览器模式"}</span>
     `;
   }
@@ -374,6 +374,64 @@ function wireEvents(): void {
   onEnvProgress((progress) => {
     applyEnvProgress(progress);
     patchEnvJob(progress.instanceId);
+  });
+
+  onCloseRequested(askClose);
+}
+
+/**
+ * 关窗提示：后端拦下关闭事件之后问一次。
+ *
+ * 用户按 Esc 或点遮罩关掉弹框不算回答，窗口本来就没关；再点一次 × 会重新
+ * 触发，所以这里不需要向后端「撤销」什么。`promptOpen` 只防重复点击时叠出
+ * 两个弹框，`#overlay` 的可见性用来避开别的弹框正在打开的情况。
+ */
+let promptOpen = false;
+
+function askClose(): void {
+  if (promptOpen) return;
+  const overlay = document.getElementById("overlay");
+  if (overlay && !overlay.hidden) return;
+  promptOpen = true;
+
+  const running = store.views.filter((view) => view.snapshot?.phase === "running").length;
+  const remembered = (root: HTMLElement) =>
+    root.querySelector<HTMLInputElement>("#close-remember")?.checked ?? false;
+
+  openModal({
+    title: "关闭启动器窗口？",
+    subtitle: running > 0 ? `${running} 个实例正在运行` : "当前没有运行中的实例",
+    bodyHtml: `
+      <p class="cap" style="margin:0 0 10px">实例的进程由启动器持有：窗口关掉、进程还在，实例就能继续跑；启动器进程一退，Windows 会把整棵进程树一并收掉。</p>
+      <label class="check"><input type="checkbox" id="close-remember" /> 记住我的选择，下次不再问</label>
+    `,
+    actions: [
+      {
+        label: "取消",
+        tone: "quiet",
+        autofocus: true,
+        onClick: () => {
+          promptOpen = false;
+          void resolveClose("cancel", false);
+        },
+      },
+      {
+        label: "收进托盘",
+        tone: "primary",
+        onClick: async (root) => {
+          promptOpen = false;
+          await resolveClose("tray", remembered(root));
+        },
+      },
+      {
+        label: "停止并退出",
+        tone: "danger",
+        onClick: async (root) => {
+          promptOpen = false;
+          await resolveClose("quit", remembered(root));
+        },
+      },
+    ],
   });
 }
 

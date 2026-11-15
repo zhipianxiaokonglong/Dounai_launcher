@@ -16,7 +16,9 @@ import {
   settingsSnapshot,
   trustInfo,
   devModeStatus,
+  closeBehavior,
   BridgeUnavailableError,
+  type CloseBehavior,
   type EnvPhaseName,
   type EnvProgressEvent,
   type InstanceUsage,
@@ -54,6 +56,8 @@ export interface Store {
   envCheckedAt: Date | null;
   settings: SettingsSnapshot | null;
   trust: TrustInfo | null;
+  /** 关窗行为。设置页回显，关窗提示也读它决定要不要「记住」。 */
+  closeBehavior: CloseBehavior;
   /** 入门引导是否走过；设置页据此写「已完成 / 已跳过」。 */
   onboarding: OnboardingState | null;
   devMode: boolean;
@@ -73,6 +77,7 @@ export const store: Store = {
   envCheckedAt: null,
   settings: null,
   trust: null,
+  closeBehavior: "tray",
   onboarding: null,
   devMode: false,
   envJobs: {},
@@ -115,14 +120,16 @@ export async function refreshSettings(): Promise<void> {
     store.onboarding = null;
     return;
   }
-  const [snapshot, trust, onboarding] = await Promise.all([
+  const [snapshot, trust, onboarding, behavior] = await Promise.all([
     settingsSnapshot(),
     trustInfo(),
     onboardingState(),
+    closeBehavior(),
   ]);
   store.settings = snapshot;
   store.trust = trust;
   store.onboarding = onboarding;
+  store.closeBehavior = behavior;
 }
 
 export async function refreshDevMode(): Promise<void> {

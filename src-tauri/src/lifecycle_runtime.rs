@@ -99,6 +99,9 @@ pub struct Supervisor {
     processes: Mutex<BTreeMap<String, WinProcess>>,
     roles_by_instance: Mutex<BTreeMap<String, Role>>,
     external: Mutex<BTreeSet<String>>,
+    /// 外部实例连续探不到的次数。外部进程退出没有任何事件通知，
+    /// 只能靠轮询发现；单次超时可能只是服务忙，两轮才算真没了。
+    external_misses: Mutex<BTreeMap<String, u8>>,
     /// 每实例一份日志句柄，watcher 与探测线程共用。
     logs: Mutex<BTreeMap<String, SharedLog>>,
     /// 包住 begin_start 到进程登记，状态机本身不代替临界区。
@@ -117,6 +120,7 @@ impl Supervisor {
             processes: Mutex::new(BTreeMap::new()),
             roles_by_instance: Mutex::new(BTreeMap::new()),
             external: Mutex::new(BTreeSet::new()),
+            external_misses: Mutex::new(BTreeMap::new()),
             logs: Mutex::new(BTreeMap::new()),
             start_lock: Mutex::new(()),
             usage: UsageBoard::new(),
@@ -228,12 +232,38 @@ impl Supervisor {
             return;
         }
         lock(&self.external).insert(id.to_string());
+        lock(&self.external_misses).remove(id);
         let snap = external_snapshot(id);
         emit_snapshot(&self.app, id, Some(&snap));
     }
 
     pub fn clear_external(&self, id: &str) {
         lock(&self.external).remove(id);
+        lock(&self.external_misses).remove(id);
+    }
+
+    /// 当前被标成「外部运行」的实例。外部探测线程按这份名单逐个探活。
+    pub fn external_ids(&self) -> Vec<String> {
+        lock(&self.external).iter().cloned().collect()
+    }
+
+    /// 记一次探不到。返回累计次数，调用方按阈值决定是否摘标记。
+    pub fn note_external_miss(&self, id: &str) -> u8 {
+        let mut misses = lock(&self.external_misses);
+        let count = misses.entry(id.to_string()).or_insert(0);
+        *count = count.saturating_add(1);
+        *count
+    }
+
+    /// 探到了就把欠账清零，避免「两次失败之间夹一次成功」也被判死。
+    pub fn note_external_hit(&self, id: &str) {
+        lock(&self.external_misses).remove(id);
+    }
+
+    /// 把某个实例的当前快照推给界面。外部实例退出后靠它把「未运行」送出去。
+    pub fn broadcast(&self, id: &str) {
+        let snap = self.snapshot().get(id).cloned();
+        emit_snapshot(&self.app, id, snap.as_ref());
     }
 
     /// 启动前一次性短探：端口上已有健康服务就不重复拉起（上游 D-4）。

@@ -7,7 +7,11 @@
 
 use std::path::PathBuf;
 
-use tauri::Manager;
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
+use tauri::{Emitter, Manager};
+
+use dounai_launcher::state_v2::CloseBehavior;
 
 fn main() {
     let app = tauri::Builder::default()
@@ -20,6 +24,46 @@ fn main() {
         }))
         // 只提供服务端文件选择器：拿到路径后由 install_local_package 自己读文件。
         .plugin(tauri_plugin_dialog::init())
+        .on_window_event(|window, event| {
+            if window.label() != "main" {
+                return;
+            }
+            let tauri::WindowEvent::CloseRequested { api, .. } = event else {
+                return;
+            };
+            let Some(state) =
+                window
+                    .app_handle()
+                    .try_state::<dounai_launcher::state_v2::AppStateV2>()
+            else {
+                return;
+            };
+            // 已经决定退出了（托盘菜单、或用户在关窗提示里选了停止并退出），
+            // 这里不能再拦，否则自己的退出路径被自己的拦截挡掉。
+            if state.is_quitting() {
+                return;
+            }
+            match state.close_behavior() {
+                CloseBehavior::Quit => {
+                    state.begin_quit();
+                }
+                // 托盘没建成时，「收进托盘」等于把窗口藏进没有入口的地方。
+                CloseBehavior::Tray if !state.tray_ready() => {
+                    state.begin_quit();
+                }
+                CloseBehavior::Tray => {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+                CloseBehavior::Ask => {
+                    // 窗口先留着，等前端弹框回答。重复的关闭请求也照发，
+                    // 界面按「是否已有弹框」自行去重——这样一来用户按 Esc
+                    // 关掉弹框之后，再点 × 仍然能重新问一次。
+                    api.prevent_close();
+                    let _ = window.emit("close-requested", ());
+                }
+            }
+        })
         .setup(|app| {
             // 双根：安装根是只读的程序目录，数据根是用户本地应用数据目录。
             // 两者必须不同，Paths::new 会校验，避免把用户数据写进 Program Files。
@@ -62,11 +106,24 @@ fn main() {
                         continue;
                     };
                     supervisor.sample_once();
+                    // 外部实例没有事件可听，只能顺带探活。名单为空时这里直接返回。
+                    if let Some(state) =
+                        handle.try_state::<dounai_launcher::state_v2::AppStateV2>()
+                    {
+                        dounai_launcher::commands_v2::refresh_externals(&state, &supervisor);
+                    }
                 });
             }
 
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.show();
+            }
+            // 托盘常驻：「收进托盘」这个默认行为靠它把窗口叫回来。
+            if let Some(state) = app.try_state::<dounai_launcher::state_v2::AppStateV2>() {
+                match setup_tray(app.handle()) {
+                    Ok(()) => state.mark_tray_ready(),
+                    Err(e) => eprintln!("[tray] 托盘创建失败，关窗将直接退出：{e}"),
+                }
             }
             Ok(())
         })
@@ -112,6 +169,10 @@ fn main() {
             dounai_launcher::commands_v2::prepare_instance_env,
             dounai_launcher::commands_v2::set_keep_versions,
             dounai_launcher::commands_v2::set_child_output,
+            // 关窗行为：收进托盘 / 停止并退出 / 每次询问。
+            dounai_launcher::commands_v2::close_behavior,
+            dounai_launcher::commands_v2::set_close_behavior,
+            dounai_launcher::commands_v2::resolve_close,
             dounai_launcher::commands_v2::storage_facts,
             dounai_launcher::commands_v2::onboarding_state,
             dounai_launcher::commands_v2::complete_onboarding,
@@ -136,6 +197,7 @@ fn main() {
         .expect("启动器构建失败");
 
     // 退出时先停全部子进程；强杀启动器则由每个实例的 Job Object 兜底。
+    // 关窗默认不进这里——「收进托盘」在窗口事件里就被拦下了。
     app.run(|handle, event| {
         if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
             if let Some(supervisor) =
@@ -145,4 +207,52 @@ fn main() {
             }
         }
     });
+}
+
+/// 建系统托盘。菜单只有两项：显示主窗口、退出。
+///
+/// 「退出」是唯一会真的停掉实例的入口：置 quitting 后走 `app.exit`，
+/// 由 `RunEvent::ExitRequested` 里的 `stop_all` 收尾。
+fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
+    let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &quit])?;
+
+    let mut builder = TrayIconBuilder::with_id("main-tray")
+        .tooltip("Dounai 启动器")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "show" => show_main(app),
+            "quit" => {
+                if let Some(state) = app.try_state::<dounai_launcher::state_v2::AppStateV2>() {
+                    state.begin_quit();
+                }
+                app.exit(0);
+            }
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::DoubleClick {
+                button: MouseButton::Left,
+                ..
+            } = event
+            {
+                show_main(tray.app_handle());
+            }
+        });
+    // 图标直接内嵌：不依赖 `default_window_icon()` 有没有被解码出来，
+    // 托盘图标缺失时 Windows 会留一个空白格，用户根本点不到。
+    let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png"))?;
+    builder = builder.icon(icon);
+    builder.build(app)?;
+    Ok(())
+}
+
+fn show_main<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
 }

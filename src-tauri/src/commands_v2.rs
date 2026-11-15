@@ -46,7 +46,7 @@ use crate::lifecycle_ops::{
 };
 use crate::lifecycle_runtime::Supervisor;
 use crate::m2_http::ReqwestCatalogFetcher;
-use crate::state_v2::{bare_sha256, prefixed_sha256, AppStateV2, CachedEntry};
+use crate::state_v2::{bare_sha256, prefixed_sha256, AppStateV2, CachedEntry, CloseBehavior};
 
 /// 启动前外部服务探测预算：只发一次请求，超时就走正常启动路径。
 const PRESTART_TIMEOUT_MS: u64 = 600;
@@ -524,23 +524,33 @@ fn start_instance(
     // 进程表里还留着它：上一轮探测超时最常见。先看它是不是已经自己好了，
     // 好了就把状态收回 Running，而不是再 spawn 一个抢同一个端口。
     if supervisor.owns(&instance.instance_id) {
-        let healthy = prestart_health_url(supervisor.roles(), instance, port)
-            .map(|url| Supervisor::probe_external_once(&url, PRESTART_TIMEOUT_MS))
-            .unwrap_or(false);
-        if healthy {
-            if let Some(snap) = supervisor.recover(&instance.instance_id) {
-                return Ok(StartOutcome::Managed(snap));
+        return match prestart_health_url(supervisor.roles(), instance, port) {
+            Some(url) => {
+                if Supervisor::probe_external_once(&url, PRESTART_TIMEOUT_MS) {
+                    if let Some(snap) = supervisor.recover(&instance.instance_id) {
+                        return Ok(StartOutcome::Managed(snap));
+                    }
+                    // 状态机没处在「已判失败」的位置（已经 Running 或仍在 Starting）：
+                    // 进程健康就够了，原样返回快照，让界面刷新到最新状态。
+                    if let Some(snap) = supervisor.snapshot().get(&instance.instance_id).cloned() {
+                        return Ok(StartOutcome::Managed(snap));
+                    }
+                }
+                Err(format!(
+                    "{} 的进程还在运行，但健康检查没通过。先点「停止」，再启动，避免同时跑两个实例。",
+                    instance.module_id
+                ))
             }
-            // 状态机没处在「已判失败」的位置（已经 Running 或仍在 Starting）：
-            // 进程健康就够了，原样返回快照，让界面刷新到最新状态。
-            if let Some(snap) = supervisor.snapshot().get(&instance.instance_id).cloned() {
-                return Ok(StartOutcome::Managed(snap));
-            }
-        }
-        return Err(format!(
-            "{} 的进程还在运行，但健康检查没通过。先点「停止」，再启动，避免同时跑两个实例。",
-            instance.module_id
-        ));
+            // 契约里 health 为 null 的角色（组装层 shell）没有可探的门禁，
+            // 也就没有「健康检查没通过」这回事：进程在启动器手里就是已经在跑，
+            // 重复启动按幂等处理，直接回当前快照。
+            None => supervisor
+                .snapshot()
+                .get(&instance.instance_id)
+                .cloned()
+                .map(StartOutcome::Managed)
+                .ok_or_else(|| format!("{} 的进程状态读不到，请重试。", instance.module_id)),
+        };
     }
     // 上游 D-4：进程表里没有，但服务可能由用户自己拉起，或是启动器重启后
     // 留下的孤儿。直接 spawn 会因端口占用立刻退出（退出码 3），界面误报
@@ -556,6 +566,41 @@ fn start_instance(
 
     let plan = build_start_request(state, instance, port, supervisor.roles())?;
     supervisor.start(plan.request).map(StartOutcome::Managed)
+}
+
+/// 外部实例的存活探测，每 2 秒由采样子线程跑一轮。
+///
+/// 外部进程不由启动器拉起，退出时没有任何事件能通知到我们；不主动探，
+/// 界面会一直停在「外部运行」，即使那个服务早就被 Ctrl+C 关掉了。
+/// 连续两轮探不到才摘标记：单次超时可能只是服务正忙。
+pub const EXTERNAL_PROBE_TIMEOUT_MS: u64 = 1200;
+const EXTERNAL_MISS_LIMIT: u8 = 2;
+
+pub fn refresh_externals(state: &AppStateV2, supervisor: &Supervisor) {
+    let ids = supervisor.external_ids();
+    if ids.is_empty() {
+        return;
+    }
+    for id in ids {
+        let Some(instance) = state.with_installed(|s| s.instances.get(&id).cloned()) else {
+            // 实例已被卸载，标记没有意义。
+            supervisor.clear_external(&id);
+            supervisor.broadcast(&id);
+            continue;
+        };
+        let port = single_instance_port(state, supervisor, &instance);
+        let alive = prestart_health_url(supervisor.roles(), &instance, port)
+            .map(|url| Supervisor::probe_external_once(&url, EXTERNAL_PROBE_TIMEOUT_MS))
+            .unwrap_or(false);
+        if alive {
+            supervisor.note_external_hit(&id);
+            continue;
+        }
+        if supervisor.note_external_miss(&id) >= EXTERNAL_MISS_LIMIT {
+            supervisor.clear_external(&id);
+            supervisor.broadcast(&id);
+        }
+    }
 }
 
 #[tauri::command]
@@ -3080,6 +3125,60 @@ pub fn settings_snapshot(state: State<'_, AppStateV2>) -> SettingsSnapshot {
 #[tauri::command]
 pub fn set_child_output(enabled: bool, state: State<'_, AppStateV2>) -> Result<bool, String> {
     state.set_child_output(enabled)
+}
+
+/* ------------------------------------------------------------------ */
+/* 关闭行为                                                            */
+/* ------------------------------------------------------------------ */
+
+/// 关窗当前的行为。设置页用它回显三态选择。
+#[tauri::command]
+pub fn close_behavior(state: State<'_, AppStateV2>) -> String {
+    state.close_behavior().as_str().to_string()
+}
+
+#[tauri::command]
+pub fn set_close_behavior(
+    behavior: String,
+    state: State<'_, AppStateV2>,
+) -> Result<String, String> {
+    let parsed =
+        CloseBehavior::parse(&behavior).ok_or_else(|| format!("未知的关闭行为：{behavior}"))?;
+    Ok(state.set_close_behavior(parsed)?.as_str().to_string())
+}
+
+/// 用户对「关窗提示」的回答。
+///
+/// 关窗事件在 Rust 侧已经被拦下（`prevent_close`），所以这里只负责执行结果：
+/// 收进托盘就隐藏窗口并清掉等待标志，退出就置 quitting 再走正常退出流程。
+/// `remember` 为真时把这次的选择落盘，下次不再问。
+#[tauri::command]
+pub fn resolve_close(
+    action: String,
+    remember: bool,
+    app: AppHandle,
+    state: State<'_, AppStateV2>,
+) -> Result<(), String> {
+    let behavior = match action.as_str() {
+        // 取消：窗口本来就没关（后端已经 prevent_close），什么都不做。
+        "cancel" => return Ok(()),
+        "tray" => CloseBehavior::Tray,
+        "quit" => CloseBehavior::Quit,
+        other => return Err(format!("未知的关闭动作：{other}")),
+    };
+    if remember {
+        state.set_close_behavior(behavior)?;
+    }
+    // 托盘没建成时「收进托盘」没有回来的入口，按退出处理。
+    if behavior == CloseBehavior::Quit || !state.tray_ready() {
+        state.begin_quit();
+        app.exit(0);
+        return Ok(());
+    }
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+    }
+    Ok(())
 }
 
 /* ------------------------------------------------------------------ */

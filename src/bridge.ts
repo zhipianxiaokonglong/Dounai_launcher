@@ -1018,6 +1018,41 @@ export async function setChildOutput(enabled: boolean): Promise<boolean> {
 }
 
 /* ------------------------------------------------------------------ */
+/* 关闭行为                                                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 关窗时做什么。
+ *
+ * `tray` 只是把窗口收起来，实例继续跑，进程不退；`quit` 会停掉全部实例
+ * 再退出；`ask` 每次弹框问，可勾「记住」落到前两项之一。
+ */
+export type CloseBehavior = "tray" | "quit" | "ask";
+
+export async function closeBehavior(): Promise<CloseBehavior> {
+  const value = await call<string>("close_behavior");
+  return value === "quit" || value === "ask" ? value : "tray";
+}
+
+export async function setCloseBehavior(behavior: CloseBehavior): Promise<CloseBehavior> {
+  const value = await call<string>("set_close_behavior", { behavior });
+  return value === "quit" || value === "ask" ? value : "tray";
+}
+
+/** 回答一次关窗提示。`remember` 为真时把这次的选择写进设置。 */
+export async function resolveClose(
+  action: "tray" | "quit" | "cancel",
+  remember: boolean,
+): Promise<void> {
+  await call<void>("resolve_close", { action, remember });
+}
+
+/** 后端拦下关窗、等界面回答时触发。 */
+export function onCloseRequested(handler: () => void): () => void {
+  return listenEvent<null>("close-requested", () => handler());
+}
+
+/* ------------------------------------------------------------------ */
 /* 存储与引导状态                                                      */
 /* ------------------------------------------------------------------ */
 
