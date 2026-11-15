@@ -2681,10 +2681,15 @@ select.input:focus-visible {
   overflow: hidden;
 }
 
+/* 五列与表头一一对应：名称 / 状态 / CPU / 内存 / 进程。
+   状态 chip 必须自己占一格——套在 .res-name 里会让数据行只有四个子项，
+   整行左移一列，趋势线被挤进 52px 的状态列里。
+   后四列用固定宽度：概览页资源表与右侧栏并排时只有约 560px，fr 会把
+   CPU 列压到放不下「52px 线 + 当前值」，数值便被挤出列外。 */
 .res-head,
 .res-row {
   display: grid;
-  grid-template-columns: minmax(150px, 1fr) 54px minmax(0, 0.55fr) minmax(0, 0.75fr) 50px;
+  grid-template-columns: minmax(96px, 1fr) 52px 98px 102px 96px;
   gap: 12px;
   align-items: center;
   padding: 0 14px;
@@ -2741,10 +2746,12 @@ select.input:focus-visible {
   white-space: nowrap;
 }
 
-.res-name .chip {
+/* chip 是行内独立一格：自带宽度，左对齐，不随名称列的省略号收缩 */
+.res-row > .chip {
   font-size: 9.5px;
   padding: 2px 6px;
-  flex: 0 0 auto;
+  justify-self: start;
+  white-space: nowrap;
 }
 
 /* CPU 与内存两列：一条 52×14 的趋势线 + 右对齐的当前值。
@@ -2752,6 +2759,7 @@ select.input:focus-visible {
 .res-gauge {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 7px;
   min-width: 0;
 }
@@ -2763,7 +2771,7 @@ select.input:focus-visible {
 }
 
 .res-gauge .val {
-  flex: 1 1 auto;
+  flex: 0 0 auto;
   text-align: right;
   font-family: var(--mono);
   font-size: 10.5px;
@@ -3120,9 +3128,19 @@ select.input:focus-visible {
 
   .res-head,
   .res-row {
-    grid-template-columns: minmax(116px, 1fr) 50px minmax(0, 0.5fr) minmax(0, 0.7fr) 44px;
+    grid-template-columns: minmax(96px, 1fr) 48px 84px 92px 88px;
     gap: 10px;
     padding: 0 10px;
+  }
+
+  /* 窄窗里趋势线让出 12px 给数值，否则 84px 的列放不下 52px 线 + 值 */
+  .res-gauge {
+    gap: 5px;
+  }
+
+  .res-gauge .spark {
+    flex-basis: 40px;
+    width: 40px;
   }
 }
 

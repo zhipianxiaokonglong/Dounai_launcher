@@ -263,7 +263,7 @@ function resTableHtml(): string {
     return `
       <div class="res">
         <div class="res-head">
-          <span>实例</span><span>状态</span><span>CPU</span><span title="工作集，含共享页">内存</span><span class="th-r">进程</span>
+          <span>实例</span><span>状态</span><span class="th-r">CPU</span><span class="th-r" title="工作集，含共享页">内存</span><span class="th-r">进程</span>
         </div>
         <div class="res-empty">还没有实例。装好模块后这里按实例列出占用。</div>
       </div>
@@ -273,7 +273,7 @@ function resTableHtml(): string {
   return `
     <div class="res">
       <div class="res-head">
-        <span>实例</span><span>状态</span><span>CPU</span><span title="工作集，含共享页">内存</span><span class="th-r">进程</span>
+        <span>实例</span><span>状态</span><span class="th-r">CPU</span><span class="th-r" title="工作集，含共享页">内存</span><span class="th-r">进程</span>
       </div>
       <div data-res-rows>${resRowsHtml(rows)}</div>
       <div class="res-foot" data-res-foot>${resFootHtml()}</div>
@@ -297,8 +297,8 @@ function resRowsHtml(rows: InstanceRuntimeView[] = orderedViews()): string {
           <span class="res-name">
             <span class="dot"></span>
             <b>${esc(moduleName(view.instance.module_id))}</b>
-            ${resStateChip(view)}
           </span>
+          ${resStateChip(view)}
           <span class="res-gauge" title="${esc(hint)}">
             ${sparklineSvg((usage?.points ?? []).map((point) => point.cpu_percent))}
             <span class="val">${esc(formatPercent(usage?.cpu_percent ?? null))}</span>
