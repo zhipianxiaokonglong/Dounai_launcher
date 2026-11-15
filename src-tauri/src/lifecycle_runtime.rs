@@ -76,6 +76,23 @@ fn emit_snapshot(app: &AppHandle, id: &str, snapshot: Option<&Snapshot>) {
     let _ = app.emit(EVENT_NAME, event);
 }
 
+/// 撤销外部标记时专用：这个实例可能从来没被启动器托管过，状态机里根本
+/// 没有它的条目。此时 `broadcast` 取到的快照是 None，通用 `emit_snapshot`
+/// 会直接返回——后端标记已经摘了，前端却收不到任何事件，卡片永远停在
+/// 「外部启动」。没有快照本身就是「未运行」，要显式把这句话送出去。
+fn emit_stopped(app: &AppHandle, id: &str) {
+    let event = LifecycleEvent {
+        instance_id: id.to_string(),
+        phase: Phase::Stopped,
+        pid: None,
+        health: ProbeState::Pending,
+        contract: ProbeState::Pending,
+        exit_code: None,
+        last_error: None,
+    };
+    let _ = app.emit(EVENT_NAME, event);
+}
+
 /// 进程表之外、由外部启动但健康端点已通的实例（上游 D-4）。
 ///
 /// 这些服务不在 Job Object 里，启动器既不该重复拉起，也无权停止。
@@ -261,9 +278,14 @@ impl Supervisor {
     }
 
     /// 把某个实例的当前快照推给界面。外部实例退出后靠它把「未运行」送出去。
+    ///
+    /// 状态机里没有这个实例时不能沉默：外部启动的实例往往只存在于
+    /// `external` 集合里，摘掉标记后 `snapshot()` 就查无此人了。
     pub fn broadcast(&self, id: &str) {
-        let snap = self.snapshot().get(id).cloned();
-        emit_snapshot(&self.app, id, snap.as_ref());
+        match self.snapshot().get(id).cloned() {
+            Some(snap) => emit_snapshot(&self.app, id, Some(&snap)),
+            None => emit_stopped(&self.app, id),
+        }
     }
 
     /// 启动前一次性短探：端口上已有健康服务就不重复拉起（上游 D-4）。
@@ -278,10 +300,14 @@ impl Supervisor {
             Ok(client) => client,
             Err(_) => return false,
         };
-        matches!(
-            client.get(url).send(),
-            Ok(response) if response.status().is_success()
-        )
+        match probe_get(&client, url) {
+            Some(response) => {
+                let healthy = response.status().is_success();
+                drain_response(response);
+                healthy
+            }
+            None => false,
+        }
     }
 
     pub fn roles(&self) -> &RolesDoc {
@@ -620,6 +646,30 @@ fn spawn_pump(log: SharedLog, scope: &'static str, reader: impl Read + Send + 's
     });
 }
 
+/// 发一个探测请求：显式要求对端在响应后关连接。
+///
+/// 不带这个头时，客户端拿到响应把连接丢进池子、池子随 Client 一起销毁，
+/// 服务端收尾时就会吃到 RST（`WinError 10054`）。uvicorn 的 Proactor 事件
+/// 循环会把这当成未捕获异常，把一整段栈打到自己控制台——外部启动的实例
+/// 是用户自己在终端里跑起来的，那段栈直接刷在用户眼前，看起来像启动器把
+/// 服务弄崩了。让服务端先收尾，谁也不必吃 RST。
+fn probe_get(client: &reqwest::blocking::Client, url: &str) -> Option<reqwest::blocking::Response> {
+    client
+        .get(url)
+        .header(reqwest::header::CONNECTION, "close")
+        .send()
+        .ok()
+}
+
+/// 读掉响应体再放手，最多 8 KiB。
+///
+/// 只要状态码就不要正文，等于在对方还在写的时候就关 socket，同样会触发
+/// 上面那个 RST。health 端点返回几百字节，读干净的代价可以忽略。
+fn drain_response(mut response: reqwest::blocking::Response) {
+    let mut sink = Vec::new();
+    let _ = response.by_ref().take(8 * 1024).read_to_end(&mut sink);
+}
+
 fn probe_health(
     client: &reqwest::blocking::Client,
     url: &str,
@@ -628,8 +678,10 @@ fn probe_health(
 ) -> ProbeState {
     let started = Instant::now();
     loop {
-        if let Ok(response) = client.get(url).send() {
-            if response.status().is_success() {
+        if let Some(response) = probe_get(client, url) {
+            let healthy = response.status().is_success();
+            drain_response(response);
+            if healthy {
                 return ProbeState::Healthy;
             }
         }
@@ -661,7 +713,8 @@ fn probe_contract(
 ) -> ProbeState {
     let started = Instant::now();
     loop {
-        if let Ok(response) = client.get(url).send() {
+        // 这里要读 JSON，正文由 `json()` 读完，不再手工 drain。
+        if let Some(response) = probe_get(client, url) {
             if response.status().is_success() {
                 if let Ok(document) = response.json::<Value>() {
                     return match evaluate(role, &document) {
