@@ -140,9 +140,8 @@ function heroActions(total: number): string {
       <button class="btn" type="button" data-act="goto-import">导入本地包</button>
     `;
   }
-  const counts = runCounts();
   return `
-    <button class="btn btn--primary" type="button" data-act="start-all">一键启动全部 ${counts.total} 个</button>
+    <button class="btn btn--primary" type="button" data-act="start-all" title="按默认链路启动，每个角色取当前 active 的实例">一键启动默认链路</button>
     <button class="btn" type="button" data-act="goto-chains">查看链路</button>
   `;
 }

@@ -158,7 +158,7 @@ cargo run --bin sign_catalog -- verify --pubkey k5.pub --catalog signed.json
 - 字段语义不兼容时直接改本份契约并同步所有消费者，不叠加兼容分支。只有存在**已分发制品**且需要同时读新旧两代格式时才升文件名版本号；正式完工前没有这种制品。
 - M8 直接改 `catalog-v2` 与 `source-v1`：`signature.key_id` 从 `K5` 常量放开为展示用字符串，新增必填 `signature.signer_fp`；`catalog_state.sequence/expires` 从必填改为“M8 起停止写入”的废弃字段，实例新增可选 `source_id`。新增 `sources-v1.schema.json` 与 `examples/state/sources.json`。官方 catalog 尚未签发，没有已分发制品，因此不升文件名版本号、不写读取旧 catalog 的兼容分支；旧 `installed.json` 里残留的 `sequence/expires` 只读不判。
   <!-- stc-disable-next-line: 下一行含 M6 产品术语，STC G6 判为套话属误报 -->
-- M6 新增 `chains-v1.schema.json` 与 `examples/state/chains.json`，不改既有 schema：`chains` 空数组合法（默认链路不落盘，由实例表隐式生成），`steps` 只存 `instance_id`，最多 32 步且不得重复，悬空引用合法并由读取方标记而非回写。运行进度不写入该文件。`validate.mjs` 断言 131 → 148，CI 同步加 schema 编译与样例校验。
+- M6 新增 `chains-v1.schema.json` 与 `examples/state/chains.json`，不改既有 schema：`chains` 空数组合法（默认链路不落盘，由实例表按 active 隐式生成），`steps` 只存 `instance_id`，最多 32 步且不得重复，悬空引用合法并由读取方标记而非回写。运行进度不写入该文件。`validate.mjs` 断言 131 → 148，CI 同步加 schema 编译与样例校验。
 - 签名算法标识由 `SHA-256 + Ed25519` 改为 `Ed25519`。改动发生在任何包或 catalog 对外发布之前，没有已分发制品，不升文件名版本号；`validate.mjs` 用负例断言拒收旧值。发布后如需再改，必须升版本。
 - `module-v2.schema.json` 的 shell 分支由 `{install_root}` 收紧为 `{module_dir}`，同步改 `m2/manifest.rs`、`examples/dounai-ui.v2.json`、两处测试夹具与 `validate.mjs` 的负例。收紧时已分发的三个 zip 都是数据面模块，不含 shell，因此不影响旧制品，不升文件名版本号、不写兼容分支；首个 shell 包（`dounai-ui 0.3.1`）在收紧之后才发布，按新规则打包。
 - `validate.mjs` 的失败项不得通过放宽 schema 消除。允许例外时，在断言里写明理由。

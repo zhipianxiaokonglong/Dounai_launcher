@@ -253,7 +253,7 @@ M3 顺带关闭的遗留：M2 第 16 条的卸载不删源码目录、第 9 条�
 主要内容：新增一种用户自定义对象 **链路**（Chain），由 1 至 32 个实例按声明顺序组成，一键启动整条链路。链路只编排、不安装，也不复制 `installed.json` 里的任何事实。
 
   <!-- stc-disable-next-line: 下一行含 M6 产品术语，STC G6 判为套话属误报 -->
-- 数据模型：`state/chains.json`，`schema_version: 1`，`chains[]` 每条 `{ id, name, steps[], created_at, updated_at }`。`steps` 存 `instance_id` 而不是 `module_id`——同一模块可以有 primary 与 standby 两个实例，链路必须指到具体那一个。契约 `contracts/chains-v1.schema.json` 连同样例与 `validate.mjs` 断言一起加；空 `chains` 合法，**默认链路不落盘**，由未禁用实例按 `roles-v1.json` 拓扑隐式生成，避免增删实例后维护第二份事实。运行进度不写文件。
+- 数据模型：`state/chains.json`，`schema_version: 1`，`chains[]` 每条 `{ id, name, steps[], created_at, updated_at }`。`steps` 存 `instance_id` 而不是 `module_id`——同一模块可以有 primary 与 standby 两个实例，链路必须指到具体那一个。契约 `contracts/chains-v1.schema.json` 连同样例与 `validate.mjs` 断言一起加；空 `chains` 合法，**默认链路不落盘**，由当前 active 实例按 `roles-v1.json` 拓扑隐式生成：同角色只取 active 那一个，没有 active 槽的总装与辅助角色保留全部，避免增删实例后维护第二份事实。运行进度不写文件。
 - 命令面：`list_chains`、`save_chain`、`delete_chain`、`start_chain`、`stop_chain`，全部走阻塞池。另加 `chain-progress` 事件，每步提交与结果各一次。
   <!-- stc-disable-next-line: 下一行含 M6 产品术语，STC G6 判为套话属误报 -->
 - 启动语义：**一轮批量 spawn，步骤间不插入等待点**。健康与契约探测仍由现有后台线程跑，链路不介入；单步同步失败逐条记进结果，其余步骤照常拉起，已启动的不回滚。步骤编号按声明顺序，用于展示与失败定位。端口按整张实例表一次分配，避免备用端口撞车。`Supervisor` 的 `start_lock` 会串行化实际 spawn，所以“同时”指去掉等待点，不是并行提速。

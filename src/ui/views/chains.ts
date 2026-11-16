@@ -128,6 +128,14 @@ export function setLastChainRun(result: ChainRunResult): void {
   if (isCurrentView()) renderCurrent();
 }
 
+/**
+ * 默认链路按 active 现算：切换 active、增删实例后旧的步骤清单就失效了。
+ * 下次进入链路页重新拉一次，而不是把首次加载的结果一直留着。
+ */
+export function invalidateChains(): void {
+  view.loaded = false;
+}
+
 function isCurrentView(): boolean {
   return document.getElementById("pbody")?.dataset.view === "chains";
 }

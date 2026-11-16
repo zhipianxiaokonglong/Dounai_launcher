@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://dounai.local/contracts/chains-v1.schema.json",
   "title": "Dounai chain registry v1",
-  "description": "用户自定义链路注册表，落在 state/chains.json。链路只编排、不安装；steps 存 instance_id，不复制 installed.json 里的任何事实。默认链路不落盘，由未禁用实例按 role 拓扑隐式生成。运行进度不写入本文件。",
+  "description": "用户自定义链路注册表，落在 state/chains.json。链路只编排、不安装；steps 存 instance_id，不复制 installed.json 里的任何事实。默认链路不落盘，由当前 active 实例按 role 拓扑隐式生成，同角色只取 active 那一个。运行进度不写入本文件。",
   "type": "object",
   "additionalProperties": false,
   "required": [

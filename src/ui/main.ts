@@ -33,7 +33,7 @@ import {
   usageTotals,
 } from "./store.js";
 import { adminLifecycleChanged, disposeAdmin, renderAdmin } from "./views/admin.js";
-import { renderChains } from "./views/chains.js";
+import { invalidateChains, renderChains } from "./views/chains.js";
 import { renderEnv } from "./views/env.js";
 import { renderDownload } from "./views/download.js";
 import { patchHomeUsage, refreshHome, renderHome } from "./views/home.js";
@@ -341,7 +341,12 @@ function wireEvents(): void {
     if (VIEWS.includes(detail as ViewId)) void renderView(detail as ViewId);
   });
 
-  window.addEventListener("dounai:views-updated", () => updateChrome());
+  window.addEventListener("dounai:views-updated", () => {
+    // 实例表变了：active 切换、安装卸载都会改写隐式默认链路。让链路页下次
+    // 进入时重拉，否则预览停在首次加载的步骤上。
+    invalidateChains();
+    updateChrome();
+  });
 
   // 引导结束时落盘：走完与跳过的区别只体现在 skipped 上，两者都不再自动弹。
   window.addEventListener("dounai:tour-done", (event) => {

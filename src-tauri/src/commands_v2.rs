@@ -3785,13 +3785,43 @@ fn default_ordered_ids(roles: &RolesDoc, instances: Vec<Instance>) -> Result<Vec
     Ok(ordered.iter().map(|i| i.instance_id.clone()).collect())
 }
 
+/// 默认链路每个角色只取 active 那一个实例，避免切换 active 后一键启动把
+/// 刚被替换的实例又拉起来，出现同一 role 两个进程。
+///
+/// 没有 active 槽的角色（总装、辅助）以及槽位指向已卸载或已停用实例的角色，
+/// 保留该角色全部候选——否则整层会凭空消失，比多起一个实例更糟。
+/// 抽成纯函数便于离线断言同 role 多实例的取舍。
+fn active_instances_only(
+    active: &BTreeMap<String, String>,
+    instances: Vec<Instance>,
+) -> Vec<Instance> {
+    let mut grouped: BTreeMap<String, Vec<Instance>> = BTreeMap::new();
+    for instance in instances {
+        grouped
+            .entry(launcher_core::lifecycle::role_name(instance.role).to_string())
+            .or_default()
+            .push(instance);
+    }
+    let mut out = Vec::new();
+    for (role, mut group) in grouped {
+        if let Some(active_id) = active.get(&role) {
+            if group.iter().any(|i| &i.instance_id == active_id) {
+                group.retain(|i| &i.instance_id == active_id);
+            }
+        }
+        out.extend(group);
+    }
+    out
+}
+
 /// 默认链路完全按 role 拓扑生成，不写入 chains.json。
 fn default_chain_plan(state: &AppStateV2, supervisor: &Supervisor) -> Result<ChainPlan, String> {
-    let instances: Vec<Instance> = all_instances(state)
+    let enabled: Vec<Instance> = all_instances(state)
         .into_iter()
         .filter(|i| !state.is_disabled(&i.module_id))
         .collect();
-    let ids = default_ordered_ids(supervisor.roles(), instances)?;
+    let active = state.with_installed(|s| s.active.clone());
+    let ids = default_ordered_ids(supervisor.roles(), active_instances_only(&active, enabled))?;
     Ok(ChainPlan::from_default(&ids))
 }
 
@@ -4474,27 +4504,29 @@ mod tests {
 
     /* ---------------- M6 链路 ---------------- */
 
+    fn chain_instance(id: &str, role: &str) -> Instance {
+        serde_json::from_value(serde_json::json!({
+            "instance_id": id,
+            "module_id": id.split('@').next().unwrap(),
+            "variant": "stable",
+            "version": "0.1.0",
+            "role": role,
+            "category": "core",
+            "verdict": "A",
+            "confirmed_at": "2026-11-13T00:00:00Z",
+            "installed_at": "2026-11-13T00:00:00Z",
+            "source_kind": "zip",
+            "pinned": false,
+            "auto_update": false,
+        }))
+        .unwrap()
+    }
+
     /// 默认链路不落盘：按 role 拓扑从实例表即时生成，增删实例不需要维护第二份事实。
     #[test]
     fn default_chain_follows_role_topology() {
         let roles = launcher_core::lifecycle::embedded_roles().unwrap();
-        let instance = |id: &str, role: &str| -> Instance {
-            serde_json::from_value(serde_json::json!({
-                "instance_id": id,
-                "module_id": id.split('@').next().unwrap(),
-                "variant": "stable",
-                "version": "0.1.0",
-                "role": role,
-                "category": "core",
-                "verdict": "A",
-                "confirmed_at": "2026-11-13T00:00:00Z",
-                "installed_at": "2026-11-13T00:00:00Z",
-                "source_kind": "zip",
-                "pinned": false,
-                "auto_update": false,
-            }))
-            .unwrap()
-        };
+        let instance = chain_instance;
         // 故意乱序传入，拓扑排序必须把它拉回来。
         let ids = default_ordered_ids(
             &roles,
@@ -4514,6 +4546,49 @@ mod tests {
         let plan = ChainPlan::from_default(&ids);
         assert!(plan.is_default);
         assert_eq!(plan.chain_id, DEFAULT_CHAIN_ID);
+    }
+
+    /// 切换 active 后默认链路必须跟着换人：同 role 只留 active 那一个，
+    /// 否则一键启动会把刚被替换的实例又拉起来。
+    #[test]
+    fn default_chain_keeps_only_active_instance_per_role() {
+        let roles = launcher_core::lifecycle::embedded_roles().unwrap();
+        let official = chain_instance("dounai/dounai-input@stable", "input");
+        let local = chain_instance("local/dounai-input@local", "input");
+        let llm = chain_instance("dounai/omninexus@stable", "llm");
+        let shell = chain_instance("dounai/dounai-ui@stable", "shell");
+        let instances = vec![official, local, llm, shell];
+        let mut active = BTreeMap::new();
+        active.insert("input".into(), "local/dounai-input@local".into());
+        active.insert("llm".into(), "dounai/omninexus@stable".into());
+
+        let kept = active_instances_only(&active, instances);
+        let ids: Vec<&str> = kept.iter().map(|i| i.instance_id.as_str()).collect();
+        assert_eq!(ids.len(), 3, "三个角色各一个：{ids:?}");
+        assert!(ids.contains(&"local/dounai-input@local"));
+        assert!(!ids.contains(&"dounai/dounai-input@stable"));
+        assert!(ids.contains(&"dounai/omninexus@stable"));
+        // shell 没有 active 槽，必须保留，否则总装层凭空消失。
+        assert!(ids.contains(&"dounai/dounai-ui@stable"));
+
+        let plan = ChainPlan::from_default(&default_ordered_ids(&roles, kept).unwrap());
+        assert_eq!(plan.steps.len(), 3);
+        assert!(plan
+            .steps
+            .iter()
+            .all(|s| s.instance_id != "dounai/dounai-input@stable"));
+    }
+
+    /// active 槽指向已卸载的实例时退回该角色全部候选，不让整层消失。
+    #[test]
+    fn default_chain_falls_back_when_active_points_to_missing_instance() {
+        let a = chain_instance("a@stable", "input");
+        let b = chain_instance("b@stable", "input");
+        let mut active = BTreeMap::new();
+        active.insert("input".into(), "gone@stable".into());
+
+        let kept = active_instances_only(&active, vec![a, b]);
+        assert_eq!(kept.len(), 2);
     }
 
     /// 逆序停止时保留原步骤编号，失败才能定位回卡片上那一行。

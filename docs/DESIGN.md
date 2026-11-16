@@ -348,7 +348,7 @@ M3 已按 role 拓扑启动、Job Object 托管与异步探测重写生命周期
 ### 链路编排（M6）
 
 <!-- stc-disable-next-line: 下一行含 M6 产品术语，STC G6 判为套话属误报 -->
-链路是用户自己排的一组实例，存在 `state/chains.json`，只记 `{ id, name, steps[] }` 与两个时间戳。`steps` 用 `instance_id`：同一模块可以有 primary 与 standby 两个实例，写 `module_id` 指不到具体那一个。默认链路不写这个文件，每次启动时从“未禁用实例 + `roles-v1.json` 拓扑”现算，装一个实例不用同步改第二份表。运行进度也不落盘，只在内存与 `chain-progress` 事件里。
+链路是用户自己排的一组实例，存在 `state/chains.json`，只记 `{ id, name, steps[] }` 与两个时间戳。`steps` 用 `instance_id`：同一模块可以有 primary 与 standby 两个实例，写 `module_id` 指不到具体那一个。默认链路不写这个文件，每次启动时从“当前 active 实例 + `roles-v1.json` 拓扑”现算，装一个实例不用同步改第二份表。同角色只取 active 那一个，`active_instances_only` 在拓扑排序前先筛掉被替换的备用实例，否则切换 active 后一键启动会把刚停掉的旧实例又拉起来。没有 active 槽的总装与辅助角色、以及槽位指向已卸载实例的角色保留全部候选，避免整层消失。运行进度也不落盘，只在内存与 `chain-progress` 事件里。
 
 <!-- stc-disable-next-line: 下一行含 M6 产品术语，STC G6 判为套话属误报 -->
 `start_all` 就是启动默认链路，返回 `ChainRunResult`，与自定义链路共用 `run_chain`。一轮批量提交，步骤之间不插等待点：健康与契约探测仍由 M3 的后台线程收敛，链路只看 spawn 的同步结论。端口按整张实例表一次分配，`start_lock` 仍把实际 spawn 串起来——“同时启动”去掉的是等待，不是把 N 个进程并行拉起。
