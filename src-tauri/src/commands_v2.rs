@@ -2870,7 +2870,8 @@ pub fn remove_local_module(
     state: State<'_, AppStateV2>,
     supervisor: State<'_, Supervisor>,
 ) -> Result<(), String> {
-    require_dev_mode(&state)?;
+    // 解除登记是撤销已有状态，不经过开发者开关：开关只存在于本次进程内，
+    // 重启启动器后会关掉，而本地目录登记仍留在实例表里，此时必须能解除。
     let instance = state.resolve_instance(&module_id)?;
     if instance.source_kind != InstanceSourceKind::Dir {
         return Err("remove_local_module 只解除本地目录登记，zip 实例请用 uninstall_module".into());
