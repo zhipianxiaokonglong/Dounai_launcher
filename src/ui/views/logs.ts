@@ -68,6 +68,9 @@ const state: LogState = {
 
 const REFRESH_MS = 2000;
 
+/** 与后端 state_v2::LAUNCHER_LOG_ID 对齐：日志页里代表启动器自身的伪实例。 */
+export const LAUNCHER_LOG_ID = "__launcher__";
+
 /** 从模块页跳进来时指定实例。 */
 export function focusInstance(instanceId: string): void {
   if (state.instanceId !== instanceId) state.file = null;
@@ -91,29 +94,15 @@ export async function renderLogs(slots: ViewSlots): Promise<void> {
     slots.body.innerHTML = `<div class="placeholder">
       <span class="ph-ico">${icon("logs", 18)}</span>
       <b>浏览器模式没有日志</b>
-      <p>日志写在数据根的 <code>instances/&lt;key&gt;/logs/</code>，只有桌面端能读。</p>
+      <p>日志写在数据根的 <code>logs/</code>（启动器）与 <code>instances/&lt;key&gt;/logs/</code>（模块），只有桌面端能读。</p>
     </div>`;
     return;
   }
-  if (store.views.length === 0) {
-    slots.body.innerHTML = `<div class="placeholder">
-      <span class="ph-ico">${icon("logs", 18)}</span>
-      <b>还没有实例</b>
-      <p>先到「导入本地」登记模块。启动器从第一次启动开始写日志。</p>
-      <button class="btn btn--sm" type="button" data-act="go-import">去导入本地</button>
-    </div>`;
-    bindActions(slots.body, [
-      {
-        act: "go-import",
-        run: () => {
-          window.dispatchEvent(new CustomEvent("dounai:navigate", { detail: "import" }));
-        },
-      },
-    ]);
-    return;
-  }
-
-  if (!state.instanceId || !store.views.some((v) => v.instance.instance_id === state.instanceId)) {
+  if (
+    !state.instanceId ||
+    (state.instanceId !== LAUNCHER_LOG_ID &&
+      !store.views.some((v) => v.instance.instance_id === state.instanceId))
+  ) {
     state.instanceId = defaultInstance();
     state.file = null;
   }
@@ -155,11 +144,11 @@ export async function renderLogs(slots: ViewSlots): Promise<void> {
   paintLines();
 }
 
-function defaultInstance(): string | null {
+function defaultInstance(): string {
   // 优先落在正在跑的实例上：用户点「日志」几乎都是为了看刚启动的那个。
   const running = store.views.find((view) => view.snapshot?.phase === "running");
   const chosen = running ?? store.views[0];
-  return chosen ? chosen.instance.instance_id : null;
+  return chosen ? chosen.instance.instance_id : LAUNCHER_LOG_ID;
 }
 
 function renderHead(head: HTMLElement): void {
@@ -177,14 +166,21 @@ function renderHead(head: HTMLElement): void {
 }
 
 function instanceOptions(): string {
-  return store.views
-    .map((view) => {
-      const id = view.instance.instance_id;
-      const name = view.name || view.instance.module_id;
-      const phase = phaseText(view.snapshot?.phase);
-      return `<option value="${esc(id)}" ${id === state.instanceId ? "selected" : ""}>${esc(name)} · ${esc(id)} · ${esc(phase)}</option>`;
-    })
-    .join("");
+  // 启动器日志排在最前：点进日志页先看操作层，再看某个模块进程。
+  const launcher = `<option value="${LAUNCHER_LOG_ID}" ${
+    state.instanceId === LAUNCHER_LOG_ID ? "selected" : ""
+  }>启动器（全局操作）</option>`;
+  return (
+    launcher +
+    store.views
+      .map((view) => {
+        const id = view.instance.instance_id;
+        const name = view.name || view.instance.module_id;
+        const phase = phaseText(view.snapshot?.phase);
+        return `<option value="${esc(id)}" ${id === state.instanceId ? "selected" : ""}>${esc(name)} · ${esc(id)} · ${esc(phase)}</option>`;
+      })
+      .join("")
+  );
 }
 
 function fileOptions(): string {
@@ -428,9 +424,11 @@ function paintMeta(): void {
   if (state.query) bits.push(`匹配「${esc(state.query)}」`);
   if (state.loading) bits.push("读取中…");
 
-  const child = data
-    ? `<button class="chip chip--act ${data.child_output ? "chip--run" : "chip--stop"}" type="button" data-act="toggle-child" title="模块 stdout/stderr 里可能有你的对话内容，默认丢弃。开启后只影响之后拉起的实例。">子进程输出 ${data.child_output ? "已开" : "关 · 开启"}</button>`
-    : "";
+  // 启动器日志记的是启动器自己的操作，没有「子进程输出」这层，开关不显示。
+  const child =
+    data && state.instanceId !== LAUNCHER_LOG_ID
+      ? `<button class="chip chip--act ${data.child_output ? "chip--run" : "chip--stop"}" type="button" data-act="toggle-child" title="模块 stdout/stderr 里可能有你的对话内容，默认丢弃。开启后只影响之后拉起的实例。">子进程输出 ${data.child_output ? "已开" : "关 · 开启"}</button>`
+      : "";
 
   node.innerHTML = `<span class="logmeta-line">${bits.join('<span class="sep">·</span>')}</span>
     <span class="sp"></span>${child}`;
@@ -457,7 +455,11 @@ function paintLines(): void {
       state.lines.length > 0
         ? `当前 ${state.lines.length} 行都不满足过滤条件。`
         : (state.data?.note ?? "该实例还没有日志：启动过一次才会写入。");
-    const openChild = state.data && !state.data.child_output && state.lines.length === 0;
+    const openChild =
+      state.data &&
+      state.instanceId !== LAUNCHER_LOG_ID &&
+      !state.data.child_output &&
+      state.lines.length === 0;
     box.innerHTML = `<div class="logempty">
       <b>没有可显示的行</b>
       <p>${esc(hint)}</p>

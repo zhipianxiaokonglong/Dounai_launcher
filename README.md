@@ -13,7 +13,7 @@ Dounai 启动器管理模块的安装、环境与进程生命周期。产品主�
 - 目录（catalog）已独立成“下载”页：可添加社区源，每个源绑定一把自己的 catalog 签名公钥并显式确认后才启用；跨源同名条目并列展示，安装目标由用户点选的那一行决定。目录签名公钥与包签名公钥物理隔离：前者在 `state/sources.json`，后者在 `state/trust.json`，加源流程不会写包信任表。
   <!-- stc-disable-next-line: 下一行含 M6 产品术语，STC G6 判为套话属误报 -->
 - 链路编排（M6）：`state/chains.json` 只存用户自定义链路，默认链路不落盘，按 role 拓扑从当前 active 实例现算：每个角色只取 active 那一个，没有 active 槽的总装与辅助角色保留全部。切换 active 后一键启动不会把被替换的实例又拉起来。模块页“一键启动”即启动默认链路，与自定义链路共用一轮批量提交，步骤之间不等待健康结论；单步失败不中止其余步骤，卡片按“第 N 步”定位。
-- 日志按实例写入数据根的 `instances/<key>/logs/`：启动器事件默认记录，单文件超过 2 MiB 轮转、保留 3 份。子进程 stdout 与 stderr 默认丢弃，显式设置 `DOUNAI_LOG_CHILD_OUTPUT=1` 才接管管道。
+- 日志分两类，写入数据根的 `instances/<key>/logs/`（模块进程与装依赖细节）和 `logs/`（启动器操作摘要）：启动器事件默认记录，单文件超过 2 MiB 轮转、保留 3 份。日志页的下拉第一项“启动器（全局操作）”读后者。子进程 stdout 与 stderr 默认丢弃，显式设置 `DOUNAI_LOG_CHILD_OUTPUT=1` 才接管管道。
 
 注意：安装程序启动时会索要管理员权限。安装模式定为 `both`，这一行为已接受并写进 M5 验收项。`both` 只是安装器的运行时选项；落盘到 `state/install.json` 时写成 `current_user` 或 `per_machine`，便携 exe 写 `portable`，`install-v1` 契约不收 `both`。
 

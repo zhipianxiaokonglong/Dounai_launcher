@@ -19,6 +19,14 @@ use launcher_core::m2::{InstanceSourceKind, M2Error};
 use launcher_core::paths::{InstallMode, Paths};
 use launcher_core::time::utc_now;
 
+use crate::diag_log::{self, SharedLog};
+
+/// 日志页里代表「启动器自身」的伪实例 id。
+///
+/// 启动器操作（装依赖、切换 active、安装、导入等）不属于任何单个模块，写在
+/// `data_root/logs/`，日志页用这个 id 读。真实实例的 id 不可能与它相撞。
+pub const LAUNCHER_LOG_ID: &str = "__launcher__";
+
 /// K1 是模块包签名钥，2026-11-13 生成，私钥离线保管在仓库外。
 /// 登记文件见仓库 `keys/K1.json`，生成与轮换规程见 `docs/SIGNING.md`。
 ///
@@ -204,6 +212,9 @@ pub struct AppStateV2 {
     pub install_note: Option<String>,
     /// 每实例一把互斥锁：依赖准备、卸载与清理共用，避免 `.staging` 并发互删。
     instance_locks: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
+    /// 启动器自身的操作日志。写到 `data_root/logs/`，日志页按 `LAUNCHER_LOG_ID` 读。
+    /// 懒打开：日志目录不具写权限时退化为不落盘，不阻断启动器。
+    app_log: Mutex<Option<SharedLog>>,
 }
 
 impl AppStateV2 {
@@ -214,6 +225,7 @@ impl AppStateV2 {
             paths.state_dir(),
             paths.data_root.join("instances"),
             paths.data_root.join("downloads"),
+            paths.data_root.join("logs"),
         ] {
             std::fs::create_dir_all(&dir)
                 .map_err(|e| format!("创建 {} 失败：{e}", dir.display()))?;
@@ -291,7 +303,35 @@ impl AppStateV2 {
             tray_ready: AtomicBool::new(false),
             install_note,
             instance_locks: Mutex::new(BTreeMap::new()),
+            app_log: Mutex::new(None),
         })
+    }
+
+    /// 启动器日志目录。与实例日志同格式轮转，只是落在数据根而非实例目录。
+    pub fn app_log_dir(&self) -> PathBuf {
+        self.paths.data_root.join("logs")
+    }
+
+    /// 写一条启动器日志。第一次调用时打开 sink，之后复用。
+    ///
+    /// 日志失败一律静默：诊断设施不能让主流程失败。
+    pub fn app_log_line(&self, scope: &str, message: &str) {
+        let mut guard = diag_log::lock(&self.app_log);
+        if guard.is_none() {
+            *guard = diag_log::open_shared(&self.app_log_dir()).ok();
+        }
+        if let Some(log) = guard.as_ref() {
+            diag_log::write(log, scope, message);
+        }
+    }
+
+    /// 日志页按 id 映射到目录：`__launcher__` 走数据根，其余走实例目录。
+    pub fn logs_dir_for(&self, instance_id: &str) -> PathBuf {
+        if instance_id == LAUNCHER_LOG_ID {
+            self.app_log_dir()
+        } else {
+            self.paths.instance_logs_dir_keyed(instance_id)
+        }
     }
 
     /// 取实例锁槽。同一实例永远拿到同一个 `Arc`，不同实例互不阻塞。
@@ -869,6 +909,25 @@ mod tests {
         assert!(other.try_lock().is_ok());
         drop(held);
         assert!(second.try_lock().is_ok());
+    }
+
+    #[test]
+    fn launcher_logs_use_data_root_and_instance_logs_stay_separate() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_root = dir.path().join("data");
+        let state = AppStateV2::new(dir.path().join("app"), data_root.clone()).unwrap();
+
+        assert_eq!(state.logs_dir_for(LAUNCHER_LOG_ID), data_root.join("logs"));
+        let instance_dir = state.logs_dir_for("dounai/moodvoice@stable");
+        assert!(instance_dir.starts_with(data_root.join("instances")));
+        assert_ne!(instance_dir, state.app_log_dir());
+
+        // 写一行启动器日志，必须落在 data_root/logs 且能被读回。
+        state.app_log_line("env", "开始装依赖 instance=test");
+        let files = diag_log::list_logs(&state.app_log_dir());
+        assert_eq!(files.len(), 1, "启动器日志应落一份文件");
+        let tail = diag_log::read_tail(&state.app_log_dir(), 20);
+        assert!(tail.lines.iter().any(|line| line.contains("开始装依赖")));
     }
 
     #[test]

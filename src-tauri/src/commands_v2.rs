@@ -11,6 +11,26 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+/// 记一条启动器操作日志：开始与结果各一行，成功失败都留痕。
+///
+/// 用法：`log_op(&state, "切换active", id, || { ... })`。闭包返回 `Result`，
+/// Err 会原样透传，日志失败一律静默。这样每个写状态的命令不必各写一遍
+/// 「开始 / 成功 / 失败」三行——而漏掉任意一行，排查时都会误判卡住。
+fn log_op<T>(
+    state: &AppStateV2,
+    op: &str,
+    subject: &str,
+    f: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    state.app_log_line("op", &format!("{op} 开始 · {subject}"));
+    let result = f();
+    match &result {
+        Ok(_) => state.app_log_line("op", &format!("{op} 成功 · {subject}")),
+        Err(error) => state.app_log_line("op", &format!("{op} 失败 · {subject} · {error}")),
+    }
+    result
+}
+
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -965,6 +985,17 @@ pub fn uninstall_module(
     supervisor: State<'_, Supervisor>,
     request: UninstallRequest,
 ) -> Result<(), String> {
+    let subject = request.module_id.clone();
+    log_op(&state, "卸载", &subject, || {
+        uninstall_module_impl(&state, &supervisor, request)
+    })
+}
+
+fn uninstall_module_impl(
+    state: &AppStateV2,
+    supervisor: &Supervisor,
+    request: UninstallRequest,
+) -> Result<(), String> {
     let instance = state.resolve_instance(&request.module_id)?;
     if supervisor.running().contains(&instance.instance_id) {
         return Err(format!(
@@ -987,7 +1018,7 @@ pub fn uninstall_module(
     // 卸掉的若是原本的 active，槽位会空出来，剩下同 role 的实例只跑备用端口，
     // 组装层就再也看不到这个角色了。补一个上位（C 类仍要用户显式切换）。
     // 已经在跑的实例保持原端口，下次启动才落到规范端口。
-    let _ = fill_vacant_active(&state, instance.role, None, false);
+    let _ = fill_vacant_active(state, instance.role, None, false);
     if request.remove_files && removable {
         let base = state.paths.instance_dir_keyed(&instance.instance_id);
         // data/ 是用户数据，按 never_auto_delete 契约保留；包、venv 与日志一起清。
@@ -1144,7 +1175,10 @@ pub async fn switch_active(
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppStateV2>();
         let supervisor = app.state::<Supervisor>();
-        switch_active_impl(&instance_id, &state, &supervisor)
+        let subject = instance_id.clone();
+        log_op(&state, "切换active", &subject, || {
+            switch_active_impl(&instance_id, &state, &supervisor)
+        })
     })
     .await
     .map_err(|e| format!("切换没有跑完：{e}"))?
@@ -1653,10 +1687,23 @@ pub async fn install_local_package(
     expected_sha256: String,
     confirm: Option<bool>,
 ) -> Result<InstallResponse, String> {
-    let (_, bytes) = tauri::async_runtime::spawn_blocking(move || read_local_zip(&path))
+    state.app_log_line("op", &format!("安装本地包 开始 · {path}"));
+    let read = tauri::async_runtime::spawn_blocking(move || read_local_zip(&path))
         .await
-        .map_err(|e| format!("读取包失败：{e}"))??;
-    commit_install(
+        .map_err(|e| format!("读取包失败：{e}"));
+    let result = match read {
+        Ok(Ok(pair)) => Ok(pair),
+        Ok(Err(e)) => Err(e),
+        Err(e) => Err(e),
+    };
+    let (_, bytes) = match result {
+        Ok(pair) => pair,
+        Err(error) => {
+            state.app_log_line("op", &format!("安装本地包 失败 · {error}"));
+            return Err(error);
+        }
+    };
+    let committed = commit_install(
         &state,
         &bytes,
         &expected_sha256,
@@ -1664,7 +1711,18 @@ pub async fn install_local_package(
         None,
         confirm.unwrap_or(false),
         None,
-    )
+    );
+    match &committed {
+        Ok(response) => state.app_log_line(
+            "op",
+            &format!(
+                "安装本地包 成功 · {} · {} 文件",
+                response.module_id, response.files
+            ),
+        ),
+        Err(error) => state.app_log_line("op", &format!("安装本地包 失败 · {error}")),
+    }
+    committed
 }
 
 /* ------------------------------------------------------------------ */
@@ -1737,13 +1795,63 @@ pub async fn prepare_instance_env(
     tauri::async_runtime::spawn_blocking(move || {
         let state = progress_app.state::<AppStateV2>();
         let supervisor = progress_app.state::<Supervisor>();
-        prepare_instance_env_impl(
+
+        // 装依赖落两级日志：模块日志记每个阶段的细节，启动器日志记一条摘要。
+        // 以前这条路径一行都不写，点了没反应时磁盘上什么都查不到。
+        state.app_log_line(
+            "env",
+            &format!(
+                "开始装依赖 instance={instance_id} online={}",
+                allow_online.unwrap_or(true)
+            ),
+        );
+        let module_log =
+            crate::diag_log::open_shared(&state.paths.instance_logs_dir_keyed(&instance_id)).ok();
+        let ui_sink = env_progress_sink(&progress_app, &instance_id);
+        let log_sink = std::sync::Arc::new(move |progress: launcher_core::env::EnvProgress| {
+            if let Some(log) = &module_log {
+                let count = match (progress.current, progress.total) {
+                    (Some(c), Some(t)) => format!(" [{c}/{t}]"),
+                    _ => String::new(),
+                };
+                let detail = progress
+                    .detail
+                    .clone()
+                    .map(|d| format!(" · {d}"))
+                    .unwrap_or_default();
+                crate::diag_log::write(
+                    log,
+                    "env",
+                    &format!(
+                        "{}{}{}{}",
+                        progress.phase.as_str(),
+                        count,
+                        progress.title,
+                        detail
+                    ),
+                );
+            }
+            ui_sink(progress);
+        });
+
+        let result = prepare_instance_env_impl(
             &instance_id,
             allow_online,
             &state,
             &supervisor,
-            Some(env_progress_sink(&progress_app, &instance_id)),
-        )
+            Some(log_sink),
+        );
+        match &result {
+            Ok(python) => state.app_log_line(
+                "env",
+                &format!("装依赖完成 instance={instance_id} python={python}"),
+            ),
+            Err(error) => state.app_log_line(
+                "env",
+                &format!("装依赖失败 instance={instance_id} error={error}"),
+            ),
+        }
+        result
     })
     .await
     .map_err(|e| format!("依赖准备没有跑完：{e}"))?
@@ -1904,6 +2012,20 @@ fn entry_installability(
 /// 影响其它源，也不提供「仍然继续 / 跳过验签」。
 #[tauri::command]
 pub fn refresh_catalog(state: State<'_, AppStateV2>) -> CatalogResponse {
+    state.app_log_line("op", "刷新目录 开始");
+    let response = refresh_catalog_impl(&state);
+    state.app_log_line(
+        "op",
+        &format!(
+            "刷新目录 完成 · 来源 {} · {} 条",
+            response.source,
+            response.entries.len()
+        ),
+    );
+    response
+}
+
+fn refresh_catalog_impl(state: &AppStateV2) -> CatalogResponse {
     let registry = state.sources();
     let allowlist = registry.allowlist();
     let enabled: Vec<SourceEntry> = registry.enabled().into_iter().cloned().collect();
@@ -2049,7 +2171,7 @@ pub fn refresh_catalog(state: State<'_, AppStateV2>) -> CatalogResponse {
         let partial = statuses.iter().any(|s| s.state != "ok");
         return CatalogResponse {
             source: if partial { "partial" } else { "remote" }.into(),
-            entries: catalog_entries(&state, &cache),
+            entries: catalog_entries(state, &cache),
             sources: statuses,
             allowlist,
             reason: partial.then(|| "部分源不可用，只展示已验签来源的条目".into()),
@@ -2076,7 +2198,7 @@ pub fn refresh_catalog(state: State<'_, AppStateV2>) -> CatalogResponse {
     } else {
         CatalogResponse {
             source: "cache".into(),
-            entries: catalog_entries(&state, &cached),
+            entries: catalog_entries(state, &cached),
             sources: statuses,
             allowlist,
             reason: Some("在线源不可用，以下是本次会话内已验签的目录".into()),
@@ -2763,16 +2885,19 @@ pub fn add_local_module(
     supervisor: State<'_, Supervisor>,
     request: AddLocalModuleRequest,
 ) -> Result<ModuleView, String> {
-    require_dev_mode(&state)?;
-    let mut view = add_local_dir(&state, &request.path, None)?;
-    let instance = state.resolve_instance(&view.module_id)?;
-    view.run = phase_to_run(
-        supervisor
-            .snapshot()
-            .get(&instance.instance_id)
-            .map(|s| s.phase),
-    );
-    Ok(view)
+    let subject = request.path.clone();
+    log_op(&state, "登记目录", &subject, || {
+        require_dev_mode(&state)?;
+        let mut view = add_local_dir(&state, &request.path, None)?;
+        let instance = state.resolve_instance(&view.module_id)?;
+        view.run = phase_to_run(
+            supervisor
+                .snapshot()
+                .get(&instance.instance_id)
+                .map(|s| s.phase),
+        );
+        Ok(view)
+    })
 }
 
 #[tauri::command(async)]
@@ -2870,9 +2995,20 @@ pub fn remove_local_module(
     state: State<'_, AppStateV2>,
     supervisor: State<'_, Supervisor>,
 ) -> Result<(), String> {
+    let subject = module_id.clone();
+    log_op(&state, "解除登记", &subject, || {
+        remove_local_module_impl(&module_id, &state, &supervisor)
+    })
+}
+
+fn remove_local_module_impl(
+    module_id: &str,
+    state: &AppStateV2,
+    supervisor: &Supervisor,
+) -> Result<(), String> {
     // 解除登记是撤销已有状态，不经过开发者开关：开关只存在于本次进程内，
     // 重启启动器后会关掉，而本地目录登记仍留在实例表里，此时必须能解除。
-    let instance = state.resolve_instance(&module_id)?;
+    let instance = state.resolve_instance(module_id)?;
     if instance.source_kind != InstanceSourceKind::Dir {
         return Err("remove_local_module 只解除本地目录登记，zip 实例请用 uninstall_module".into());
     }
@@ -2896,7 +3032,7 @@ pub fn remove_local_module(
     // 卸掉的若是原本的 active，槽位会空出来，剩下同 role 的实例只跑备用端口，
     // 组装层就再也看不到这个角色了。补一个上位（C 类仍要用户显式切换）。
     // 已经在跑的实例保持原端口，下次启动才落到规范端口。
-    let _ = fill_vacant_active(&state, instance.role, None, false);
+    let _ = fill_vacant_active(state, instance.role, None, false);
     // 源码目录归用户所有，绝不删除。
     Ok(())
 }
@@ -3346,7 +3482,10 @@ pub async fn install_from_catalog(
     // 下载会阻塞几秒到几十秒，放主线程会冻住窗口。
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppStateV2>();
-        install_from_catalog_impl(&state, &entry_key, confirm)
+        let subject = entry_key.clone();
+        log_op(&state, "在线安装", &subject, || {
+            install_from_catalog_impl(&state, &entry_key, confirm)
+        })
     })
     .await
     .map_err(|e| format!("安装任务失败：{e}"))?
@@ -3639,7 +3778,7 @@ pub fn read_instance_logs(
     file: Option<String>,
     state: State<'_, AppStateV2>,
 ) -> InstanceLogs {
-    let dir = state.paths.instance_logs_dir_keyed(&instance_id);
+    let dir = state.logs_dir_for(&instance_id);
     let total = crate::diag_log::list_logs(&dir).len();
     let tail = match file.as_deref() {
         Some(name) => crate::diag_log::read_file_tail(&dir, name, crate::diag_log::MAX_TAIL_LINES)
@@ -3650,9 +3789,14 @@ pub fn read_instance_logs(
             }),
         None => crate::diag_log::read_tail(&dir, crate::diag_log::MAX_TAIL_LINES),
     };
+    let launcher = instance_id == crate::state_v2::LAUNCHER_LOG_ID;
     let note = if total == 0 {
-        "该实例还没有日志：启动过一次才会写入。启动器事件始终记录，子进程输出需显式打开诊断开关。"
-            .to_string()
+        if launcher {
+            "启动器日志还没有内容：装依赖、切换 active、安装与导入等操作都会写到这里。".to_string()
+        } else {
+            "该实例还没有日志：启动过一次才会写入。启动器事件始终记录，子进程输出需显式打开诊断开关。"
+                .to_string()
+        }
     } else if file.is_some() && tail.lines.is_empty() {
         "这份日志已经不在了：轮转只保留最近几份，切回「最新」看当前内容。".to_string()
     } else if tail.truncated {
@@ -3662,10 +3806,14 @@ pub fn read_instance_logs(
             total
         )
     } else {
-        format!(
-            "共 {} 个文件。启动器事件始终记录，子进程输出需显式打开诊断开关。",
-            total
-        )
+        if launcher {
+            format!("共 {total} 个文件。启动器操作与实例事件都记在各自的日志里。")
+        } else {
+            format!(
+                "共 {} 个文件。启动器事件始终记录，子进程输出需显式打开诊断开关。",
+                total
+            )
+        }
     };
     InstanceLogs {
         instance_id,
@@ -3682,7 +3830,7 @@ pub fn read_instance_logs(
 /// 列出该实例保留的日志文件，从新到旧。
 #[tauri::command]
 pub fn list_instance_logs(instance_id: String, state: State<'_, AppStateV2>) -> Vec<LogFileInfo> {
-    let dir = state.paths.instance_logs_dir_keyed(&instance_id);
+    let dir = state.logs_dir_for(&instance_id);
     let files = crate::diag_log::list_logs(&dir);
     let newest = files.last().map(|f| f.path.clone());
     files
@@ -3710,7 +3858,7 @@ pub fn open_instance_logs_dir(
     instance_id: String,
     state: State<'_, AppStateV2>,
 ) -> Result<String, String> {
-    let dir = state.paths.instance_logs_dir_keyed(&instance_id);
+    let dir = state.logs_dir_for(&instance_id);
     std::fs::create_dir_all(&dir).map_err(|e| format!("无法创建日志目录：{e}"))?;
     #[cfg(windows)]
     let spawned = std::process::Command::new("explorer").arg(&dir).spawn();
