@@ -6,6 +6,8 @@
  * 伪装成官方签名包的通道。
  */
 
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { ScanCandidate, V1Preview } from "../src/bridge.js";
 import { classifyCandidates, readV1Options, v1Form } from "../src/ui/views/import.js";
@@ -124,5 +126,23 @@ describe("向导字段", () => {
 
   it("预览里展示的启动命令是转换后的占位符形式", () => {
     expect(v1Form(preview())).toContain("{venv_python} -m dounai_input serve");
+  });
+});
+
+describe("本地目录的系统选择器", () => {
+  const bridge = readFileSync(resolve(process.cwd(), "src/bridge.ts"), "utf8");
+  const view = readFileSync(resolve(process.cwd(), "src/ui/views/import.ts"), "utf8");
+
+  it("路径输入框旁边给出选择目录按钮", () => {
+    expect(view).toMatch(/data-act="pick-dir"/);
+    expect(view).toContain("选择目录…");
+    expect(view).toMatch(/\{ act: "pick-dir", run: \(\) => pickDir\(\) \}/);
+  });
+
+  it("对话框按目录模式打开，选完写回输入框", () => {
+    expect(bridge).toMatch(/export async function pickDirectory/);
+    expect(bridge).toMatch(/directory: true/);
+    expect(view).toMatch(/getElementById\("import-root"\)/);
+    expect(view).toMatch(/await pickDirectory\(\)/);
   });
 });

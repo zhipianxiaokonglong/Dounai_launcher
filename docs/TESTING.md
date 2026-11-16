@@ -800,7 +800,7 @@ M6 的六条验收要求真机逐条实测，本节只记离线断言，两者�
 
 **真机验收待执行**，换 exe 后按序跑：
 
-1. 导入页输入 `E:\Dounai-ai\Dounai_input`，点“开启本地目录登记”，再点“登记目录”→ 应直接弹补齐向导，不再出现 `missing field pubkey`；点下去窗口不卡顿。
+1. 导入页点“选择目录…”选中 `E:\Dounai-ai\Dounai_input`（也可以直接填路径），点“开启本地目录登记”，再点“登记目录”→ 应直接弹补齐向导，不再出现 `missing field pubkey`；点下去窗口不卡顿。
 2. 核对预填：角色“输入”、端口 8101、命令 `{venv_python} -m dounai_input serve`、依赖 `pyproject.toml`；右侧 JSON 里 `category` 为 `optional`、`signature` 为 `null`、`files` 为 `{}`。
 3. 把端口改成 18101，确认 JSON 里 health URL 与 `DOUNAI_PORT` 同步变化；改回 8101 再生成。
 4. 点“生成并登记”→ 卡片出现 `local/dounai-input`，标 C 类；到 `E:\Dounai-ai\Dounai_input` 跑 `git status --short`，源码目录应是干净的。

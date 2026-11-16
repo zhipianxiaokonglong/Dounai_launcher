@@ -469,6 +469,20 @@ export async function pickPackageFile(): Promise<string | null> {
   return typeof picked === "string" && picked.length > 0 ? picked : null;
 }
 
+/** 打开系统文件夹选择器，返回目录绝对路径；取消返回 null。 */
+export async function pickDirectory(): Promise<string | null> {
+  const invoke = getInvoke();
+  if (!invoke) throw new BridgeUnavailableError();
+  const picked = await invoke("plugin:dialog|open", {
+    options: {
+      title: "选择模块目录",
+      multiple: false,
+      directory: true,
+    },
+  });
+  return typeof picked === "string" && picked.length > 0 ? picked : null;
+}
+
 /**
  * 监听窗口的拖拽投放。
  *

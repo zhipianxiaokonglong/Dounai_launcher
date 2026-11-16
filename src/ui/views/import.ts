@@ -15,6 +15,7 @@ import {
   installLocalPackage,
   isDesktop,
   onPackageDrop,
+  pickDirectory,
   pickPackageFile,
   previewV1Manifest,
   removeLocalModule,
@@ -109,6 +110,7 @@ function renderBody(body: HTMLElement): void {
       <div class="toolbar" style="margin-bottom:0">
         <input id="import-root" class="input grow" type="text" spellcheck="false"
                placeholder="例如 E:\\Dounai-ai\\OmniNexus" value="${esc(dirState.root)}" />
+        <button class="btn" type="button" data-act="pick-dir" ${dirState.busy ? "disabled" : ""}>选择目录…</button>
         <button class="btn" type="button" data-act="scan" ${dirState.busy ? "disabled" : ""}>扫描目录</button>
         <button class="btn btn--primary" type="button" data-act="add" ${dirState.busy ? "disabled" : ""}>登记目录</button>
       </div>
@@ -155,6 +157,7 @@ function renderBody(body: HTMLElement): void {
     { act: "install", run: () => install() },
     { act: "drop-preview", run: () => dropPreview() },
     { act: "goto-modules", run: () => navigate("modules") },
+    { act: "pick-dir", run: () => pickDir() },
     { act: "scan", run: () => scan() },
     { act: "add", run: () => addOne(dirState.root) },
     { act: "add-path", run: (node) => addOne(node.dataset.path ?? "") },
@@ -528,6 +531,25 @@ function setDirBusy(busy: boolean): void {
       });
   }
   renderResult();
+}
+
+async function pickDir(): Promise<void> {
+  if (dirState.busy) return;
+  try {
+    const path = await pickDirectory();
+    if (!path) return;
+    dirState.root = path;
+    const input = document.getElementById("import-root") as HTMLInputElement | null;
+    if (input) input.value = path;
+    // 开关未开时只填路径：直接扫描会被后端拒绝，报错指向错误的地方。
+    if (!store.devMode) {
+      toast("目录已选好，先开启本地目录登记再扫描", "ok");
+      return;
+    }
+    await scan();
+  } catch (error) {
+    toast(`选择目录失败：${describeError(error)}`, "error");
+  }
 }
 
 async function scan(): Promise<void> {
