@@ -834,3 +834,11 @@ M6 的六条验收要求真机逐条实测，本节只记离线断言，两者�
 
 <!-- stc-disable-next-line: 下一行含 M6 产品术语，STC G6 判为套话属误报 -->
 **真机待验**：切 active 到 `local/dounai-input@local` 后看默认链路应是 3 步（local 输入 + 模型 + 总装），概览按钮不再写实例总数；点一键启动不应再出现官方 input 与 local input 同时运行。
+
+## 隐藏 GitHub 镜像源的 app 层漏调用（2026-11-16）
+
+真机发现下载页仍显示“官方镜像（GitHub）”，尽管 `0d6ef6d` 已在 core 加了 `HIDDEN_OFFICIAL_IDS` 剔除。根因是剔除只写在 `SourceRegistry::load()`，而 app 的 `AppStateV2::new` 用通用 `load_or` 直接反序列化 sources.json，从不调用那个方法；旧文件里已撤销的 `official-gh` 于是原样进内存、显示成“公钥已撤销”一行。
+
+修法：core 把剔除抽成公开方法 `drop_hidden_builtin`，`load()` 继续复用；`AppStateV2::new` 在 `load_or` 之后调用 `drop_hidden_builtin`，发现条数变了就把清理结果写回 sources.json，避免每次启动重复读到隐藏源。运行时没有别的写回路径会重新引入该 id，签发侧 `BUILTIN_SOURCE_IDS` 保持全集不变。
+
+**离线断言**：`state_v2::tests` 新增 1 项，夹具把带 `revoked_at` 的镜像源写进 sources.json，断言重开后内存与磁盘都只剩官方 SourceForge 源；lib 测试 102 → **103**。真机替换 exe 后启动，下载页不应再出现 GitHub 镜像，且本地 sources.json 里该条目被自动删除。

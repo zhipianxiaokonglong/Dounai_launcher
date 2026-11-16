@@ -477,7 +477,7 @@ M8 上线当天真机验收撞到现网 catalog 与新契约不兼容：11-13 �
 
 ### 源侧（非代码，待拍板）
 
-5. **~~官方镜像源 `official-gh` 暂不下发~~（2026-11-14 拍板：先隐藏）**。`SourceRegistry::builtin` 不再注册 GitHub 镜像（仓库未建，对外可见动作待作者拍板），旧文件加载时剔除内置的该条目（`HIDDEN_OFFICIAL_IDS`）；仓库就绪后从该表移除即恢复下发。`BUILTIN_SOURCE_IDS` 仍含此 id，签发预检按全集校验。
+5. **~~官方镜像源 `official-gh` 暂不下发~~（2026-11-14 拍板：先隐藏）**。`SourceRegistry::builtin` 不再注册 GitHub 镜像（仓库未建，对外可见动作待作者拍板），旧文件加载时剔除内置的该条目（`HIDDEN_OFFICIAL_IDS`）；仓库就绪后从该表移除即恢复下发。`BUILTIN_SOURCE_IDS` 仍含此 id，签发预检按全集校验。剔除必须走 app 的 `AppStateV2` 加载路径：只做 core 的 `SourceRegistry::load` 不够，通用 `load_or` 会绕过 `drop_hidden_builtin`，让隐藏源重新出现在下载页（2026-11-16 修）。
 6. **catalog 是手工周期品**。7 天有效期意味着每周必须重签重传一次，漏签的后果是官方源整体报“已过期”（fail-closed，安全但不可用）。第 3 条脚本已消除手工核对与手算时间窗，剩余的人工步骤只剩执行脚本与上传两条命令，仍需要一个提醒机制（日历或自动化）。
 
 **代码侧欠账于 2026-11-14 同日清偿**：契约断言 129 → 131（`last_error` 两个新断言 + 样例剔除 official-gh）；core 测试新增预检 4 项、last_error 1 项、隐藏镜像 1 项（替换原“两个内置源”断言）；release lib 测试 19 项全过。

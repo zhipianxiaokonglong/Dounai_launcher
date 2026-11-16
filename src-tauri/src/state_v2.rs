@@ -240,10 +240,19 @@ impl AppStateV2 {
         let retention = load_or(&paths.state_dir().join("retention.json"), || {
             Ok(RetentionPolicy::default())
         })?;
-        let sources = load_or(&paths.state_dir().join("sources.json"), || {
+        let sources_path = paths.state_dir().join("sources.json");
+        let mut sources = load_or(&sources_path, || {
             SourceRegistry::builtin(BUILTIN_K5_PUBKEY_B64, BUILTIN_K5_FINGERPRINT)
                 .map_err(|e| e.to_string())
         })?;
+        // load_or 只做反序列化，绕过 core 的隐藏剔除：旧文件里被撤销的 GitHub
+        // 镜像会原样留在内存、显示在下载页。这里补上剔除，并把清理写回文件，
+        // 免得每次启动都重复读到这条已经不打算下发的源。
+        let before = sources.sources.len();
+        sources.drop_hidden_builtin();
+        if sources.sources.len() != before {
+            sources.save(&sources_path).map_err(|e| e.to_string())?;
+        }
         let chains = load_or(&paths.state_dir().join("chains.json"), || {
             Ok(ChainRegistry::empty())
         })?;
@@ -739,6 +748,53 @@ mod tests {
         // 磁盘上存的是契约里的字符串，不是枚举的 Debug 形状。
         let raw = std::fs::read_to_string(state.close_behavior_path()).unwrap();
         assert!(raw.contains("\"tray\""), "{raw}");
+    }
+
+    /// 回归：旧的 sources.json 里残存被撤销的 GitHub 镜像时，state 加载必须
+    /// 剔除它并写回清理，下载页才不会再显示这条已经不打算下发的源。
+    #[test]
+    fn stale_hidden_github_mirror_is_dropped_and_cleaned_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("app");
+        let data = dir.path().join("data");
+        let state = AppStateV2::new(root.clone(), data).unwrap();
+        let path = state.sources_path();
+
+        let mut stale = state.sources();
+        let sf = stale.sources[0].clone();
+        stale.sources.push(SourceEntry {
+            id: launcher_core::m2::sources::OFFICIAL_GH_ID.into(),
+            name: "官方镜像（GitHub）".into(),
+            kind: SourceClass::Official,
+            base_url: "https://raw.githubusercontent.com/x/main".into(),
+            catalog_pubkey: sf.catalog_pubkey.clone(),
+            catalog_fingerprint: sf.catalog_fingerprint.clone(),
+            host_suffixes: vec!["github.com".into(), "githubusercontent.com".into()],
+            enabled: false,
+            deletable: false,
+            auto_update: true,
+            group: sf.group.clone(),
+            sequence: None,
+            expires: None,
+            priority: Some(2),
+            added_at: None,
+            revoked_at: Some("2026-11-14T12:10:27Z".into()),
+            note: None,
+            last_error: None,
+            last_error_at: None,
+        });
+        stale.save(&path).unwrap();
+        let on_disk_before: SourceRegistry = launcher_core::state::read_json(&path).unwrap();
+        assert_eq!(on_disk_before.sources.len(), 2, "夹具确实写入了隐藏源");
+
+        let reopened = AppStateV2::new(root, dir.path().join("data")).unwrap();
+        let loaded = reopened.sources();
+        let ids: Vec<&str> = loaded.sources.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec![launcher_core::m2::sources::OFFICIAL_SF_ID]);
+        // 清理已落盘：直接读文件也不再有这条隐藏源。
+        let on_disk: SourceRegistry =
+            launcher_core::state::read_json(&reopened.sources_path()).unwrap();
+        assert_eq!(on_disk.sources.len(), 1);
     }
 
     #[test]

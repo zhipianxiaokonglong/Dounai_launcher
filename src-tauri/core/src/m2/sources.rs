@@ -133,12 +133,16 @@ impl SourceRegistry {
         Ok(registry)
     }
 
+    /// 剔除暂不下发的内置源。加载旧文件后调用：内置源的下发口径由代码说了算，
+    /// 用户手加的同 id 社区源（`deletable`）不受影响。
+    pub fn drop_hidden_builtin(&mut self) {
+        self.sources
+            .retain(|s| s.deletable || !HIDDEN_OFFICIAL_IDS.contains(&s.id.as_str()));
+    }
+
     pub fn load(path: &Path) -> Result<Self, M2Error> {
         let mut registry: Self = crate::state::read_json(path)?;
-        // 内置源的下发口径由代码说了算：旧文件里残存的暂不下发内置源直接剔除。
-        registry
-            .sources
-            .retain(|s| s.deletable || !HIDDEN_OFFICIAL_IDS.contains(&s.id.as_str()));
+        registry.drop_hidden_builtin();
         registry.validate()?;
         Ok(registry)
     }
