@@ -481,6 +481,19 @@ code,
   border-color: var(--line-2);
 }
 
+/* 备用态：同 role 有 active 时，非 active 实例未运行属于预期，不与故障同色。 */
+.chip--standby {
+  color: var(--fg-3);
+  border-color: var(--line-2);
+  background: repeating-linear-gradient(
+    135deg,
+    transparent,
+    transparent 3px,
+    rgba(148, 163, 184, 0.16) 3px,
+    rgba(148, 163, 184, 0.16) 6px
+  );
+}
+
 .chip--active {
   color: var(--accent-fg);
   border-color: rgba(76, 141, 255, 0.45);

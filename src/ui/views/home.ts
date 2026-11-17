@@ -104,12 +104,16 @@ function renderBody(body: HTMLElement): void {
 function heroHtml(): string {
   const counts = runCounts();
   const facts = heroFacts();
+  // 只数未运行的备用：运行中的备用已计入 running，再数一遍会让 idle 扣两次。
+  const standby = store.views.filter(
+    (view) => !isRunning(view) && isStandby(view, store.views),
+  ).length;
 
   return `
     <section class="hero">
       <div>
         <div class="hero-kicker">系统状态</div>
-        <h2>${esc(heroTitle(counts.total, counts.running, counts.failed))}</h2>
+        <h2>${esc(heroTitle(counts.total, counts.running, counts.failed, standby))}</h2>
         <p>${esc(heroLine(counts.total))}</p>
         <div class="hero-actions">${heroActions(counts.total)}</div>
       </div>
@@ -118,12 +122,30 @@ function heroHtml(): string {
   `;
 }
 
-function heroTitle(total: number, running: number, failed: number): string {
+/**
+ * 同 role 已有 active 实例，自己又不是 active：这是默认链路刻意不启动的备用。
+ * 备用未运行属于预期，不该和「该起却没起」的实例一起算成「停着」。
+ */
+function isStandby(view: InstanceRuntimeView, views: InstanceRuntimeView[]): boolean {
+  if (view.active) return false;
+  return views.some((other) => other.active && other.instance.role === view.instance.role);
+}
+
+export function heroTitle(
+  total: number,
+  running: number,
+  failed: number,
+  standby: number,
+): string {
   if (total === 0) return "还没有装任何模块";
   if (failed > 0) return `${failed} 个实例需要处理`;
   if (running === total) return `全部 ${total} 个实例在运行`;
-  if (running > 0) return `${running} 个在运行，${total - running} 个停着`;
-  return `${total} 个实例都停着`;
+  if (running === 0) return `${total} 个实例都停着`;
+  const idle = total - running - standby;
+  const parts = [`${running} 个在运行`];
+  if (standby > 0) parts.push(`${standby} 个备用待命`);
+  if (idle > 0) parts.push(`${idle} 个停着`);
+  return parts.join("，");
 }
 
 function heroLine(total: number): string {
@@ -363,6 +385,8 @@ function resStateChip(view: InstanceRuntimeView): string {
   }
   if (phase === "starting") return '<span class="chip chip--warn">启动中</span>';
   if (phase === "failed") return '<span class="chip chip--fail">异常退出</span>';
+  // 同 role 有 active 时，非 active 实例是默认链路刻意不启的备用，未运行属于预期。
+  if (isStandby(view, store.views)) return '<span class="chip chip--standby">备用</span>';
   return '<span class="chip chip--stop">未运行</span>';
 }
 

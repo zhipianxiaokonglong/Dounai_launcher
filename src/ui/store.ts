@@ -204,7 +204,8 @@ export function hasLiveProcess(view: InstanceRuntimeView): boolean {
   return typeof view.snapshot?.pid === "number";
 }
 
-/** 页头与状态栏用的计数。 */export interface RunCounts {
+/** 页头与状态栏用的计数。 */
+export interface RunCounts {
   running: number;
   starting: number;
   failed: number;
