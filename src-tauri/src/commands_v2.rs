@@ -523,11 +523,13 @@ fn start_module_impl(
     state: &AppStateV2,
     supervisor: &Supervisor,
 ) -> Result<RunView, String> {
-    let instance = state.resolve_instance(key)?;
-    let port = single_instance_port(state, supervisor, &instance);
-    Ok(match start_instance(state, supervisor, &instance, port)? {
-        StartOutcome::Managed(snap) => run_view(&instance.module_id, Some(&snap), None),
-        StartOutcome::External => external_run_view(&instance.module_id),
+    log_op(state, "启动模块", key, || {
+        let instance = state.resolve_instance(key)?;
+        let port = single_instance_port(state, supervisor, &instance);
+        Ok(match start_instance(state, supervisor, &instance, port)? {
+            StartOutcome::Managed(snap) => run_view(&instance.module_id, Some(&snap), None),
+            StartOutcome::External => external_run_view(&instance.module_id),
+        })
     })
 }
 
@@ -700,9 +702,12 @@ pub async fn stop_module(module_id: String, app: tauri::AppHandle) -> Result<Run
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppStateV2>();
         let supervisor = app.state::<Supervisor>();
-        let instance = state.resolve_instance(&module_id)?;
-        let snap = supervisor.stop(&instance.instance_id)?;
-        Ok(run_view(&instance.module_id, Some(&snap), None))
+        let subject = module_id.clone();
+        log_op(&state, "停止模块", &subject, || {
+            let instance = state.resolve_instance(&module_id)?;
+            let snap = supervisor.stop(&instance.instance_id)?;
+            Ok(run_view(&instance.module_id, Some(&snap), None))
+        })
     })
     .await
     .map_err(|e| format!("停止没有跑完：{e}"))?
@@ -720,7 +725,8 @@ pub async fn stop_all(app: tauri::AppHandle) -> Vec<RunView> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppStateV2>();
         let supervisor = app.state::<Supervisor>();
-        supervisor
+        state.app_log_line("op", "停止全部 开始");
+        let views: Vec<RunView> = supervisor
             .stop_all()
             .into_iter()
             .map(|snap| {
@@ -730,7 +736,9 @@ pub async fn stop_all(app: tauri::AppHandle) -> Vec<RunView> {
                     .unwrap_or_else(|| snap.instance_id.clone());
                 run_view(&module_id, Some(&snap), None)
             })
-            .collect()
+            .collect();
+        state.app_log_line("op", &format!("停止全部 完成 · {} 个实例", views.len()));
+        views
     })
     .await
     .unwrap_or_default()
@@ -755,19 +763,21 @@ fn restart_instance_impl(
     state: &AppStateV2,
     supervisor: &Supervisor,
 ) -> Result<RunView, String> {
-    let instance = state
-        .instance(instance_id)
-        .ok_or_else(|| format!("实例不存在：{instance_id}"))?;
-    if supervisor.is_external(instance_id) {
-        return Err(format!("实例 {instance_id} 由外部启动，启动器无法重启"));
-    }
-    if supervisor.running().contains(instance_id) {
-        supervisor.stop(instance_id)?;
-    }
-    let port = single_instance_port(state, supervisor, &instance);
-    Ok(match start_instance(state, supervisor, &instance, port)? {
-        StartOutcome::Managed(snap) => run_view(&instance.module_id, Some(&snap), None),
-        StartOutcome::External => external_run_view(&instance.module_id),
+    log_op(state, "重启模块", instance_id, || {
+        let instance = state
+            .instance(instance_id)
+            .ok_or_else(|| format!("实例不存在：{instance_id}"))?;
+        if supervisor.is_external(instance_id) {
+            return Err(format!("实例 {instance_id} 由外部启动，启动器无法重启"));
+        }
+        if supervisor.running().contains(instance_id) {
+            supervisor.stop(instance_id)?;
+        }
+        let port = single_instance_port(state, supervisor, &instance);
+        Ok(match start_instance(state, supervisor, &instance, port)? {
+            StartOutcome::Managed(snap) => run_view(&instance.module_id, Some(&snap), None),
+            StartOutcome::External => external_run_view(&instance.module_id),
+        })
     })
 }
 
@@ -4168,10 +4178,13 @@ pub async fn start_chain(chain_id: String, app: AppHandle) -> Result<ChainRunRes
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppStateV2>();
         let supervisor = app.state::<Supervisor>();
-        let plan = chain_plan(&chain_id, &state, &supervisor)?;
-        let result = run_chain(&plan, &state, &supervisor, Some(&app));
-        state.set_last_chain_run(&result);
-        Ok(result)
+        let subject = chain_id.clone();
+        log_op(&state, "启动链路", &subject, || {
+            let plan = chain_plan(&chain_id, &state, &supervisor)?;
+            let result = run_chain(&plan, &state, &supervisor, Some(&app));
+            state.set_last_chain_run(&result);
+            Ok(result)
+        })
     })
     .await
     .map_err(|e| format!("链路启动没有跑完：{e}"))?
@@ -4188,32 +4201,35 @@ pub async fn stop_chain(
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppStateV2>();
         let supervisor = app.state::<Supervisor>();
-        let plan = chain_plan(&chain_id, &state, &supervisor)?;
-        let ids = if only_started.unwrap_or(false) {
-            state
-                .last_chain_run(&chain_id)
-                .map(|result| result.started_ids())
-                .unwrap_or_default()
-        } else {
-            plan.runnable_ids()
-        };
-        let mut stopped = Vec::new();
-        let mut failed = Vec::new();
-        for (index, id) in reversed_steps(&ids) {
-            match supervisor.stop(id) {
-                Ok(_) => stopped.push(id.to_string()),
-                Err(error) => failed.push(ChainStepResult {
-                    index,
-                    instance_id: id.to_string(),
-                    state: ChainStepState::Failed,
-                    reason: Some(error),
-                }),
+        let subject = chain_id.clone();
+        log_op(&state, "停止链路", &subject, || {
+            let plan = chain_plan(&chain_id, &state, &supervisor)?;
+            let ids = if only_started.unwrap_or(false) {
+                state
+                    .last_chain_run(&chain_id)
+                    .map(|result| result.started_ids())
+                    .unwrap_or_default()
+            } else {
+                plan.runnable_ids()
+            };
+            let mut stopped = Vec::new();
+            let mut failed = Vec::new();
+            for (index, id) in reversed_steps(&ids) {
+                match supervisor.stop(id) {
+                    Ok(_) => stopped.push(id.to_string()),
+                    Err(error) => failed.push(ChainStepResult {
+                        index,
+                        instance_id: id.to_string(),
+                        state: ChainStepState::Failed,
+                        reason: Some(error),
+                    }),
+                }
             }
-        }
-        Ok(ChainStopResult {
-            chain_id,
-            stopped,
-            failed,
+            Ok(ChainStopResult {
+                chain_id,
+                stopped,
+                failed,
+            })
         })
     })
     .await
@@ -4648,6 +4664,38 @@ mod tests {
         // 都不匹配时给的是「没找到」而不是「未安装某个模块」。
         let err = state.resolve_instance("dounai/nope@stable").unwrap_err();
         assert!(err.contains("没有找到实例或模块"), "{err}");
+    }
+
+    /// 启停等用户主动操作经 log_op 留摘要：成功与失败都要在启动器日志里看得到。
+    #[test]
+    fn log_op_records_start_and_result_for_both_outcomes() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppStateV2::new(dir.path().join("app"), dir.path().join("data")).unwrap();
+
+        assert_eq!(
+            log_op(&state, "启动模块", "dounai/moodvoice@stable", || Ok(42)).unwrap(),
+            42
+        );
+        let failed: Result<(), String> =
+            log_op(&state, "启动模块", "dounai/nope@stable", || {
+                Err("没有找到实例或模块".to_string())
+            });
+        assert!(failed.is_err());
+
+        let tail = crate::diag_log::read_tail(&state.app_log_dir(), 20);
+        let lines = tail.lines.join("\n");
+        assert!(
+            lines.contains("启动模块 开始 · dounai/moodvoice@stable"),
+            "{lines}"
+        );
+        assert!(
+            lines.contains("启动模块 成功 · dounai/moodvoice@stable"),
+            "{lines}"
+        );
+        assert!(
+            lines.contains("启动模块 失败 · dounai/nope@stable"),
+            "{lines}"
+        );
     }
 
     /* ---------------- M6 链路 ---------------- */
