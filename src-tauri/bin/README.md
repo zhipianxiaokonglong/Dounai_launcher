@@ -6,8 +6,8 @@
 python scripts/fetch-uv.py
 ```
 
-脚本默认从阿里云 PyPI 镜像取 `uv-0.13.7-py3-none-win_amd64.whl`，网络失败时
-回退到 PyPI 官方源（GitHub Actions runner 在境外），校验**两层**哈希
+脚本默认从 PyPI 官方源取 `uv-0.13.7-py3-none-win_amd64.whl`，网络失败时
+回退到阿里云镜像（GitHub Actions runner 在境外），校验**两层**哈希
 （wheel 整体、解出来的 `uv.exe`），然后原子写入本目录的 `uv.exe`。取值必须与
 `core/src/env/bootstrap.rs` 里的 `UV_SHA256` / `UV_BYTES` / `UV_VERSION` 三个常量一致，
 否则启动器会把它判成「随包 uv 被篡改」。

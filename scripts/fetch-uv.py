@@ -5,8 +5,8 @@
 ``src-tauri/core/src/env/bootstrap.rs`` 的 ``UV_SHA256`` / ``UV_BYTES`` /
 ``UV_VERSION`` 三个常量一致，否则启动器会把文件判成「随包 uv 被篡改」。
 
-默认从阿里云 PyPI 镜像取 wheel，失败时回退到 PyPI 官方源：目标机器上
-github.com 不可达（实测超时 21 秒），CI runner 上阿里云镜像又不一定可达。
+默认从 PyPI 官方源取 wheel，失败时回退到阿里云镜像：GitHub Actions runner
+在境外，官方源可达而阿里云镜像不一定；目标机器反过来（github.com 不可达）。
 两个源指向同一个 wheel，都按 wheel / uv.exe 两层哈希校验。
 运行时补齐的兜底顺序仍是 GitHub 优先、镜像其次。
 
@@ -32,6 +32,12 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
+# Windows runner 的 stdout 默认 cp1252，中文提示会在 print 时就抛
+# UnicodeEncodeError（CI 实测）。脚本自己切到 UTF-8，不依赖调用方设环境变量。
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 UV_VERSION = "0.13.7"
 UV_SHA256 = "1791d7a9ed5b6df13ccf80f102e025c333010d96326b4ff0262aa3b578835c5a"
 UV_BYTES = 31_803_184
@@ -47,8 +53,8 @@ PYPI_WHEEL_URL = (
     "8e/4f/041b59d2a38807a3e31ef41064cf3e45d2752fe0409d89040d52778049ae/"
     "uv-0.13.7-py3-none-win_amd64.whl"
 )
-# 两个源指向同一个 wheel；网络失败换下一个，哈希不符属于安全信号，直接失败。
-WHEEL_URLS = (WHEEL_URL, PYPI_WHEEL_URL)
+# 官方源放首位：CI runner 在境外，阿里云镜像超时会让每台 runner 白等 180 秒。
+WHEEL_URLS = (PYPI_WHEEL_URL, WHEEL_URL)
 
 TARGET = Path(__file__).resolve().parent.parent / "src-tauri" / "bin" / "uv.exe"
 
