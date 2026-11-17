@@ -654,9 +654,8 @@ function cardFootHtml(moduleId: string, views: InstanceRuntimeView[]): string {
 const boundBodies = new WeakSet<HTMLElement>();
 
 function bindBodyActions(body: HTMLElement): void {
-  // body 元素跨重绘复用，重绘时只清子节点，委托监听会一直累积
-  if (boundBodies.has(body)) return;
-  boundBodies.add(body);
+  // 动作表每次重绘都要刷新：body 跨视图复用，别的视图 bindActions 会覆盖同一张表。
+  // bindActions 对同一 root 幂等（click 监听只挂一次，表 clear 后重填），可安全重复调用。
   bindActions(body, [
     { act: "start", run: (node) => startOne(node.dataset.id ?? "") },
     { act: "stop", run: (node) => stopOne(node.dataset.id ?? "") },
@@ -679,6 +678,11 @@ function bindBodyActions(body: HTMLElement): void {
       },
     },
   ]);
+
+  // 下面这些是额外的委托监听（点空白收起、滚动收起、菜单翻转），
+  // 与动作表无关。body 跨重绘复用，这几条只挂一次，避免累积。
+  if (boundBodies.has(body)) return;
+  boundBodies.add(body);
 
   // 点空白处收起所有菜单
   body.addEventListener("click", (event) => {

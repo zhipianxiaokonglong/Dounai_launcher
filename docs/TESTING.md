@@ -854,3 +854,13 @@ M6 的六条验收要求真机逐条实测，本节只记离线断言，两者�
 **离线断言**：前端新增 `tests/launcher-log.test.ts` 共 6 项，钉住前后端 id 一致、下拉首项、三个命令的目录映射、装依赖两级日志、子进程开关对启动器日志隐藏。Rust 新增 `state_v2::tests::launcher_logs_use_data_root_and_instance_logs_stay_separate`，断言启动器日志落在数据根、模块日志仍在实例目录、写一行能读回。lib 测试 103 → **104**，前端 103 → **109**。
 
 **真机待验**：点 moodvoice 的“安装依赖”，日志页选“启动器（全局操作）”应看到开始与结束两行；选 moodvoice 应看到阶段行。连点其它操作（切换 active、刷新目录）后回日志页，摘要应逐条追加。
+
+## 模块页按钮跨视图后失效（2026-11-17）
+
+真机反馈：切 active 那轮里，模块卡片的启动与“设为 active”点了没反应，页头的一键启动却正常。启动器日志没有对应记录，说明请求没有到后端，问题在前端事件委托。
+
+所有视图共用同一个 `#pbody`，各页靠 `bindActions(body, 表)` 注册同一张动作表，后绑的覆盖先绑的。此前为防止额外监听跨重绘累积，用 `boundBodies` WeakSet 在 `bindBodyActions` 开头直接 return，把 `bindActions` 也一并跳过。于是切到概览等页后再回模块页，动作表停留在上一页，模块页的 start、switch-active 等动作没有注册；页头由 `renderHead` 无条件绑定，所以一键启动一直正常。
+
+修法：`bindActions` 移到 WeakSet 守卫之前，每次重绘都刷新动作表；`bindActions` 对同一 root 幂等（click 监听只挂一次、表清空重填），重复调用安全。WeakSet 只守卫点空白收起、滚动收起、菜单翻转这三个额外监听。
+
+**离线断言**：`tests/card-menu.test.ts` 新增 1 项，钉住 `bindActions` 出现在 WeakSet 守卫之前。前端 109 → **110**。真机待验：进模块页点某实例启动、点“设为 active”，应分别出现启动 toast 与切换日志。

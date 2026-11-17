@@ -56,4 +56,15 @@ describe("card more-menu layout", () => {
     expect(css).toMatch(/\.menu-body\s*\{[^}]*overflow-y: auto/);
     expect(source).toContain('panel.style.maxHeight');
   });
+
+  it("refreshes the action table on every render even after other views bind the same body", () => {
+    // 所有视图共用 #pbody，各自 bindActions 会覆盖同一张动作表。WeakSet 只能
+    // 守卫那几个额外监听；若它连 bindActions 一起跳过，切回模块页时 start /
+    // switch-active 就没注册，表现为按钮点了没反应。
+    const fn = source.match(/function bindBodyActions\(body: HTMLElement\): void \{([\s\S]*?)\n\}/)?.[1] ?? "";
+    const bindAt = fn.indexOf("bindActions(body, [");
+    const guardAt = fn.indexOf("if (boundBodies.has(body)) return;");
+    expect(bindAt).toBeGreaterThanOrEqual(0);
+    expect(guardAt).toBeGreaterThan(bindAt);
+  });
 });
