@@ -5,15 +5,17 @@
 ``src-tauri/core/src/env/bootstrap.rs`` 的 ``UV_SHA256`` / ``UV_BYTES`` /
 ``UV_VERSION`` 三个常量一致，否则启动器会把文件判成「随包 uv 被篡改」。
 
-默认从阿里云 PyPI 镜像取 wheel：官方 GitHub release 资产在这台机器上不可达
-（实测超时 21 秒），而运行时补齐的兜底顺序仍是 GitHub 优先、镜像其次。
+默认从阿里云 PyPI 镜像取 wheel，失败时回退到 PyPI 官方源：目标机器上
+github.com 不可达（实测超时 21 秒），CI runner 上阿里云镜像又不一定可达。
+两个源指向同一个 wheel，都按 wheel / uv.exe 两层哈希校验。
+运行时补齐的兜底顺序仍是 GitHub 优先、镜像其次。
 
 用法::
 
     python scripts/fetch-uv.py            # 缺就取，已存在且哈希对得上就跳过
     python scripts/fetch-uv.py --force    # 无论是否存在都重新取
     python scripts/fetch-uv.py --check    # 只校验现有文件，不联网
-    python scripts/fetch-uv.py --url URL  # 换一个 wheel 地址
+    python scripts/fetch-uv.py --url URL  # 只用指定的 wheel 地址（不回退）
 
 只用标准库，Windows / Linux / macOS 的 Python 3.9+ 都能跑。
 """
@@ -40,6 +42,13 @@ WHEEL_URL = (
     "8e/4f/041b59d2a38807a3e31ef41064cf3e45d2752fe0409d89040d52778049ae/"
     "uv-0.13.7-py3-none-win_amd64.whl"
 )
+PYPI_WHEEL_URL = (
+    "https://files.pythonhosted.org/packages/"
+    "8e/4f/041b59d2a38807a3e31ef41064cf3e45d2752fe0409d89040d52778049ae/"
+    "uv-0.13.7-py3-none-win_amd64.whl"
+)
+# 两个源指向同一个 wheel；网络失败换下一个，哈希不符属于安全信号，直接失败。
+WHEEL_URLS = (WHEEL_URL, PYPI_WHEEL_URL)
 
 TARGET = Path(__file__).resolve().parent.parent / "src-tauri" / "bin" / "uv.exe"
 
@@ -59,6 +68,17 @@ def download(url: str) -> bytes:
     request = urllib.request.Request(url, headers={"User-Agent": "dounai-fetch-uv/1"})
     with urllib.request.urlopen(request, timeout=180) as response:
         return response.read()
+
+
+def download_any(urls: tuple[str, ...]) -> bytes:
+    errors: list[str] = []
+    for url in urls:
+        try:
+            return download(url)
+        except OSError as exc:
+            print(f"取不到 {url}：{exc}", file=sys.stderr)
+            errors.append(f"{url}: {exc}")
+    raise SystemExit("所有 wheel 源都不可用：" + "；".join(errors))
 
 
 def extract(wheel: bytes) -> bytes:
@@ -99,10 +119,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="取随包 uv 到 src-tauri/bin/uv.exe")
     parser.add_argument("--force", action="store_true", help="已存在也重新取")
     parser.add_argument("--check", action="store_true", help="只校验，不联网")
-    parser.add_argument("--url", default=WHEEL_URL, help="wheel 下载地址")
+    parser.add_argument(
+        "--url", default=None, help="只用指定的 wheel 地址（不做源回退）"
+    )
     args = parser.parse_args()
 
-    if looks_right(TARGET):
+    if looks_right(TARGET) and not args.force:
         print(f"已就绪：{TARGET}（sha256:{UV_SHA256}）")
         return 0
     if args.check:
@@ -111,7 +133,8 @@ def main() -> int:
     if TARGET.exists() and not args.force:
         print(f"{TARGET} 已存在但与内置常量不符，重新取：{TARGET}")
 
-    write_atomic(TARGET, extract(download(args.url)))
+    urls = (args.url,) if args.url else WHEEL_URLS
+    write_atomic(TARGET, extract(download_any(urls)))
     print(f"已写入 {TARGET}（{UV_BYTES} 字节，sha256:{UV_SHA256}）")
     return 0
 

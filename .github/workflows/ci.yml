@@ -60,6 +60,14 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      # bundle.resources 声明了 bin/uv.exe，但这个 31.8 MB 的第三方二进制
+      # 故意不入库（见 src-tauri/bin/README.md）。构建前按内置哈希取回，
+      # 否则 tauri build script 会报 resource path 不存在，clippy/test 全挂。
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Fetch bundled uv
+        run: python scripts/fetch-uv.py
       # tauri::generate_context!() 在编译期嵌入 ../dist 的前端资源，
       # 必须先构建产物再跑 cargo（否则 proc macro panicked）。
       - uses: actions/setup-node@v4
