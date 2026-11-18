@@ -94,10 +94,8 @@ fn authority_host(authority: &str) -> Option<&str> {
 pub fn url_host(url: &str) -> Option<&str> {
     let (rest, is_http) = if let Some(r) = url.strip_prefix("https://") {
         (r, false)
-    } else if let Some(r) = url.strip_prefix("http://") {
-        (r, true)
     } else {
-        return None;
+        (url.strip_prefix("http://")?, true)
     };
     let authority = rest.split(['/', '?', '#']).next()?;
     let host = authority_host(authority)?;
