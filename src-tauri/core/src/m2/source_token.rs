@@ -1,8 +1,10 @@
 //! 源邀请码：把「catalog 地址 + 签名公钥」压成一行可复制的字符串。
 //!
-//! 格式::
+//! 格式：
 //!
-//!     dnsrc1:<payload>.<check>
+//! ```text
+//! dnsrc1:<payload>.<check>
+//! ```
 //!
 //! - `dnsrc1` 是版本前缀，便于以后换格式而不叠加兼容分支。
 //! - `payload` 是 UTF-8 JSON 的 base64url（无 padding）。字段：`v`=1、`u`=catalog 基址、
