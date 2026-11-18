@@ -810,6 +810,8 @@ M6 的六条验收要求真机逐条实测，本节只记离线断言，两者�
 8. 对 `E:\Dounai-ai\Dounai`（shell，`health` 为 null）重复 1–5，确认角色“总装”、无 `runtime`、命令含 `{module_dir}`。
 9. 拿一份内含 v1 manifest 的 `.zip` 走“本地包 → 检查”→ 仍应硬拒，确认 catalog 与 zip 两条入口没有被转换通道绕过。
 
+**真机回报（2026-11-18）**：第 1、2、4 条已通过；第 9 条用 zip 夹具实测硬拒，报错为“契约数据不合法：missing field `pubkey`”，没有进入补齐向导。第 8 条导入 shell 目录后，实例 `local/dounai-ui@local` 的生成清单落在数据根，`role=shell`、`health=null`、命令含 `{module_dir}`，源码目录 tracked diff 为空。该轮同时发现 `convert_v1_manifest` 未套 `log_op`，启动器日志缺摘要，现已补上并加防回归测试；真机复验待执行。
+
 ## 第 3 轮真机：卡片更多菜单被裁（2026-11-15）
 
 刚进入第 3 轮，模块页报了一处界面问题：点开 MoodVoice 卡片的 “⋯”，浮层里每一项只剩右半截，上方四项整个不见。两个原因叠在一起。动作区容器叫 `.mcard-acts`，贴右规则却写成 `.card-foot .menu`，选择器从未命中，按钮紧跟 “详情” 与 “设置” 靠左；面板按 `right: 0` 向左展开、按 `bottom: calc(100% + 4px)` 向上展开，两个方向都越过 `.mcard` 的 `overflow: hidden` 边界，左侧因此裁掉首字，上方因此裁掉四项。

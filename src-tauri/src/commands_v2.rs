@@ -2957,46 +2957,49 @@ pub fn convert_v1_manifest(
     supervisor: State<'_, Supervisor>,
     request: V1ConvertRequest,
 ) -> Result<ModuleView, String> {
-    require_dev_mode(&state)?;
-    let dir = validated_local_dir(&state, &request.path)?;
-    let (text, raw) = v1_convert::read_v1(&dir)?;
-    let digest = launcher_core::sha256_hex(text.as_bytes());
-    if digest != request.source_sha256 {
-        return Err("v1 清单在预览之后被改动了。关掉这个窗口，重新点「补齐清单」。".into());
-    }
-    let manifest = v1_convert::build_v2(&raw, &request.options)?;
-    let manifest_text = serde_json::to_string_pretty(&manifest)
-        .map_err(|e| format!("生成 module-v2 清单失败：{e}"))?;
-    v1_convert::validate_v2(&manifest_text)?;
-    let parsed = parse_dir_manifest(&manifest_text)?;
-    let instance_id = format!("{}@local", parsed.module_id);
-    launcher_core::paths::validate_instance_id(&instance_id)
-        .map_err(|e| format!("instance_id 不合法：{e}"))?;
-
-    // 生成物只写数据根。源码目录（含它自己的 v1 manifest）全程只读。
-    let target = state
-        .paths
-        .instance_dir_keyed(&instance_id)
-        .join(GENERATED_MANIFEST_FILE);
-    launcher_core::state::write_bytes_atomic(&target, manifest_text.as_bytes())
-        .map_err(|e| format!("写入生成清单失败：{e}"))?;
-
-    let mut view = match add_local_dir(&state, &request.path, Some(&target)) {
-        Ok(view) => view,
-        Err(error) => {
-            // 登记没成就不留孤儿文件；数据根里的东西可以安全删除。
-            let _ = std::fs::remove_file(&target);
-            return Err(error);
+    let subject = request.path.clone();
+    log_op(&state, "补齐 v1 清单并登记", &subject, || {
+        require_dev_mode(&state)?;
+        let dir = validated_local_dir(&state, &request.path)?;
+        let (text, raw) = v1_convert::read_v1(&dir)?;
+        let digest = launcher_core::sha256_hex(text.as_bytes());
+        if digest != request.source_sha256 {
+            return Err("v1 清单在预览之后被改动了。关掉这个窗口，重新点「补齐清单」。".into());
         }
-    };
-    let instance = state.resolve_instance(&view.module_id)?;
-    view.run = phase_to_run(
-        supervisor
-            .snapshot()
-            .get(&instance.instance_id)
-            .map(|s| s.phase),
-    );
-    Ok(view)
+        let manifest = v1_convert::build_v2(&raw, &request.options)?;
+        let manifest_text = serde_json::to_string_pretty(&manifest)
+            .map_err(|e| format!("生成 module-v2 清单失败：{e}"))?;
+        v1_convert::validate_v2(&manifest_text)?;
+        let parsed = parse_dir_manifest(&manifest_text)?;
+        let instance_id = format!("{}@local", parsed.module_id);
+        launcher_core::paths::validate_instance_id(&instance_id)
+            .map_err(|e| format!("instance_id 不合法：{e}"))?;
+
+        // 生成物只写数据根。源码目录（含它自己的 v1 manifest）全程只读。
+        let target = state
+            .paths
+            .instance_dir_keyed(&instance_id)
+            .join(GENERATED_MANIFEST_FILE);
+        launcher_core::state::write_bytes_atomic(&target, manifest_text.as_bytes())
+            .map_err(|e| format!("写入生成清单失败：{e}"))?;
+
+        let mut view = match add_local_dir(&state, &request.path, Some(&target)) {
+            Ok(view) => view,
+            Err(error) => {
+                // 登记没成就不留孤儿文件；数据根里的东西可以安全删除。
+                let _ = std::fs::remove_file(&target);
+                return Err(error);
+            }
+        };
+        let instance = state.resolve_instance(&view.module_id)?;
+        view.run = phase_to_run(
+            supervisor
+                .snapshot()
+                .get(&instance.instance_id)
+                .map(|s| s.phase),
+        );
+        Ok(view)
+    })
 }
 
 #[tauri::command]
@@ -4696,6 +4699,17 @@ mod tests {
             lines.contains("启动模块 失败 · dounai/nope@stable"),
             "{lines}"
         );
+    }
+
+    /// v1 补齐与登记同样要留启动器日志，不能只有目录直登有摘要。
+    #[test]
+    fn v1_convert_command_is_wrapped_by_log_op() {
+        let source = include_str!("commands_v2.rs");
+        let start = source.find("pub fn convert_v1_manifest").unwrap();
+        let rest = &source[start..];
+        let end = rest.find("\npub fn ").unwrap_or(rest.len());
+        let body = &rest[..end];
+        assert!(body.contains("log_op(&state"), "{body}");
     }
 
     /* ---------------- M6 链路 ---------------- */
