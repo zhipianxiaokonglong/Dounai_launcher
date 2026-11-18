@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::m2::manifest::valid_signature_value;
-use crate::m2::source::SourceError;
+use crate::m2::source::{url_is_allowed, SourceError};
 use crate::m2::{
     is_expired, is_fingerprint, is_hash, semver_cmp, within_catalog_window, M2Error, SUPPORTED_ALGO,
 };
@@ -166,8 +166,11 @@ impl CatalogDocument {
             return Err(bad("catalog 至少要注册一个源".into()));
         }
         for source in &self.sources {
-            if !source.base_url.starts_with("https://") {
-                return Err(bad(format!("源 {} 的 base_url 必须用 https", source.id)));
+            if !url_is_allowed(&source.base_url) {
+                return Err(bad(format!(
+                    "源 {} 的 base_url 必须用 https 或本机回环 http",
+                    source.id
+                )));
             }
         }
         for entry in &self.modules {
@@ -181,8 +184,11 @@ impl CatalogDocument {
                 return Err(bad(format!("{} 没有下载地址", entry.module_id)));
             }
             for source in &entry.sources {
-                if !source.url.starts_with("https://") {
-                    return Err(bad(format!("{} 的下载地址必须用 https", entry.module_id)));
+                if !url_is_allowed(&source.url) {
+                    return Err(bad(format!(
+                        "{} 的下载地址必须用 https 或本机回环 http",
+                        entry.module_id
+                    )));
                 }
             }
             if crate::m2::parse_utc(&entry.expires).is_none() {

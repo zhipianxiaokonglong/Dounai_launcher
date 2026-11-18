@@ -74,7 +74,7 @@
       "properties": {
         "id": { "type": "string", "pattern": "^[a-z0-9-]{1,32}$" },
         "kind": { "enum": ["github", "sourceforge", "https"] },
-        "base_url": { "type": "string", "pattern": "^https://" },
+        "base_url": { "type": "string", "pattern": "^(https://|http://(127\\.0\\.0\\.1|localhost|\\[::1\\])(:[0-9]+)?(/|$))", "description": "公网源必须用 https；本机回环测试源（127.0.0.1 / localhost / ::1，可带端口）允许 http。" },
         "priority": { "type": "integer", "minimum": 1 },
         "enabled": { "type": "boolean", "default": true }
       }
@@ -116,7 +116,7 @@
                 "pattern": "^[a-z0-9-]{1,32}$",
                 "description": "必须等于 sources.json 中提供本 catalog 的源 id（官方主/镜像两个内置 id 均可）。包下载只认本源所在的组，不跨发布者回落。"
               },
-              "url": { "type": "string", "pattern": "^https://" }
+              "url": { "type": "string", "pattern": "^(https://|http://(127\\.0\\.0\\.1|localhost|\\[::1\\])(:[0-9]+)?(/|$))", "description": "公网下载地址必须用 https；本机回环测试源允许带端口的 http。" }
             }
           }
         },

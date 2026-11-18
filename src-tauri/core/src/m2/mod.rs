@@ -12,6 +12,7 @@ pub mod manifest;
 pub mod package;
 pub mod retention;
 pub mod source;
+pub mod source_token;
 pub mod sources;
 pub mod trust;
 pub mod v1_convert;

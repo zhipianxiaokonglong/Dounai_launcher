@@ -18,6 +18,7 @@
 | `install-v1.schema.json` | `state/install.json` 的双根、安装模式与 uv 定位 | M5 安装器写，M1 夹具可写 |
 | `deps-v1.schema.json` | `state/deps/<instance_key>/<sha256>.json` 的 generation 元数据 | 环境引擎 |
 | `source-adapter-v1.md` | `SourceAdapter` trait 的接口与不变式 | 启动器仓 |
+| `source-token-v1.md` | 源邀请码的一行格式、校验位边界与解析规则 | 启动器仓 |
 | `validate.mjs` | 零依赖契约校验器 | 启动器仓 |
 | `check-upstreams.mjs` | 核对角色声明与五个仓源码是否一致 | 启动器仓 |
 | `examples/*.v2.json` | 五个角色的 schema 校验样例 | 启动器仓 |
@@ -84,7 +85,7 @@ node contracts/validate.mjs
 node contracts/check-upstreams.mjs
 ```
 
-`validate.mjs` 零依赖，按 `module-v2.schema.json` 校验五份样例与三份状态样例，并核对角色枚举与样例的端口、health、依赖。当前 153 项断言全部通过。CI 另用 ajv 编译七份状态 schema，并对 manifest 与状态样例做数据级校验。
+`validate.mjs` 零依赖，按 `module-v2.schema.json` 校验五份样例与三份状态样例，并核对角色枚举与样例的端口、health、依赖。当前 154 项断言全部通过。CI 另用 ajv 编译七份状态 schema，并对 manifest 与状态样例做数据级校验。
 
 负例覆盖未知 role、路径穿越、缺 `pubkey` 与未验证实例自动更新。M1 新增的负例覆盖相对路径、哈希格式与未知 `kind`。M8 新增的负例覆盖 catalog 自述 `pubkey`、缺 `signer_fp`、源条目缺指纹、内置源可删除、社区源可自动更新、公共后缀白名单与撤销后仍启用。
 
@@ -161,6 +162,8 @@ cargo run --bin sign_catalog -- verify --pubkey k5.pub --catalog signed.json
 - M6 新增 `chains-v1.schema.json` 与 `examples/state/chains.json`，不改既有 schema：`chains` 空数组合法（默认链路不落盘，由实例表按 active 隐式生成），`steps` 只存 `instance_id`，最多 32 步且不得重复，悬空引用合法并由读取方标记而非回写。运行进度不写入该文件。`validate.mjs` 断言 131 → 148，CI 同步加 schema 编译与样例校验。
 - 签名算法标识由 `SHA-256 + Ed25519` 改为 `Ed25519`。改动发生在任何包或 catalog 对外发布之前，没有已分发制品，不升文件名版本号；`validate.mjs` 用负例断言拒收旧值。发布后如需再改，必须升版本。
 - `module-v2.schema.json` 的 shell 分支由 `{install_root}` 收紧为 `{module_dir}`，同步改 `m2/manifest.rs`、`examples/dounai-ui.v2.json`、两处测试夹具与 `validate.mjs` 的负例。收紧时已分发的三个 zip 都是数据面模块，不含 shell，因此不影响旧制品，不升文件名版本号、不写兼容分支；首个 shell 包（`dounai-ui 0.3.1`）在收紧之后才发布，按新规则打包。
+- 源地址与下载地址的 URL 约束从“必须 https”放宽为“公网必须 https、回环地址允许 http”。回环指 `127.0.0.0/8`、`localhost` 与 `::1`，用于本机测试源；`catalog-v2` 与 `sources-v1` 两份 schema 的 URL pattern 同步改，`validate.mjs` 断言 153 → 154，新增一条回环 http 正例；原有的公网 http 负例继续生效。白名单派生仍从地址取主机，回环源的 `host_suffixes` 固定含回环主机本身。信任模型不变：添加源仍须展示完整指纹并显式确认。
+- 新增 `source-token-v1.md` 与 `src-tauri/core/src/m2/source_token.rs`：邀请码只携带地址与公钥，指纹从公钥现算、白名单从地址派生，校验位只防粘贴损坏。运行时与 `source_token` 工具共用 `issue`/`parse`，不新增状态文件，不改 `sources-v1` 字段。
 - `validate.mjs` 的失败项不得通过放宽 schema 消除。允许例外时，在断言里写明理由。
 - M1 新增 `install-v1.schema.json` 与 `deps-v1.schema.json`。`module-v2.schema.json` 只改 `runtime.deps` 与 `runtime.snapshot_sha256` 的 `description`，字段类型、必填与取值未变，不升文件名版本号。
 - M2 把 `deps-v1` 的落盘路径改成内容寻址 generation，只改 `description`，字段与取值不变，不升文件名版本号。

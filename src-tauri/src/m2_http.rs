@@ -12,7 +12,9 @@
 use std::time::Duration;
 
 use launcher_core::m2::adapters::HttpFetcher;
-use launcher_core::m2::source::{host_allowed, url_host, SourceError};
+use launcher_core::m2::source::{
+    host_allowed, is_loopback_host, url_host, url_is_allowed, SourceError,
+};
 
 /// 内置官方源的后缀全集，仅用于生成默认源表与测试。实际请求一律按源注入，
 /// 不让 A 源的 catalog 请求重定向到 B 源的域名。
@@ -60,22 +62,24 @@ impl HttpFetcher for ReqwestCatalogFetcher {
         };
         let mut current = url.to_string();
         for _hop in 0..=MAX_HOPS {
-            if !current.starts_with("https://") {
+            if !url_is_allowed(&current) {
                 return Err(unavailable(
                     &current,
-                    format!("只允许 https 地址：{current}"),
+                    format!("只允许 https 地址或本机回环 http：{current}"),
                 ));
             }
             let host = url_host(&current)
                 .ok_or_else(|| unavailable(&current, format!("无法解析主机名：{current}")))?;
-            if !host_allowed(
-                host,
-                &self
-                    .host_suffixes
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>(),
-            ) {
+            if !is_loopback_host(host)
+                && !host_allowed(
+                    host,
+                    &self
+                        .host_suffixes
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>(),
+                )
+            {
                 return Err(unavailable(&current, format!("域名不在白名单内：{host}")));
             }
 

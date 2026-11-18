@@ -669,6 +669,13 @@ export async function inspectSource(input: {
   });
 }
 
+/** 解析一行邀请码，得到与手动填表相同的预览；不写任何文件。 */
+export async function inspectSourceToken(token: string): Promise<SourcePreview> {
+  return call<SourcePreview>("inspect_source_token", {
+    request: { token },
+  });
+}
+
 /** `confirm` 为 false 时后端一律拒绝写入，界面必须先展示完整指纹。 */
 export async function addSource(
   input: Omit<SourcePreview, "catalog_fingerprint" | "derived" | "note"> & {

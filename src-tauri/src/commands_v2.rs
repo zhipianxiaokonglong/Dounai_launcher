@@ -432,6 +432,12 @@ pub struct InspectSourceRequest {
     pub host_suffixes: Option<Vec<String>>,
 }
 
+/// 邀请码第一步：解析一行邀请码，得到同样的 SourcePreview，绝不落盘。
+#[derive(Debug, Deserialize)]
+pub struct InspectSourceTokenRequest {
+    pub token: String,
+}
+
 /// 添加源第二步。`confirm=false` 一律拒绝写入，界面必须先展示完整指纹。
 #[derive(Debug, Deserialize)]
 pub struct AddSourceRequest {
@@ -2346,13 +2352,19 @@ pub fn list_sources(state: State<'_, AppStateV2>) -> SourcesView {
     sources_view(&state.sources())
 }
 
-/// 添加源第一步：算完整指纹、派生白名单。此命令不写任何文件。
-#[tauri::command]
-pub fn inspect_source(request: InspectSourceRequest) -> Result<SourcePreview, String> {
-    let base_url = request.base_url.trim().trim_end_matches('/').to_string();
-    let pubkey = request.catalog_pubkey.trim().to_string();
+/// 由「地址 + 公钥 + 可选自定义白名单」构造预览。手动填表与邀请码解析共用这一条
+/// 派生路径：指纹从公钥现算、白名单从地址派生、主机必须落在本源白名单内。
+/// 此函数不写任何文件。
+fn build_source_preview(
+    base_url: &str,
+    pubkey: &str,
+    host_suffixes: Option<Vec<String>>,
+    name_hint: Option<&str>,
+) -> Result<SourcePreview, String> {
+    let base_url = base_url.trim().trim_end_matches('/').to_string();
+    let pubkey = pubkey.trim().to_string();
     let fingerprint = launcher_core::m2::fingerprint(&pubkey).map_err(|e| e.to_string())?;
-    let (host_suffixes, derived) = match request.host_suffixes {
+    let (host_suffixes, derived) = match host_suffixes {
         Some(list) if !list.is_empty() => (list, false),
         _ => (
             derive_host_suffixes(&base_url).map_err(|e| e.to_string())?,
@@ -2363,28 +2375,39 @@ pub fn inspect_source(request: InspectSourceRequest) -> Result<SourcePreview, St
         validate_suffix(suffix)?;
     }
     let host = launcher_core::m2::source::url_host(&base_url)
-        .ok_or_else(|| "源地址必须是 https".to_string())?;
+        .ok_or_else(|| "源地址必须是 https，或本机回环 http".to_string())?;
     let suffixes: Vec<&str> = host_suffixes.iter().map(String::as_str).collect();
-    if !launcher_core::m2::source::host_allowed(host, &suffixes) {
+    if !launcher_core::m2::source::host_allowed(host, &suffixes)
+        && !launcher_core::m2::source::is_loopback_host(host)
+    {
         return Err(format!("源地址主机 {host} 不在你确认的白名单内"));
     }
-    let id = host
-        .split('.')
-        .rev()
-        .nth(1)
+    let id = if launcher_core::m2::source::is_loopback_host(host) {
+        // 回环地址按域名派生会得到 "0" 之类的怪值，改用固定可读 id。
+        "localtest".to_string()
+    } else {
+        host.split('.')
+            .rev()
+            .nth(1)
+            .unwrap_or(host)
+            .to_ascii_lowercase()
+            .chars()
+            .map(|c| {
+                if c.is_ascii_lowercase() || c.is_ascii_digit() {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect::<String>()
+    };
+    let name = name_hint
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
         .unwrap_or(host)
-        .to_ascii_lowercase()
-        .chars()
-        .map(|c| {
-            if c.is_ascii_lowercase() || c.is_ascii_digit() {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>();
+        .to_string();
     Ok(SourcePreview {
-        name: host.to_string(),
+        name,
         id,
         base_url,
         catalog_pubkey: pubkey,
@@ -2394,6 +2417,31 @@ pub fn inspect_source(request: InspectSourceRequest) -> Result<SourcePreview, St
         note: "下一步会展示完整指纹并请你确认；确认前不会写入 sources.json，也不会写 trust.json。"
             .into(),
     })
+}
+
+/// 添加源第一步：算完整指纹、派生白名单。此命令不写任何文件。
+#[tauri::command]
+pub fn inspect_source(request: InspectSourceRequest) -> Result<SourcePreview, String> {
+    build_source_preview(
+        &request.base_url,
+        &request.catalog_pubkey,
+        request.host_suffixes,
+        None,
+    )
+}
+
+/// 邀请码第一步：解析一行邀请码→同样的预览。邀请码里的指纹/白名单一律不采信，
+/// 只取地址与公钥，其余全部复用手动路径的派生逻辑。此命令不写任何文件。
+#[tauri::command]
+pub fn inspect_source_token(request: InspectSourceTokenRequest) -> Result<SourcePreview, String> {
+    let token =
+        launcher_core::m2::source_token::parse(&request.token).map_err(|e| e.to_string())?;
+    build_source_preview(
+        &token.base_url,
+        &token.catalog_pubkey,
+        None,
+        token.name.as_deref(),
+    )
 }
 
 /// 添加源第二步。只有 confirm=true 才落盘，且只写 sources.json。
@@ -4243,6 +4291,39 @@ pub async fn stop_chain(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn source_token_preview_recomputes_fingerprint_and_derives_allowlist() {
+        use base64::engine::general_purpose::STANDARD;
+        use base64::Engine as _;
+        let pubkey = STANDARD.encode([7u8; 32]);
+        let token = launcher_core::m2::source_token::issue(
+            "http://127.0.0.1:8765/releases",
+            &pubkey,
+            Some("本地测试源"),
+        )
+        .unwrap();
+        let preview = inspect_source_token(InspectSourceTokenRequest { token }).unwrap();
+        assert_eq!(preview.base_url, "http://127.0.0.1:8765/releases");
+        assert_eq!(preview.id, "localtest");
+        assert_eq!(preview.name, "本地测试源");
+        // 指纹必须从公钥现算，而不是采信邀请码里的任何声明。
+        assert_eq!(
+            preview.catalog_fingerprint,
+            launcher_core::m2::fingerprint(&pubkey).unwrap()
+        );
+        assert!(preview.derived);
+        assert!(preview.host_suffixes.iter().any(|s| s == "127.0.0.1"));
+    }
+
+    #[test]
+    fn source_token_rejects_a_tampered_payload() {
+        let err = inspect_source_token(InspectSourceTokenRequest {
+            token: "dnsrc1:broken.AAAAAAAAAAA".into(),
+        })
+        .unwrap_err();
+        assert!(err.contains("校验") || err.contains("base64") || err.contains("JSON"));
+    }
 
     fn unsigned_v2_manifest() -> serde_json::Value {
         json!({

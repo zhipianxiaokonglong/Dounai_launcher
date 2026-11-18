@@ -10,7 +10,7 @@
 
 use std::time::Duration;
 
-use launcher_core::m2::source::{host_allowed, url_host};
+use launcher_core::m2::source::{host_allowed, is_loopback_host, url_host, url_is_allowed};
 
 use crate::download::{FetchResponse, HttpFetcher};
 
@@ -47,14 +47,14 @@ impl ReqwestClient {
         Self::new(Duration::from_secs(60), host_suffixes)
     }
 
-    /// 校验一个待请求地址：必须 https，且主机在本源白名单后缀内。
+    /// 校验一个待请求地址：https（或本机回环 http），且主机在本源白名单后缀内。
     fn check_url(&self, url: &str) -> Result<(), String> {
-        if !url.starts_with("https://") {
-            return Err(format!("只允许 https 地址：{url}"));
+        if !url_is_allowed(url) {
+            return Err(format!("只允许 https 地址或本机回环 http：{url}"));
         }
         let host = url_host(url).ok_or_else(|| format!("无法解析主机名：{url}"))?;
         let suffixes: Vec<&str> = self.host_suffixes.iter().map(String::as_str).collect();
-        if !host_allowed(host, &suffixes) {
+        if !is_loopback_host(host) && !host_allowed(host, &suffixes) {
             return Err(format!("域名不在本源白名单内：{host}"));
         }
         Ok(())

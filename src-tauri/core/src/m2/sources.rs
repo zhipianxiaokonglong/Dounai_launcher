@@ -13,7 +13,9 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::m2::catalog::SourceWatermark;
-use crate::m2::source::{host_allowed, url_host, GITHUB_HOST_SUFFIXES, SOURCEFORGE_HOST_SUFFIXES};
+use crate::m2::source::{
+    host_allowed, is_loopback_host, url_host, GITHUB_HOST_SUFFIXES, SOURCEFORGE_HOST_SUFFIXES,
+};
 use crate::m2::{fingerprint, is_fingerprint, M2Error};
 
 pub const OFFICIAL_GROUP: &str = "official";
@@ -185,8 +187,12 @@ impl SourceRegistry {
                     source.id
                 )));
             }
-            let host = url_host(&source.base_url)
-                .ok_or_else(|| bad(format!("源 {} 的 base_url 必须是 https", source.id)))?;
+            let host = url_host(&source.base_url).ok_or_else(|| {
+                bad(format!(
+                    "源 {} 的 base_url 必须是 https，或本机回环 http",
+                    source.id
+                ))
+            })?;
             if source.host_suffixes.is_empty() {
                 return Err(bad(format!("源 {} 没有出网白名单", source.id)));
             }
@@ -195,7 +201,9 @@ impl SourceRegistry {
                     .map_err(|reason| bad(format!("源 {}：{reason}", source.id)))?;
             }
             let suffixes: Vec<&str> = source.host_suffixes.iter().map(String::as_str).collect();
-            if !host_allowed(host, &suffixes) {
+            // 回环源的 host 就是白名单条目本身（派生时固定为 127.0.0.1），
+            // 相等匹配即可；公网源维持后缀匹配。
+            if !host_allowed(host, &suffixes) && !is_loopback_host(host) {
                 return Err(bad(format!(
                     "源 {} 的 base_url 主机 {} 不在自己的白名单内",
                     source.id, host
@@ -358,8 +366,11 @@ pub fn valid_id(id: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
-/// 至少两段、小写域名字符、且不是公共后缀。
+/// 至少两段、小写域名字符、且不是公共后缀。回环主机（本机测试源）单独放行。
 pub fn validate_suffix(suffix: &str) -> Result<(), String> {
+    if is_loopback_host(suffix) {
+        return Ok(());
+    }
     let lower = suffix.to_ascii_lowercase();
     if lower != suffix
         || lower.len() < 3
@@ -385,8 +396,12 @@ pub fn validate_suffix(suffix: &str) -> Result<(), String> {
 /// 派生结果会在确认框里完整展示，用户确认后才落盘。
 pub fn derive_host_suffixes(base_url: &str) -> Result<Vec<String>, M2Error> {
     let host = url_host(base_url)
-        .ok_or_else(|| M2Error::Invalid("源地址必须是 https".into()))?
+        .ok_or_else(|| M2Error::Invalid("源地址必须是 https 或本机回环 http".into()))?
         .to_ascii_lowercase();
+    // 回环测试源：白名单就是它自己的 host，不做注册域派生（localhost 只有一段）。
+    if is_loopback_host(&host) {
+        return Ok(vec![host]);
+    }
     if host_allowed(&host, GITHUB_HOST_SUFFIXES) {
         return Ok(GITHUB_HOST_SUFFIXES
             .iter()
@@ -576,8 +591,18 @@ mod tests {
             derive_host_suffixes("https://releases.example.org/catalog").unwrap(),
             vec!["example.org".to_string()]
         );
-        assert!(derive_host_suffixes("https://localhost/catalog").is_err());
+        // 回环源放行（http 与 https），公网 http 仍拒绝。
+        assert_eq!(
+            derive_host_suffixes("http://127.0.0.1:8765/catalog").unwrap(),
+            vec!["127.0.0.1".to_string()]
+        );
+        assert_eq!(
+            derive_host_suffixes("http://localhost:8765/catalog").unwrap(),
+            vec!["localhost".to_string()]
+        );
         assert!(derive_host_suffixes("http://example.org/catalog").is_err());
+        assert!(validate_suffix("127.0.0.1").is_ok());
+        assert!(validate_suffix("localhost").is_ok());
         assert!(validate_suffix("com").is_err());
         assert!(validate_suffix("EXAMPLE.ORG").is_err());
     }

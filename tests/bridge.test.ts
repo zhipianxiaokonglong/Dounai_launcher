@@ -16,6 +16,7 @@ import {
   refreshCatalog,
   catalogCache,
   installFromCatalog,
+  inspectSourceToken,
   trustInfo,
   probeEnvironmentCmd,
   purgeLocalData,
@@ -128,6 +129,16 @@ describe("命令调用参数格式", () => {
       confirm: true,
     });
     expect(res.module_id).toBe("dounai/demo");
+  });
+
+  it("inspect_source_token 把邀请码原样包进 request", async () => {
+    const calls: Call[] = [];
+    installTauri("core", calls, {});
+    await inspectSourceToken("dnsrc1:eyJ2IjoxfQ.AAAAAAAAAAA");
+    expect(calls[0]?.cmd).toBe("inspect_source_token");
+    expect(calls[0]?.args).toEqual({
+      request: { token: "dnsrc1:eyJ2IjoxfQ.AAAAAAAAAAA" },
+    });
   });
 
   it("trust_info 不带参数", async () => {

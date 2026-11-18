@@ -67,16 +67,50 @@ pub trait SourceAdapter: Send + Sync {
 pub const GITHUB_HOST_SUFFIXES: &[&str] = &["github.com", "githubusercontent.com"];
 pub const SOURCEFORGE_HOST_SUFFIXES: &[&str] = &["sourceforge.net", "sourceforge.io"];
 
-/// 取 https URL 的 host，去掉 userinfo 与端口。非 https 返回 None。
-pub fn url_host(url: &str) -> Option<&str> {
-    let rest = url.strip_prefix("https://")?;
-    let authority = rest.split(['/', '?', '#']).next()?;
-    let host = authority.rsplit('@').next()?.split(':').next()?;
+/// 回环主机：本机测试源允许走明文 http。公网地址一律仍要求 https。
+/// 只认精确值，避免 `127.0.0.1.evil.com` 这类 DNS 名被误判为本机。
+pub fn is_loopback_host(host: &str) -> bool {
+    let h = host.to_ascii_lowercase();
+    h == "127.0.0.1" || h == "localhost" || h == "::1"
+}
+
+fn authority_host(authority: &str) -> Option<&str> {
+    let hostport = authority.rsplit('@').next()?;
+    // IPv6 字面量形如 [::1]:8765，方括号内才是 host。
+    let host = if let Some(inner) = hostport.strip_prefix('[') {
+        inner.split(']').next()?
+    } else {
+        hostport.split(':').next()?
+    };
     if host.is_empty() {
         None
     } else {
         Some(host)
     }
+}
+
+/// 取 URL 的 host：https 任意主机都接受，http 仅接受回环主机；
+/// 去掉 userinfo 与端口。非放行 scheme 返回 None。
+pub fn url_host(url: &str) -> Option<&str> {
+    let (rest, is_http) = if let Some(r) = url.strip_prefix("https://") {
+        (r, false)
+    } else if let Some(r) = url.strip_prefix("http://") {
+        (r, true)
+    } else {
+        return None;
+    };
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let host = authority_host(authority)?;
+    if is_http && !is_loopback_host(host) {
+        return None;
+    }
+    Some(host)
+}
+
+/// URL 的 scheme + 主机是否放行（https 任意，http 仅回环）。
+/// 与 `url_host` 共用同一判定，避免各层各写一套导致口径漂移。
+pub fn url_is_allowed(url: &str) -> bool {
+    url_host(url).is_some()
 }
 
 pub fn host_allowed(host: &str, suffixes: &[&str]) -> bool {
@@ -88,9 +122,9 @@ pub fn host_allowed(host: &str, suffixes: &[&str]) -> bool {
 
 pub fn validate_download_url(url: &str, suffixes: &[&str]) -> Result<(), SourceError> {
     let host = url_host(url).ok_or_else(|| SourceError::PackageInvalid {
-        reason: format!("下载地址必须是 https：{url}"),
+        reason: format!("下载地址必须是 https，或本机回环 http：{url}"),
     })?;
-    if !host_allowed(host, suffixes) {
+    if !host_allowed(host, suffixes) && !is_loopback_host(host) {
         return Err(SourceError::PackageInvalid {
             reason: format!("重定向目标域名不在白名单内：{host}"),
         });
@@ -109,7 +143,14 @@ mod tests {
             url_host("https://objects.githubusercontent.com/x?sig=1"),
             Some("objects.githubusercontent.com")
         );
+        // 公网 http 一律拒绝；回环 http 放行（本机测试源）。
         assert_eq!(url_host("http://example.com/x"), None);
+        assert_eq!(url_host("http://127.0.0.1:8765/x"), Some("127.0.0.1"));
+        assert_eq!(url_host("http://localhost:8765/x"), Some("localhost"));
+        assert_eq!(url_host("http://[::1]:8765/x"), Some("::1"));
+        assert_eq!(url_host("http://127.0.0.1.evil.com/x"), None);
+        assert!(url_is_allowed("http://127.0.0.1:8765/catalog.json"));
+        assert!(!url_is_allowed("http://evil.example/catalog.json"));
         assert_eq!(
             url_host("https://user:pw@example.com:8443/x"),
             Some("example.com")
@@ -128,5 +169,8 @@ mod tests {
     fn rejects_unlisted_redirect_host() {
         assert!(validate_download_url("https://evil.example/x", GITHUB_HOST_SUFFIXES).is_err());
         assert!(validate_download_url("https://github.com/x", GITHUB_HOST_SUFFIXES).is_ok());
+        // 回环 http 下载地址放行，且不要求它在域名后缀白名单里。
+        assert!(validate_download_url("http://127.0.0.1:8765/a.zip", &[]).is_ok());
+        assert!(validate_download_url("http://evil.example/a.zip", &[]).is_err());
     }
 }

@@ -10,6 +10,7 @@ import {
   addSource,
   catalogCache,
   inspectSource,
+  inspectSourceToken,
   installFromCatalog,
   isDesktop,
   listSources,
@@ -524,10 +525,13 @@ async function runInstall(button: HTMLElement, confirm: boolean): Promise<void> 
 function openAddSource(): void {
   openModal({
     title: "添加下载源",
-    subtitle: "带外取得的 catalog 签名公钥",
+    subtitle: "推荐粘贴源发布的一行邀请码，也可手动填写",
     wide: true,
     bodyHtml: `
-      <div class="frow"><div class="lab">源地址<small>catalog.json 所在的目录，必须 https</small></div>
+      <div class="frow"><div class="lab">源邀请码<small>源发布的一行字符串；粘贴后点「解析邀请码」。解析只算指纹，不写文件</small></div>
+        <div class="ctl"><textarea id="src-token" class="input" rows="2" placeholder="dnsrc1:...（可选）"></textarea></div></div>
+      <div class="frow"><div class="lab">或手动填写<small>下面三项与邀请码二选一</small></div><div class="ctl"></div></div>
+      <div class="frow"><div class="lab">源地址<small>catalog.json 所在的目录，须用 https；本机回环测试源可用 http</small></div>
         <div class="ctl"><input id="src-url" class="input" placeholder="https://example.org/releases" /></div></div>
       <div class="frow"><div class="lab">catalog 公钥<small>Ed25519 公钥原始 32 字节的 base64</small></div>
         <div class="ctl"><textarea id="src-key" class="input" rows="2" placeholder="粘贴公钥，或公钥文件路径的内容"></textarea></div></div>
@@ -544,8 +548,29 @@ function openAddSource(): void {
     actions: [
       { label: "取消", tone: "quiet", autofocus: true },
       {
-        label: "下一步",
+        label: "解析邀请码",
         tone: "primary",
+        onClick: async (root) => {
+          const token = root.querySelector<HTMLTextAreaElement>("#src-token")?.value.trim() ?? "";
+          const errorHost = root.querySelector<HTMLElement>("#src-error");
+          if (errorHost) errorHost.textContent = "";
+          if (!token) {
+            if (errorHost) errorHost.textContent = "请先粘贴一行 dnsrc1: 开头的邀请码";
+            return false;
+          }
+          try {
+            const preview = await inspectSourceToken(token);
+            openConfirmSource(preview);
+            return true;
+          } catch (error) {
+            if (errorHost) errorHost.textContent = describeError(error);
+            return false;
+          }
+        },
+      },
+      {
+        label: "手动下一步",
+        tone: "quiet",
         onClick: async (root) => {
           const url = root.querySelector<HTMLInputElement>("#src-url")?.value.trim() ?? "";
           const pubkey = root.querySelector<HTMLTextAreaElement>("#src-key")?.value.trim() ?? "";
@@ -570,7 +595,7 @@ function openAddSource(): void {
         },
       },
     ],
-    onMount: (root) => root.querySelector<HTMLInputElement>("#src-url")?.focus(),
+    onMount: (root) => root.querySelector<HTMLTextAreaElement>("#src-token")?.focus(),
   });
 }
 

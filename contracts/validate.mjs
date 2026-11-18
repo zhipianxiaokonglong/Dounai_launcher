@@ -457,7 +457,8 @@ rejects('sources-v1 拒绝社区源 auto_update: true', patchCommunity({ auto_up
 rejects('sources-v1 拒绝源条目自述 pubkey', patchCommunity({ pubkey: `${'A'.repeat(43)}=` }), sourcesSchema);
 rejects('sources-v1 拒绝空 host_suffixes', patchCommunity({ host_suffixes: [] }), sourcesSchema);
 rejects('sources-v1 拒绝公共后缀 com', patchCommunity({ host_suffixes: ['com'] }), sourcesSchema);
-rejects('sources-v1 拒绝非 https base_url', patchCommunity({ base_url: 'http://example.org/catalog' }), sourcesSchema);
+rejects('sources-v1 拒绝公网非 https base_url', patchCommunity({ base_url: 'http://example.org/catalog' }), sourcesSchema);
+validates('sources-v1 允许本机回环 http base_url', patchCommunity({ base_url: 'http://127.0.0.1:8765/catalog' }), sourcesSchema);
 rejects('sources-v1 拒绝撤销公钥后仍启用的源',
   patchCommunity({ revoked_at: TIME }), sourcesSchema);
 expect('源 id 唯一，样例只含已下发的官方主源（GitHub 镜像暂缓）',
@@ -524,7 +525,7 @@ expect('chains-v1 不含默认链路标记，默认链路由实例表隐式生�
   && chainsExample.chains.every((c) => !('is_default' in c)));
 
 // 断言数量固定。误删或跳过断言时，不能只靠 failed 判绿。
-const EXPECTED_ASSERTIONS = 153;
+const EXPECTED_ASSERTIONS = 154;
 const count = report.filter((x) => x.startsWith('通过') || x.startsWith('失败')).length;
 console.log(report.join('\n'));
 console.log('');

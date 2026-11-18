@@ -182,6 +182,7 @@ fn main() {
             // M8：下载中心与可配置源。
             dounai_launcher::commands_v2::list_sources,
             dounai_launcher::commands_v2::inspect_source,
+            dounai_launcher::commands_v2::inspect_source_token,
             dounai_launcher::commands_v2::add_source,
             dounai_launcher::commands_v2::set_source_enabled,
             dounai_launcher::commands_v2::revoke_source,

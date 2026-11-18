@@ -60,8 +60,8 @@
         },
         "base_url": {
           "type": "string",
-          "pattern": "^https://[a-z0-9.-]+(/[^\\s]*)?$",
-          "description": "catalog.json 所在的目录基址，不含尾斜杠。"
+          "pattern": "^(https://[a-z0-9.-]+|http://(127\\.0\\.0\\.1|localhost|\\[::1\\]))(:[0-9]+)?(/[^\\s]*)?$",
+          "description": "catalog.json 所在的目录基址，不含尾斜杠。公网源必须 https；本机回环测试源（127.0.0.1 / localhost / ::1，可带端口）允许 http。"
         },
         "catalog_pubkey": {
           "type": "string",
