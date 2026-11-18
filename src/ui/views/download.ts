@@ -560,8 +560,11 @@ function openAddSource(): void {
           }
           try {
             const preview = await inspectSourceToken(token);
+            // 确认框会复用同一个 overlay 节点：openConfirmSource 内部先
+            // closeModal 再重建。必须返回 false 拦住外层收尾，否则它会把
+            // 刚打开的确认框一起关掉，表现就是弹窗消失、源没添加。
             openConfirmSource(preview);
-            return true;
+            return false;
           } catch (error) {
             if (errorHost) errorHost.textContent = describeError(error);
             return false;
@@ -587,7 +590,8 @@ function openAddSource(): void {
             const name = root.querySelector<HTMLInputElement>("#src-name")?.value.trim() || preview.name;
             const id = root.querySelector<HTMLInputElement>("#src-id")?.value.trim() || preview.id;
             openConfirmSource({ ...preview, name, id });
-            return true;
+            // 同上：确认框已接管 overlay，拦住外层关闭。
+            return false;
           } catch (error) {
             if (errorHost) errorHost.textContent = describeError(error);
             return false;
