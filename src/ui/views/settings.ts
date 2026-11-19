@@ -10,6 +10,7 @@ import {
   isDesktop,
   revokeTrustedKey,
   confirmTrustedKey,
+  reclaimStorage,
   setChildOutput,
   setCloseBehavior,
   setKeepVersions,
@@ -278,7 +279,11 @@ function storageHtml(): string {
     row(
       "清理",
       "先停进程再删",
-      `<div><button class="btn btn--sm" type="button" data-act="goto-env">到环境页清除本地数据…</button></div>`,
+      `<div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn--sm" type="button" data-act="reclaim-storage">立即回收…</button>
+        <button class="btn btn--sm" type="button" data-act="goto-env">到环境页清除本地数据…</button>
+      </div>
+      <p class="cap" style="margin:6px 0 0">回收只删字节码、下载包与悬空 uv 缓存。实例的 data/ 与源码目录不动，旧依赖环境仍保留当前和上一代。</p>`,
     )
   );
 }
@@ -475,6 +480,31 @@ function bindSection(form: Element): void {
     window.dispatchEvent(new CustomEvent("dounai:navigate", { detail: "download" }));
   });
 
+  form.querySelector('[data-act="reclaim-storage"]')?.addEventListener("click", () => {
+    confirmModal({
+      title: "现在回收空间？",
+      subtitle: "只删可再生的缓存与字节码",
+      confirmLabel: "回收",
+      bodyHtml: `<p class="cap" style="margin:0">会清掉 venv 里的 <code>__pycache__</code>、下载目录里的 zip，并运行 <code>uv cache prune</code>。实例数据与源码目录不会动，正在运行的模块也不需要停。</p>`,
+      onConfirm: async () => {
+        try {
+          const result = await reclaimStorage();
+          const failed = result.errors.length;
+          toast(
+            failed
+              ? `回收 ${result.removed.length} 项，${failed} 项失败`
+              : `已回收 ${result.removed.length} 项${result.cache_pruned ? "，缓存已整理" : ""}`,
+            failed ? "error" : "ok",
+          );
+        } catch (error) {
+          toast(`回收失败：${describeError(error)}`, "error");
+        }
+        const body = document.getElementById("pbody");
+        if (body) renderBody(body);
+      },
+    });
+  });
+
   form.querySelector('[data-act="goto-env"]')?.addEventListener("click", () => {
     window.dispatchEvent(new CustomEvent("dounai:navigate", { detail: "env" }));
   });
@@ -515,9 +545,11 @@ async function fillStorageUsage(): Promise<void> {
     return;
   }
   const parts: Array<[string, number]> = [
-    ["数据根", facts.data_bytes],
+    ["物理占用", facts.data_bytes],
     ["解释器", facts.python_bytes],
-    ["依赖缓存", facts.cache_bytes],
+    ["去重后依赖", facts.dependency_bytes],
+    ["字节码", facts.bytecode_bytes],
+    ["下载包", facts.download_bytes],
   ];
   host.innerHTML = `
     <div class="usage">
@@ -529,6 +561,9 @@ async function fillStorageUsage(): Promise<void> {
         .join("")}
       <span class="usage-i"><i>实例</i><b>${facts.instances}</b></span>
     </div>
+    <p class="cap" style="margin:6px 0 0">venv 与 uv-cache 中的相同文件按硬链接只算一次。当前可回收约 <b>${esc(
+      humanBytes(facts.reclaimable_bytes),
+    )}</b>（字节码 + 下载包）。</p>
     <p class="cap usage-path" title="${esc(facts.data_root)}">${esc(facts.data_root)}</p>
   `;
 }

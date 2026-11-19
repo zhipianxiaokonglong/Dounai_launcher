@@ -39,6 +39,7 @@ use launcher_core::chain::{
     ChainPlan, ChainProgress, ChainProgressPhase, ChainRegistry, ChainRunResult, ChainStepResult,
     ChainStepState, StepStatus, DEFAULT_CHAIN_ID,
 };
+use launcher_core::env::{remove_all_bytecode, remove_downloads, GcReport, UvRunner};
 use launcher_core::lifecycle::{
     activation_steps, rollback_steps, ActivationStep, Phase, ProbeState, RecoveryStep, RolesDoc,
     Snapshot,
@@ -3519,7 +3520,7 @@ fn install_from_catalog_impl(
         source_kind: cached.source_kind,
         auto_update: cached.auto_update,
     };
-    commit_install(
+    let response = commit_install(
         state,
         &bytes,
         &cached.entry.sha256,
@@ -3530,7 +3531,21 @@ fn install_from_catalog_impl(
             source: Some(install_source),
             entry: Some(cached.entry.clone()),
         }),
-    )
+    )?;
+    // 安装与依赖准备都成功后这份 zip 就没用了；哈希留在 catalog 与 runtime.json，
+    // 重装时再下。失败路径不删，方便复核刚下错的是什么。
+    match std::fs::remove_file(&dest) {
+        Ok(()) => state.app_log_line(
+            "op",
+            &format!(
+                "清理下载包 {}",
+                dest.file_name().unwrap_or_default().to_string_lossy()
+            ),
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => state.app_log_line("warn", &format!("清理下载包 {} 失败：{e}", dest.display())),
+    }
+    Ok(response)
 }
 
 /// 在线安装入口。参数与 `install_local_package` 保持同一返回形状。
@@ -3649,38 +3664,97 @@ pub fn resolve_close(
 /* 存储与引导状态                                                      */
 /* ------------------------------------------------------------------ */
 
-/// 存储事实：数据根在哪、已经下过什么、占了多少。
+/// 存储事实：数据根在哪、已经装了什么、实际占了多少磁盘。
 ///
-/// 这些数只能后端给：前端没有数据根路径，也不该自己算「解释器装好没有」。
-/// 报解压后的字节数而不是下载量——用户关心的是磁盘要占多少，下载量还得
-/// 估压缩比，估不准还不如不给。
+/// 字节数按硬链接去重后统计：venv 里绝大多数文件与 uv-cache 是同一个物理文件，
+/// 旧口径把它们相加会把 300 MB 报成 600 MB。类别互斥，字节码与下载包可回收。
 #[derive(Debug, Serialize)]
 pub struct StorageFacts {
     pub data_root: String,
     /// 数据根里已登记的实例数；0 表示这台机器还没装过模块。
     pub instances: usize,
-    /// 解释器已占字节；0 表示还没下过 Python。
+    /// 托管解释器占用的物理字节；0 表示还没下过 Python。
     pub python_bytes: u64,
-    /// uv 缓存已占字节；复用后第二个模块通常只下增量。
-    pub cache_bytes: u64,
-    /// 数据根整体占用（含实例目录、日志、venv）。遍历一次要几十毫秒，
-    /// 只在存储分组里要，所以不放进每次刷新都会读的快照。
+    /// uv 缓存与各实例 venv 去重后的物理字节。
+    pub dependency_bytes: u64,
+    /// venv 里运行生成的字节码；可以安全清理。
+    pub bytecode_bytes: u64,
+    /// 安装后留下的下载包；可以安全清理。
+    pub download_bytes: u64,
+    /// `bytecode_bytes + download_bytes`，用户一眼能看到可回收多少。
+    pub reclaimable_bytes: u64,
+    /// 数据根整体物理占用，已按硬链接去重。
     pub data_bytes: u64,
 }
 
 #[tauri::command]
 pub fn storage_facts(state: State<'_, AppStateV2>) -> StorageFacts {
-    let usage = launcher_core::runtime_usage(&state.paths).unwrap_or(launcher_core::RuntimeUsage {
-        python_bytes: 0,
-        cache_bytes: 0,
-    });
+    let usage = launcher_core::physical_usage(&state.paths)
+        .unwrap_or_else(|_| launcher_core::PhysicalUsage::default());
     StorageFacts {
         data_root: state.paths.data_root.display().to_string(),
         instances: state.with_installed(|installed| installed.instances.len()),
         python_bytes: usage.python_bytes,
-        cache_bytes: usage.cache_bytes,
-        data_bytes: launcher_core::dir_usage(&state.paths.data_root).unwrap_or(0),
+        dependency_bytes: usage.dependency_bytes,
+        bytecode_bytes: usage.bytecode_bytes,
+        download_bytes: usage.download_bytes,
+        reclaimable_bytes: usage.reclaimable_bytes,
+        data_bytes: usage.total_bytes,
     }
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReclaimResponse {
+    pub removed: Vec<String>,
+    pub cache_pruned: bool,
+    pub errors: Vec<String>,
+}
+
+/// `uv cache prune` 只删最后一个硬链接也消失的缓存条目，不带 `--force`。
+fn prune_uv_cache(state: &AppStateV2) -> Result<(), String> {
+    let bundled = state.paths.bundled_uv_path();
+    let uv = if bundled.is_file() {
+        bundled
+    } else {
+        state.paths.downloaded_uv_path()
+    };
+    if !uv.is_file() {
+        return Err("找不到 uv，跳过缓存回收".into());
+    }
+    let runner = launcher_core::env::SystemUvRunner::new(state.paths.install_root.clone());
+    let mut request = launcher_core::env::UvRequest::new(&uv, "launcher", &["cache", "prune"]);
+    request.cwd = state.paths.data_root.clone();
+    for (key, value) in state.paths.uv_env() {
+        request
+            .env
+            .insert(key.into(), value.to_string_lossy().into_owned());
+    }
+    runner
+        .run(&request)
+        .map(|_| ())
+        .map_err(|e| format!("回收 uv 缓存失败：{e}"))
+}
+
+/// 手动回收：字节码、下载包与悬空 uv 缓存。不碰 data/ 与源码目录。
+#[tauri::command]
+pub fn reclaim_storage(state: State<'_, AppStateV2>) -> Result<ReclaimResponse, String> {
+    log_op(&state, "回收空间", "启动器数据根", || {
+        let mut report = GcReport::default();
+        report.extend(remove_all_bytecode(&state.paths));
+        report.extend(remove_downloads(&state.paths));
+        let cache_pruned = match prune_uv_cache(&state) {
+            Ok(()) => true,
+            Err(e) => {
+                report.errors.push(e);
+                false
+            }
+        };
+        Ok(ReclaimResponse {
+            removed: report.removed,
+            cache_pruned,
+            errors: report.errors,
+        })
+    })
 }
 
 #[tauri::command]

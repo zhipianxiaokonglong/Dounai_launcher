@@ -7,6 +7,7 @@ pub mod bootstrap;
 pub mod console;
 pub mod deps;
 pub mod error;
+pub mod gc;
 pub mod progress;
 pub mod python;
 pub mod runner;
@@ -29,12 +30,15 @@ pub use bootstrap::{
 };
 pub use deps::{commit, verify_metadata, verify_snapshot, DepsMetadata, ResolvedDeps};
 pub use error::{EnvError, EnvErrorKind, FailureContext};
+pub use gc::{collect_generations, remove_all_bytecode, remove_downloads, GcReport};
 pub use progress::{EnvPhase, EnvProgress, LineReporter, Sink};
 pub use python::{ensure_python, ManagedPython};
 pub use runner::{
     MockConfig, MockFailure, MockUvRunner, SystemUvRunner, UvOutput, UvRequest, UvRunner,
 };
-pub use usage::{cache_usage, dir_usage, runtime_usage, CacheUsage, RuntimeUsage};
+pub use usage::{
+    cache_usage, dir_usage, physical_usage, runtime_usage, CacheUsage, PhysicalUsage, RuntimeUsage,
+};
 pub use venv::{prepare_venv, VenvOutcome};
 
 /// 实例来源。取值与 `source-v1.json` 的 `source_kind` 一致，由组装层判定后传入，
@@ -261,7 +265,7 @@ pub fn prepare_instance_with(
     )?;
     let mut resolved_seen: Option<ResolvedDeps> = None;
 
-    let result: Result<(PreparedEnv, RuntimeState), EnvError> = (|| {
+    let result: Result<(PreparedEnv, RuntimeState, Option<String>), EnvError> = (|| {
         let mut runtime = RuntimeState::load_or_empty(paths, ctx.install, instance_id)?;
         progress::emit(EnvProgress::new(EnvPhase::Uv, "定位 uv"));
         let uv = bootstrap::locate_uv(
@@ -379,6 +383,9 @@ pub fn prepare_instance_with(
                 current_sha256: resolved.sha256.clone(),
                 observed_at: crate::time::utc_now(),
             });
+        let previous_generation = snapshot_change
+            .as_ref()
+            .map(|change| change.previous_sha256.clone());
         runtime.instances.insert(
             instance_id.to_string(),
             InstanceRuntime {
@@ -393,12 +400,32 @@ pub fn prepare_instance_with(
             EnvProgress::new(EnvPhase::Done, "依赖已就绪")
                 .with_detail(prepared.venv_python.to_string_lossy().into_owned()),
         );
-        Ok((prepared, runtime))
+        Ok((prepared, runtime, previous_generation))
     })();
 
     match result {
-        Ok((prepared, runtime)) => {
+        Ok((prepared, runtime, previous_generation)) => {
+            // 只有 runtime.json 成功提交后才回收：旧 generation 在提交前仍是回滚目标。
             runtime.save(paths, instance_id)?;
+            let mut keep = vec![prepared.snapshot_sha256.clone()];
+            if let Some(previous) = previous_generation {
+                keep.push(previous);
+            }
+            let report = gc::after_prepare(paths, instance_id, &keep);
+            if !report.is_empty() {
+                let detail = if report.errors.is_empty() {
+                    format!("回收 {} 项", report.removed.len())
+                } else {
+                    format!(
+                        "回收 {} 项，{} 项失败",
+                        report.removed.len(),
+                        report.errors.len()
+                    )
+                };
+                progress::emit(
+                    EnvProgress::new(EnvPhase::Verify, "回收旧环境").with_detail(detail),
+                );
+            }
             Ok(prepared)
         }
         Err(mut e) => {
@@ -566,6 +593,7 @@ fn reserved_env_key(key: &str) -> bool {
             "PATH"
                 | "PYTHONHOME"
                 | "PYTHONPATH"
+                | "PYTHONDONTWRITEBYTECODE"
                 | "VIRTUAL_ENV"
                 | "CONDA_PREFIX"
                 | "CONDA_DEFAULT_ENV"
@@ -1093,11 +1121,71 @@ mod tests {
     }
 
     #[test]
+    fn third_generation_reclaims_oldest_but_keeps_rollback() {
+        let mut f = Fixture::new(
+            EnvOptions::default(),
+            PYPROJECT,
+            MockUvRunner::new(MockConfig {
+                snapshot: "first\n".into(),
+                ..MockConfig::default()
+            }),
+        );
+        let id = "dounai/omninexus@stable@main";
+        let first = f.prepare().unwrap();
+        f.runner = MockUvRunner::new(MockConfig {
+            snapshot: "second\n".into(),
+            ..MockConfig::default()
+        });
+        let second = f.prepare().unwrap();
+        f.runner = MockUvRunner::new(MockConfig {
+            snapshot: "third\n".into(),
+            ..MockConfig::default()
+        });
+        let third = f.prepare().unwrap();
+
+        assert!(!f
+            .paths
+            .generation_venv_dir(id, &first.snapshot_sha256)
+            .exists());
+        assert!(!f
+            .paths
+            .content_lock_path(id, &first.snapshot_sha256)
+            .exists());
+        assert!(f
+            .paths
+            .generation_venv_dir(id, &second.snapshot_sha256)
+            .exists());
+        assert!(f
+            .paths
+            .generation_venv_dir(id, &third.snapshot_sha256)
+            .exists());
+
+        let runtime: RuntimeState = crate::state::read_json(&f.paths.runtime_state_path()).unwrap();
+        assert_eq!(
+            runtime.instances[id]
+                .snapshot_change
+                .as_ref()
+                .unwrap()
+                .previous_sha256,
+            second.snapshot_sha256
+        );
+
+        // 上一代仍可回退：把 runtime.json 指回第二代会校验通过。
+        let mut runtime = runtime;
+        let entry = runtime.instances.get_mut(id).unwrap();
+        entry.env.snapshot_sha256 = second.snapshot_sha256.clone();
+        entry.env.venv_python = f.paths.generation_venv_python(id, &second.snapshot_sha256);
+        crate::state::write_json(&f.paths.runtime_state_path(), &runtime).unwrap();
+        assert!(verify_instance_with(&f.paths, id, &f.install).is_ok());
+    }
+
+    #[test]
     fn env_keys_require_uppercase_names() {
         assert!(valid_env_key("OMNI_PORT"));
         assert!(valid_env_key("_PRIVATE2"));
         assert!(!valid_env_key("omni_port"));
         assert!(!valid_env_key("Omni_Port"));
         assert!(!valid_env_key("2PORT"));
+        assert!(reserved_env_key("PYTHONDONTWRITEBYTECODE"));
     }
 }

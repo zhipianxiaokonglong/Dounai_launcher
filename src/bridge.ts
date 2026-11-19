@@ -1144,14 +1144,19 @@ export interface OnboardingState {
   completed_at: string | null;
 }
 
-/** 存储事实；字节数都是解压后的大小。 */
+/** 存储事实；字节数按硬链接去重后统计，类别互斥。 */
 export interface StorageFacts {
   data_root: string;
   /** 已登记实例数；0 表示这台机器还没装过模块。 */
   instances: number;
   python_bytes: number;
-  cache_bytes: number;
-  /** 数据根整体占用（含实例目录、日志、venv）。 */
+  /** uv 缓存与各实例 venv 去重后的物理占用。 */
+  dependency_bytes: number;
+  bytecode_bytes: number;
+  download_bytes: number;
+  /** 字节码 + 下载包，可直接回收。 */
+  reclaimable_bytes: number;
+  /** 数据根整体物理占用。 */
   data_bytes: number;
 }
 
@@ -1161,6 +1166,17 @@ export async function onboardingState(): Promise<OnboardingState> {
 
 export async function storageFacts(): Promise<StorageFacts> {
   return call<StorageFacts>("storage_facts");
+}
+
+/** 手动回收结果；removed 是被删掉的字节码目录与下载包路径。 */
+export interface ReclaimResponse {
+  removed: string[];
+  cache_pruned: boolean;
+  errors: string[];
+}
+
+export async function reclaimStorage(): Promise<ReclaimResponse> {
+  return call<ReclaimResponse>("reclaim_storage");
 }
 
 export async function completeOnboarding(skipped: boolean): Promise<OnboardingState> {

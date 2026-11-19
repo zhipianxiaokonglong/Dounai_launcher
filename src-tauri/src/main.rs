@@ -174,6 +174,7 @@ fn main() {
             dounai_launcher::commands_v2::set_close_behavior,
             dounai_launcher::commands_v2::resolve_close,
             dounai_launcher::commands_v2::storage_facts,
+            dounai_launcher::commands_v2::reclaim_storage,
             dounai_launcher::commands_v2::onboarding_state,
             dounai_launcher::commands_v2::complete_onboarding,
             dounai_launcher::commands_v2::reset_onboarding,

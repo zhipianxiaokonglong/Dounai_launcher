@@ -75,7 +75,14 @@ pub fn sync_request(
         UvRequest::new(
             &uv.path,
             instance_id,
-            &["sync", "--frozen", "--no-install-project", "--no-dev"],
+            &[
+                "sync",
+                "--frozen",
+                "--no-install-project",
+                "--no-dev",
+                "--link-mode",
+                "hardlink",
+            ],
         )
     } else {
         let mut req = UvRequest::new(&uv.path, instance_id, &["pip", "sync"]);
@@ -83,6 +90,8 @@ pub fn sync_request(
         req.args.push("--python".into());
         req.push_path(&venv.join("Scripts").join("python.exe"));
         req.args.push("--require-hashes".into());
+        req.args.push("--link-mode".into());
+        req.args.push("hardlink".into());
         req
     };
 

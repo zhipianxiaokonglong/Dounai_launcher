@@ -23,10 +23,10 @@ pub use chain::{
     MAX_STEPS,
 };
 pub use env::{
-    cache_usage, dir_usage, prepare_instance, prepare_instance_with, runtime_usage,
+    cache_usage, dir_usage, physical_usage, prepare_instance, prepare_instance_with, runtime_usage,
     verify_instance, verify_instance_with, CacheUsage, EnvContext, EnvError, EnvErrorKind,
-    EnvOptions, ManagedPython, PreparedEnv, RuntimeState, RuntimeUsage, SnapshotChange, SourceKind,
-    UvBinary, UV_VERSION,
+    EnvOptions, GcReport, ManagedPython, PhysicalUsage, PreparedEnv, RuntimeState, RuntimeUsage,
+    SnapshotChange, SourceKind, UvBinary, UV_VERSION,
 };
 pub use install::{InstallState, InstallStateError};
 pub use manifest::{

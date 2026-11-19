@@ -20,6 +20,8 @@ import {
   trustInfo,
   probeEnvironmentCmd,
   purgeLocalData,
+  storageFacts,
+  reclaimStorage,
   BridgeUnavailableError,
 } from "../src/bridge.js";
 
@@ -161,6 +163,28 @@ describe("命令调用参数格式", () => {
     expect(calls[0]?.args).toEqual({
       request: { caches: true, state: false, module_files: true },
     });
+  });
+
+  it("storage_facts 与 reclaim_storage 都不带参数", async () => {
+    const calls: Call[] = [];
+    installTauri("core", calls, {
+      data_root: "C:/data",
+      instances: 1,
+      python_bytes: 10,
+      dependency_bytes: 20,
+      bytecode_bytes: 3,
+      download_bytes: 2,
+      reclaimable_bytes: 5,
+      data_bytes: 35,
+      removed: [],
+      cache_pruned: true,
+      errors: [],
+    });
+    const facts = await storageFacts();
+    const result = await reclaimStorage();
+    expect(calls.map((call) => call.cmd)).toEqual(["storage_facts", "reclaim_storage"]);
+    expect(facts.reclaimable_bytes).toBe(5);
+    expect(result.cache_pruned).toBe(true);
   });
 
   it("refresh_catalog 不带参数：源只能来自 sources.json", async () => {

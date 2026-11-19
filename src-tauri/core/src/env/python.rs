@@ -45,6 +45,9 @@ pub fn python_bound_env(paths: &Paths, python: &ManagedPython) -> BTreeMap<Strin
         "UV_PYTHON".into(),
         python.path.to_string_lossy().into_owned(),
     );
+    // venv 里的包文件已由 uv 硬链接共享；字节码缓存是运行时按实例各写一份，
+    // 不共享且会持续增长。模块进程不写 .pyc，必要时由启动器统一回收旧的。
+    env.insert("PYTHONDONTWRITEBYTECODE".into(), "1".into());
     env
 }
 
