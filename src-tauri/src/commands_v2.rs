@@ -1939,6 +1939,12 @@ fn prepare_instance_env_impl(
 ///
 /// 用一条源表记录装配远程适配器：公钥、指纹与白名单全来自本地表。
 /// 没有「任意 URL + 内置 K5」这条通道，也没有会话级换源入口。
+/// 官方组走二选一；其余水位组（社区源、nightly）各自验签、各自裁决。
+/// 判定必须看 group 而非 kind：nightly 属于 Official 类，但 group 独立。
+fn fetches_independently(source: &SourceEntry) -> bool {
+    source.group_id() != OFFICIAL_GROUP
+}
+
 fn source_adapter<'a>(
     source: &SourceEntry,
     registry: &SourceRegistry,
@@ -2122,8 +2128,10 @@ fn refresh_catalog_impl(state: &AppStateV2) -> CatalogResponse {
         }
     }
 
-    // 社区源：每个发布者各自验签、各自裁决，不用官方组的序号压自己。
-    for source in enabled.iter().filter(|s| s.kind != SourceClass::Official) {
+    // 独立水位组：社区源与 nightly 都在这里。每个组各自验签、各自裁决，
+    // 不用官方组的序号压自己。nightly 虽然是 Official 类，但 group 独立，
+    // 不能按 kind 排除——否则既进不了官方组，也进不了这里，永远不会被拉取。
+    for source in enabled.iter().filter(|s| fetches_independently(s)) {
         let fetcher = match ReqwestCatalogFetcher::with_proxy(source.host_suffixes.clone(), &proxy)
         {
             Ok(client) => client,
@@ -4427,6 +4435,45 @@ pub async fn stop_chain(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// 回归：nightly 是 Official 类但 group 独立，必须走独立拉取组。
+    /// 旧逻辑按 kind != Official 筛选，导致它两组都落空、永不拉取。
+    #[test]
+    fn nightly_goes_into_the_independent_fetch_group() {
+        let make = |id: &str, kind: &str, group: Option<&str>| -> SourceEntry {
+            let mut value = json!({
+                "id": id,
+                "name": id,
+                "kind": kind,
+                "base_url": "https://raw.githubusercontent.com/Tonyjh07/Dounai_nightly/main",
+                "catalog_pubkey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                "catalog_fingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                "host_suffixes": ["githubusercontent.com"],
+                "enabled": true,
+                "deletable": false,
+                "auto_update": false,
+            });
+            if let Some(group) = group {
+                value["group"] = json!(group);
+            }
+            serde_json::from_value(value).unwrap()
+        };
+        assert!(fetches_independently(&make(
+            "nightly-gh",
+            "official",
+            Some("nightly-gh")
+        )));
+        assert!(!fetches_independently(&make(
+            "official-sf",
+            "official",
+            Some("official")
+        )));
+        assert!(fetches_independently(&make(
+            "community-x",
+            "community",
+            None
+        )));
+    }
 
     #[test]
     fn source_token_preview_recomputes_fingerprint_and_derives_allowlist() {
