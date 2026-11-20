@@ -45,6 +45,17 @@ pub const BUILTIN_K5_PUBKEY_B64: &str = "+56W2k6Sw60cMspmEKUESgqX1TGJLqmVozPJvI0
 pub const BUILTIN_K5_FINGERPRINT: &str =
     "sha256:8c1d31cf6f5ce98961be579f88fe49f8521242bcaa07483e85d0bbea1532eff5";
 
+/// K3 是 nightly 模块包签名钥，2026-11-20 生成。与 K1 一样只按指纹判定，
+/// 指纹进 trust store 内置表后 nightly 包判 A 类。私钥在 nightly 仓的 CI 环境里，
+/// 泄露处置见 nightly 仓 `contracts.md` 第 7 节（短窗 + 换钥 + 发新版启动器）。
+pub const BUILTIN_K3_FINGERPRINT: &str =
+    "sha256:554305ebee1ac076368606a2381f1ece9c4c55afce36568decc8566e8c58a60f";
+
+/// K4 是 nightly catalog 签名钥，只验 nightly 源的 catalog，不进包信任表。
+pub const BUILTIN_K4_PUBKEY_B64: &str = "j+eFVaRvr2aoeMGPbwJtHu9hGSQWIFXlCkyU1bFiUYc=";
+pub const BUILTIN_K4_FINGERPRINT: &str =
+    "sha256:c1ba74e21a86c0de0d093c8966c8b43cb59a84483b0ee28e2d720ede8acf5253";
+
 /// 会话缓存里的一条可安装条目。键含 source_id / variant / version，
 /// 跨源同名与多版本不做隐式优选，用户点哪一行就装哪一行。
 #[derive(Debug, Clone)]
@@ -245,24 +256,45 @@ impl AppStateV2 {
         if let Some(note) = &install_note {
             eprintln!("[install] {note}");
         }
-        let trust = load_or(&paths.state_dir().join("trust.json"), || {
-            TrustStore::new(BUILTIN_K1_FINGERPRINT, BUILTIN_K5_FINGERPRINT)
-                .map_err(|e| e.to_string())
+        let trust_path = paths.state_dir().join("trust.json");
+        let mut trust = load_or(&trust_path, || {
+            TrustStore::new_with_nightly(
+                BUILTIN_K1_FINGERPRINT,
+                BUILTIN_K5_FINGERPRINT,
+                Some(BUILTIN_K3_FINGERPRINT),
+            )
+            .map_err(|e| e.to_string())
         })?;
+        // 老 trust.json 里没有 K3：补齐内置项后写回，不动用户确认过的公钥。
+        if trust
+            .ensure_builtin_k3(BUILTIN_K3_FINGERPRINT)
+            .map_err(|e| e.to_string())?
+        {
+            trust.save(&trust_path).map_err(|e| e.to_string())?;
+        }
         let retention = load_or(&paths.state_dir().join("retention.json"), || {
             Ok(RetentionPolicy::default())
         })?;
         let sources_path = paths.state_dir().join("sources.json");
         let mut sources = load_or(&sources_path, || {
-            SourceRegistry::builtin(BUILTIN_K5_PUBKEY_B64, BUILTIN_K5_FINGERPRINT)
-                .map_err(|e| e.to_string())
+            SourceRegistry::builtin_with_nightly(
+                BUILTIN_K5_PUBKEY_B64,
+                BUILTIN_K5_FINGERPRINT,
+                Some(BUILTIN_K4_PUBKEY_B64),
+                Some(BUILTIN_K4_FINGERPRINT),
+            )
+            .map_err(|e| e.to_string())
         })?;
         // load_or 只做反序列化，绕过 core 的隐藏剔除：旧文件里被撤销的 GitHub
         // 镜像会原样留在内存、显示在下载页。这里补上剔除，并把清理写回文件，
         // 免得每次启动都重复读到这条已经不打算下发的源。
         let before = sources.sources.len();
         sources.drop_hidden_builtin();
-        if sources.sources.len() != before {
+        // 老 sources.json 里没有 nightly 源，补齐内置项；用户手加的同 id 源不动。
+        let added_nightly = sources
+            .ensure_builtin_nightly(BUILTIN_K4_PUBKEY_B64, BUILTIN_K4_FINGERPRINT)
+            .map_err(|e| e.to_string())?;
+        if sources.sources.len() != before || added_nightly {
             sources.save(&sources_path).map_err(|e| e.to_string())?;
         }
         let chains = load_or(&paths.state_dir().join("chains.json"), || {
@@ -825,16 +857,27 @@ mod tests {
         });
         stale.save(&path).unwrap();
         let on_disk_before: SourceRegistry = launcher_core::state::read_json(&path).unwrap();
-        assert_eq!(on_disk_before.sources.len(), 2, "夹具确实写入了隐藏源");
+        assert_eq!(on_disk_before.sources.len(), 3, "夹具确实写入了隐藏源");
 
         let reopened = AppStateV2::new(root, dir.path().join("data")).unwrap();
         let loaded = reopened.sources();
         let ids: Vec<&str> = loaded.sources.iter().map(|s| s.id.as_str()).collect();
-        assert_eq!(ids, vec![launcher_core::m2::sources::OFFICIAL_SF_ID]);
+        // 隐藏镜像被剔除；nightly 作为内置源补齐后与官方源并存。
+        assert_eq!(
+            ids,
+            vec![
+                launcher_core::m2::sources::OFFICIAL_SF_ID,
+                launcher_core::m2::sources::NIGHTLY_GH_ID,
+            ]
+        );
         // 清理已落盘：直接读文件也不再有这条隐藏源。
         let on_disk: SourceRegistry =
             launcher_core::state::read_json(&reopened.sources_path()).unwrap();
-        assert_eq!(on_disk.sources.len(), 1);
+        assert_eq!(on_disk.sources.len(), 2);
+        assert!(!on_disk
+            .sources
+            .iter()
+            .any(|s| s.id == launcher_core::m2::sources::OFFICIAL_GH_ID));
     }
 
     #[test]

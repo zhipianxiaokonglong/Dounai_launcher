@@ -61,32 +61,84 @@ pub struct TrustStore {
 impl TrustStore {
     /// K1 与 K5 的真实指纹由编译期内嵌值传入，M5 负责生成与轮换。
     pub fn new(k1_fingerprint: &str, k5_fingerprint: &str) -> Result<Self, M2Error> {
-        for fp in [k1_fingerprint, k5_fingerprint] {
+        Self::new_with_nightly(k1_fingerprint, k5_fingerprint, None)
+    }
+
+    /// 在 K1/K5 之外登记 nightly 的包签名钥 K3。
+    ///
+    /// K3 用自定义 key_id 签发，但判定只比对指纹，进 builtin 即判 A 类。
+    /// 私钥在 CI 环境里，泄露风险按 nightly 契约的短窗与轮换约束管理。
+    pub fn new_with_nightly(
+        k1_fingerprint: &str,
+        k5_fingerprint: &str,
+        k3_fingerprint: Option<&str>,
+    ) -> Result<Self, M2Error> {
+        for fp in [Some(k1_fingerprint), Some(k5_fingerprint), k3_fingerprint]
+            .into_iter()
+            .flatten()
+        {
             if !is_fingerprint(fp) {
                 return Err(M2Error::Invalid(format!("内嵌公钥指纹非法：{fp}")));
             }
         }
+        let mut builtin = vec![
+            BuiltinKey {
+                key_id: "K1".into(),
+                fingerprint: k1_fingerprint.into(),
+                purpose: KeyPurpose::ModuleSigning,
+                enabled: true,
+                deletable: false,
+            },
+            BuiltinKey {
+                key_id: "K5".into(),
+                fingerprint: k5_fingerprint.into(),
+                purpose: KeyPurpose::CatalogSigning,
+                enabled: true,
+                deletable: false,
+            },
+        ];
+        if let Some(fp) = k3_fingerprint {
+            builtin.push(BuiltinKey {
+                key_id: "K3".into(),
+                fingerprint: fp.into(),
+                purpose: KeyPurpose::ModuleSigning,
+                enabled: true,
+                deletable: false,
+            });
+        }
         Ok(Self {
             schema_version: 1,
-            builtin: vec![
-                BuiltinKey {
-                    key_id: "K1".into(),
-                    fingerprint: k1_fingerprint.into(),
-                    purpose: KeyPurpose::ModuleSigning,
-                    enabled: true,
-                    deletable: false,
-                },
-                BuiltinKey {
-                    key_id: "K5".into(),
-                    fingerprint: k5_fingerprint.into(),
-                    purpose: KeyPurpose::CatalogSigning,
-                    enabled: true,
-                    deletable: false,
-                },
-            ],
+            builtin,
             trusted: Vec::new(),
             last_updated: None,
         })
+    }
+
+    /// 老用户的 trust.json 生成时还没有 K3。加载后补齐内置项并交给调用方写回，
+    /// 不碰用户自己确认过的 `trusted` 表，也不恢复被撤销的指纹。
+    ///
+    /// 返回是否发生变化，调用方据此决定是否 save。
+    pub fn ensure_builtin_k3(&mut self, k3_fingerprint: &str) -> Result<bool, M2Error> {
+        if !is_fingerprint(k3_fingerprint) {
+            return Err(M2Error::Invalid(format!(
+                "内嵌 K3 指纹非法：{k3_fingerprint}"
+            )));
+        }
+        if self
+            .builtin
+            .iter()
+            .any(|k| k.key_id == "K3" || k.fingerprint == k3_fingerprint)
+        {
+            return Ok(false);
+        }
+        self.builtin.push(BuiltinKey {
+            key_id: "K3".into(),
+            fingerprint: k3_fingerprint.into(),
+            purpose: KeyPurpose::ModuleSigning,
+            enabled: true,
+            deletable: false,
+        });
+        Ok(true)
     }
 
     pub fn load(path: &Path) -> Result<Self, M2Error> {
@@ -395,5 +447,35 @@ mod tests {
             Verdict::D
         );
         assert!(store.tofu(&fp, "retry", "2026-01-03T00:00:00Z").is_err());
+    }
+    #[test]
+    fn builtin_k3_is_trusted_and_old_store_gains_it_without_touching_user_keys() {
+        let (sk3, pk3) = key(3);
+        let k3_fp = fingerprint(&pk3).unwrap();
+        let (_, k5) = key(5);
+        let k5_fp = fingerprint(&k5).unwrap();
+        let store = TrustStore::new_with_nightly(
+            &format!("sha256:{}", "a".repeat(64)),
+            &k5_fp,
+            Some(&k3_fp),
+        )
+        .unwrap();
+        assert!(store.is_trusted(&k3_fp));
+        let manifest = signed_manifest(&sk3, &pk3);
+        let classified = classify(&store, &manifest, &ClassifyContext::default()).unwrap();
+        assert_eq!(classified.verdict, Verdict::A, "K3 指纹内置应判 A 类");
+
+        // 老 trust.json 只有 K1/K5，补齐 K3 后不动用户自己确认的公钥。
+        let mut old = TrustStore::new(&format!("sha256:{}", "b".repeat(64)), &k5_fp).unwrap();
+        let user_fp = fingerprint(&key(9).1).unwrap();
+        old.tofu(&user_fp, "User", "2026-01-01T00:00:00Z").unwrap();
+        assert!(old.ensure_builtin_k3(&k3_fp).unwrap());
+        assert!(old.is_trusted(&k3_fp));
+        assert!(old.is_trusted(&user_fp));
+        assert_eq!(old.builtin.len(), 3);
+        assert!(
+            !old.ensure_builtin_k3(&k3_fp).unwrap(),
+            "重复补齐应是幂等的"
+        );
     }
 }

@@ -21,6 +21,11 @@ use crate::m2::{fingerprint, is_fingerprint, M2Error};
 pub const OFFICIAL_GROUP: &str = "official";
 pub const OFFICIAL_SF_ID: &str = "official-sf";
 pub const OFFICIAL_GH_ID: &str = "official-gh";
+/// nightly 独立源：独立水位、独立公钥，不与官方源比较 sequence。
+pub const NIGHTLY_GH_ID: &str = "nightly-gh";
+pub const NIGHTLY_GROUP: &str = "nightly-gh";
+pub const NIGHTLY_BASE_URL: &str = "https://raw.githubusercontent.com/Tonyjh07/Dounai_nightly/main";
+pub const NIGHTLY_HOST_SUFFIXES: &[&str] = &["github.com", "githubusercontent.com"];
 
 /// 暂不下发的内置源。GitHub 镜像指向的仓库尚未建立（对外可见动作，待作者拍板），
 /// 在此期间不注册、加载旧文件时一并剔除——它每次刷新都 404，会把噪音混进源状态。
@@ -29,7 +34,7 @@ pub const HIDDEN_OFFICIAL_IDS: &[&str] = &[OFFICIAL_GH_ID];
 
 /// 内置源 id 全集（含暂不下发的）。签发侧预检 catalog 的 source_id 用这张表：
 /// 签发工具不该放行源表里根本不存在的 id。
-pub const BUILTIN_SOURCE_IDS: &[&str] = &[OFFICIAL_SF_ID, OFFICIAL_GH_ID];
+pub const BUILTIN_SOURCE_IDS: &[&str] = &[OFFICIAL_SF_ID, OFFICIAL_GH_ID, NIGHTLY_GH_ID];
 
 /// 从 base_url 派生出的后缀不能是公共后缀，否则等于「任意 https 都能拉」。
 const PUBLIC_SUFFIXES: &[&str] = &[
@@ -97,8 +102,18 @@ pub struct SourceRegistry {
 }
 
 impl SourceRegistry {
-    /// 内置两个官方源，共用 K5 公钥，可禁用不可删除。
+    /// 内置官方源，共用 K5 公钥，可禁用不可删除。
     pub fn builtin(k5_pubkey_b64: &str, k5_fingerprint: &str) -> Result<Self, M2Error> {
+        Self::builtin_with_nightly(k5_pubkey_b64, k5_fingerprint, None, None)
+    }
+
+    /// 在官方源之外登记 nightly 源。K4 公钥与指纹单独传入，和 K5 物理隔离。
+    pub fn builtin_with_nightly(
+        k5_pubkey_b64: &str,
+        k5_fingerprint: &str,
+        k4_pubkey_b64: Option<&str>,
+        k4_fingerprint: Option<&str>,
+    ) -> Result<Self, M2Error> {
         let common =
             |id: &str, name: &str, base_url: &str, hosts: &[&str], priority: u32| SourceEntry {
                 id: id.into(),
@@ -121,18 +136,90 @@ impl SourceRegistry {
                 last_error: None,
                 last_error_at: None,
             };
+        let mut sources = vec![common(
+            OFFICIAL_SF_ID,
+            "官方源（SourceForge）",
+            "https://downloads.sourceforge.net/project/dounai-releases",
+            SOURCEFORGE_HOST_SUFFIXES,
+            1,
+        )];
+        if let (Some(pk), Some(fp)) = (k4_pubkey_b64, k4_fingerprint) {
+            sources.push(SourceEntry {
+                id: NIGHTLY_GH_ID.into(),
+                name: "官方 Nightly（GitHub）".into(),
+                kind: SourceClass::Official,
+                base_url: NIGHTLY_BASE_URL.into(),
+                catalog_pubkey: pk.into(),
+                catalog_fingerprint: fp.into(),
+                host_suffixes: NIGHTLY_HOST_SUFFIXES
+                    .iter()
+                    .map(|s| (*s).to_string())
+                    .collect(),
+                enabled: true,
+                deletable: false,
+                auto_update: false,
+                group: Some(NIGHTLY_GROUP.into()),
+                sequence: None,
+                expires: None,
+                priority: Some(2),
+                added_at: None,
+                revoked_at: None,
+                note: None,
+                last_error: None,
+                last_error_at: None,
+            });
+        }
         let registry = Self {
             schema_version: 1,
-            sources: vec![common(
-                OFFICIAL_SF_ID,
-                "官方源（SourceForge）",
-                "https://downloads.sourceforge.net/project/dounai-releases",
-                SOURCEFORGE_HOST_SUFFIXES,
-                1,
-            )],
+            sources,
         };
         registry.validate()?;
         Ok(registry)
+    }
+
+    /// 老用户的 sources.json 生成时还没有 nightly 源。加载后补齐内置项并交给
+    /// 调用方写回；已存在同 id 的源（含用户手加）不动，避免覆盖用户状态。
+    /// 返回是否发生变化。
+    pub fn ensure_builtin_nightly(
+        &mut self,
+        k4_pubkey_b64: &str,
+        k4_fingerprint: &str,
+    ) -> Result<bool, M2Error> {
+        if self.find(NIGHTLY_GH_ID).is_some() {
+            return Ok(false);
+        }
+        let actual = fingerprint(k4_pubkey_b64)
+            .map_err(|e| M2Error::Invalid(format!("nightly 公钥不合法：{e}")))?;
+        if actual != k4_fingerprint {
+            return Err(M2Error::Invalid("nightly 公钥与登记指纹不符".into()));
+        }
+        let nightly = SourceEntry {
+            id: NIGHTLY_GH_ID.into(),
+            name: "官方 Nightly（GitHub）".into(),
+            kind: SourceClass::Official,
+            base_url: NIGHTLY_BASE_URL.into(),
+            catalog_pubkey: k4_pubkey_b64.into(),
+            catalog_fingerprint: k4_fingerprint.into(),
+            host_suffixes: NIGHTLY_HOST_SUFFIXES
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+            enabled: true,
+            deletable: false,
+            auto_update: false,
+            group: Some(NIGHTLY_GROUP.into()),
+            sequence: None,
+            expires: None,
+            priority: Some(2),
+            added_at: None,
+            revoked_at: None,
+            note: None,
+            last_error: None,
+            last_error_at: None,
+        };
+        self.sources.push(nightly);
+        self.validate()?;
+        Ok(true)
     }
 
     /// 剔除暂不下发的内置源。加载旧文件后调用：内置源的下发口径由代码说了算，
@@ -614,5 +701,57 @@ mod tests {
         assert!(registry.allowlist().contains(&"example.org".to_string()));
         registry.set_enabled("demo", false).unwrap();
         assert!(!registry.allowlist().contains(&"example.org".to_string()));
+    }
+    fn nightly_key() -> (String, String) {
+        key(4)
+    }
+
+    #[test]
+    fn nightly_source_has_its_own_group_and_public_key() {
+        let (pk5, fp5) = key(5);
+        let (pk4, fp4) = nightly_key();
+        let reg = SourceRegistry::builtin_with_nightly(&pk5, &fp5, Some(&pk4), Some(&fp4)).unwrap();
+        assert_eq!(reg.sources.len(), 2);
+        let nightly = reg.find(NIGHTLY_GH_ID).unwrap();
+        assert_eq!(nightly.group_id(), NIGHTLY_GROUP);
+        assert_eq!(nightly.catalog_pubkey, pk4);
+        assert_eq!(nightly.catalog_fingerprint, fp4);
+        assert!(!nightly.auto_update);
+        assert!(!nightly.deletable);
+        assert!(nightly
+            .host_suffixes
+            .iter()
+            .any(|h| h == "githubusercontent.com"));
+        // 独立水位：推进 nightly 不动官方源。
+        assert_eq!(
+            reg.group_ids(NIGHTLY_GH_ID),
+            vec![NIGHTLY_GH_ID.to_string()]
+        );
+        let mut reg = reg;
+        reg.advance(NIGHTLY_GH_ID, 7, "2026-11-21T00:00:00Z");
+        assert_eq!(reg.find(NIGHTLY_GH_ID).unwrap().sequence, Some(7));
+        assert_eq!(reg.find(OFFICIAL_SF_ID).unwrap().sequence, None);
+    }
+
+    #[test]
+    fn old_registry_gains_nightly_and_keeps_user_sources() {
+        let (pk5, fp5) = key(5);
+        let (pk4, fp4) = nightly_key();
+        let mut reg = SourceRegistry::builtin(&pk5, &fp5).unwrap();
+        reg.add(community("demo")).unwrap();
+        assert!(reg.ensure_builtin_nightly(&pk4, &fp4).unwrap());
+        assert!(reg.find(NIGHTLY_GH_ID).is_some());
+        assert!(reg.find("demo").is_some());
+        assert_eq!(reg.sources.len(), 3);
+        assert!(
+            !reg.ensure_builtin_nightly(&pk4, &fp4).unwrap(),
+            "补齐应幂等"
+        );
+        // 指纹与公钥不匹配时拒绝补齐，避免界面显示 A、判定用 B。
+        // 用一份尚未补齐的注册表，否则同 id 已存在会先短路。
+        let mut fresh = SourceRegistry::builtin(&pk5, &fp5).unwrap();
+        assert!(fresh
+            .ensure_builtin_nightly(&pk4, &format!("sha256:{}", "b".repeat(64)))
+            .is_err());
     }
 }
