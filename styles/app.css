@@ -500,6 +500,39 @@ code,
   background: var(--accent-soft);
 }
 
+/* 当前实例单选：选中态是实心强调，未选中态是描边可点的中性色。
+   两者都带 radio 语义（aria-pressed），颜色之外还有文字区分。 */
+button.active-pick {
+  font-family: var(--sans);
+  font-size: 10.5px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+button.active-pick:hover {
+  filter: brightness(1.12);
+}
+
+button.active-pick:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+button.active-pick--on {
+  cursor: default;
+}
+
+.chip--pick {
+  color: var(--fg-3);
+  border-color: var(--line-2);
+  background: transparent;
+}
+
+.chip--pick:hover {
+  color: var(--accent-fg);
+  border-color: rgba(76, 141, 255, 0.45);
+}
+
 .dot {
   width: 7px;
   height: 7px;

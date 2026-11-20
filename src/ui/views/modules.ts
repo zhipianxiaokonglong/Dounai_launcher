@@ -167,10 +167,10 @@ function renderBody(body: HTMLElement): void {
     const views = [...byModule.values()].flat();
     const running = views.filter((view) => isRunning(view)).length;
     const activeInstance = views.length > 1 ? views.find((view) => view.active) : undefined;
-    // 单实例时不再写 active = …：实例行上已经有 active 徽标，页头再写一遍
-    // 会把分组行挤到换行或截断。
+    // 单实例时不再写当前实例：实例行上的单选态已经说明了，页头再写一遍
+    // 会把分组行挤到换行或截断。多实例时点名 instance_id，变体一眼可辨。
     const statParts = [`${running}/${views.length} 运行`];
-    if (activeInstance) statParts.push(`active = ${activeInstance.instance.module_id}`);
+    if (activeInstance) statParts.push(`当前实例 = ${activeInstance.instance.instance_id}`);
 
     const group = document.createElement("section");
     const title = DATA_PLANE.includes(role) ? `${ROLE_TITLE[role]}层` : ROLE_TITLE[role];
@@ -390,7 +390,18 @@ function buildInstanceBlock(view: InstanceRuntimeView): HTMLElement {
 
   const dotClass = phaseDot(view);
   const chips: string[] = [];
-  if (view.active) chips.push('<span class="chip chip--active">active</span>');
+  // 「当前实例」用单选语义表达，不只是一个静态徽标：一行就是一组里的一个选项。
+  // 外部实例由别的进程提供服务，切 active 会被后端拒绝，这里直接不给控件。
+  if (!isExternal(view) && view.instance.role !== "auxiliary") {
+    chips.push(
+      view.active
+        ? `<button type="button" class="chip chip--active active-pick active-pick--on" aria-pressed="true" data-act="switch-active" data-id="${esc(view.instance.instance_id)}" title="这是当前实例：占用规范端口，默认链路和一键启动都用它。点一下可重新确认。" aria-label="当前实例 ${esc(view.instance.instance_id)}">当前实例</button>`
+        : `<button type="button" class="chip chip--pick active-pick" aria-pressed="false" data-act="switch-active" data-id="${esc(view.instance.instance_id)}" title="设为当前实例：会停掉当前实例、启动它，并验证健康与契约；失败自动回滚" aria-label="设为当前实例 ${esc(view.instance.instance_id)}">设为当前</button>`,
+    );
+  } else if (view.active) {
+    // 外部/辅助实例也可能是 active，但没有切换控件，保留只读标签说明状态。
+    chips.push('<span class="chip chip--active">当前实例</span>');
+  }
   if (external) chips.push('<span class="chip chip--warn">外部启动</span>');
   else if (view.instance.source_kind === "dir") chips.push('<span class="chip chip--warn">未验证</span>');
   if (view.disabled) chips.push('<span class="chip chip--stop">已停用</span>');
@@ -424,6 +435,7 @@ function buildInstanceBlock(view: InstanceRuntimeView): HTMLElement {
       ${detail ? `<span class="mi-meta">${esc(detail)}</span>` : ""}
       <span class="sp"></span>
       ${instanceButtons(view)}
+      ${instanceMenuHtml(view)}
     </div>
     <div class="env-slot" data-env-job="${esc(view.instance.instance_id)}"></div>
   `;
@@ -577,12 +589,46 @@ function instanceButtons(view: InstanceRuntimeView): string {
   return `<button class="btn btn--sm btn--primary" type="button" data-act="start" data-id="${id}"${disabledAttr}>启动</button>`;
 }
 
-/** 卡片底栏：最常用的一个动作 + 更多菜单。 */
+/**
+ * 实例行自己的动作菜单：详情、日志、重启、依赖、卸载都作用在这一行，
+ * 不再像过去那样绑定到卡片里「第一个非外部实例」这个隐含的主实例上。
+ * 外部实例由别的进程提供服务，重启/卸载/装依赖都做不到，只给详情与日志。
+ */
+function instanceMenuHtml(view: InstanceRuntimeView): string {
+  const id = esc(view.instance.instance_id);
+  const items: string[] = [
+    `<button type="button" data-act="detail" data-id="${id}">实例详情</button>`,
+    `<button type="button" data-act="logs" data-id="${id}">查看日志</button>`,
+  ];
+  if (!isExternal(view)) {
+    items.push(`<button type="button" data-act="restart" data-id="${id}">重启</button>`);
+    if (view.instance.role !== "shell") {
+      items.push(
+        `<button type="button" data-act="prepare" data-id="${id}">安装依赖</button>`,
+        `<button type="button" data-act="prepare-offline" data-id="${id}">安装依赖（离线）</button>`,
+      );
+    }
+    if (view.instance.source_kind === "dir") {
+      items.push(`<button type="button" data-act="unlink" data-id="${esc(view.instance.module_id)}">解除登记</button>`);
+    } else {
+      items.push(
+        `<button class="danger" type="button" data-act="uninstall" data-id="${id}">卸载…</button>`,
+      );
+    }
+  }
+  return `
+    <details class="menu" aria-label="更多操作">
+      <summary class="btn btn--quiet btn--sm" aria-label="更多动作">⋯</summary>
+      <div class="menu-body">${items.join("")}</div>
+    </details>
+  `;
+}
+
+/** 卡片底栏：只放模块级动作，实例级动作都在各自实例行上。 */
 function cardFootHtml(moduleId: string, views: InstanceRuntimeView[]): string {
   const id = esc(moduleId);
-  const primary = views.find((view) => !isExternal(view)) ?? views[0];
+  const adminUi = views.find((view) => !isExternal(view))?.admin_ui ?? views[0]?.admin_ui ?? null;
   const canManage = views.some((view) => isRunning(view));
-  const adminUi = primary?.admin_ui ?? null;
   // 声明了 requires_running 的界面，实例没跑起来时不给按钮——
   // 点了只会打开一个连不上的页面。
   const adminReady = adminUi !== null && (!adminUi.requires_running || canManage);
@@ -596,14 +642,7 @@ function cardFootHtml(moduleId: string, views: InstanceRuntimeView[]): string {
       `<button class="btn btn--sm btn--primary" type="button" data-act="confirm-source" data-id="${esc(dirInstance.instance.instance_id)}">确认变更并启动</button>`,
     );
   }
-  // 详情对每个实例都给：同一模块只有一个卡位，但「先确认变更」时也要能看实例详情。
-  if (primary) {
-    parts.push(
-      `<button class="btn btn--sm" type="button" data-act="detail" data-id="${esc(primary.instance.instance_id)}">详情</button>`,
-    );
-  }
-  // 管理页按钮统一叫「设置」。后端仍按模块自报 label 描述它是什么，
-  // 这里只把它放进 title，界面上不再各叫一个名字。
+  // 管理页按 module_id 路由，是模块级入口，留在底栏。
   if (adminUi) {
     const label = esc(adminUi.label);
     parts.push(
@@ -612,41 +651,9 @@ function cardFootHtml(moduleId: string, views: InstanceRuntimeView[]): string {
         : `<button class="btn btn--sm" type="button" data-act="admin" data-id="${id}" disabled title="实例启动后可打开${label}">设置</button>`,
     );
   }
-
-  const menuItems: string[] = [];
-  if (primary) {
-    menuItems.push(`<button type="button" data-act="detail" data-id="${esc(primary.instance.instance_id)}">实例详情</button>`);
-    menuItems.push(`<button type="button" data-act="logs" data-id="${esc(primary.instance.instance_id)}">查看日志</button>`);
-    menuItems.push(`<button type="button" data-act="restart" data-id="${esc(primary.instance.instance_id)}">重启</button>`);
-    if (primary.instance.role !== "auxiliary" && !primary.active) {
-      menuItems.push(`<button type="button" data-act="switch-active" data-id="${esc(primary.instance.instance_id)}">设为 active</button>`);
-    }
-    if (primary.instance.role !== "shell") {
-      menuItems.push(
-        `<button type="button" data-act="prepare" data-id="${esc(primary.instance.instance_id)}">安装依赖</button>`,
-      );
-      menuItems.push(
-        `<button type="button" data-act="prepare-offline" data-id="${esc(primary.instance.instance_id)}">安装依赖（离线）</button>`,
-      );
-    }
-  }
-  menuItems.push(
-    `<button type="button" data-act="toggle" data-id="${id}">${disabled ? "启用模块" : "停用模块"}</button>`,
+  parts.push(
+    `<button class="btn btn--sm" type="button" data-act="toggle" data-id="${id}">${disabled ? "启用模块" : "停用模块"}</button>`,
   );
-  if (primary?.instance.source_kind === "dir") {
-    menuItems.push(`<button type="button" data-act="unlink" data-id="${id}">解除登记</button>`);
-  } else if (primary) {
-    menuItems.push(
-      `<button class="btn danger" type="button" data-act="uninstall" data-id="${esc(primary.instance.instance_id)}" style="border:0;background:transparent;text-align:left;padding:6px 8px;border-radius:4px;font:400 11.5px var(--sans)">卸载…</button>`,
-    );
-  }
-
-  parts.push(`
-    <details class="menu">
-      <summary class="btn btn--quiet btn--sm" aria-label="更多动作">⋯</summary>
-      <div class="menu-body">${menuItems.join("")}</div>
-    </details>
-  `);
 
   return parts.join("");
 }
@@ -848,14 +855,33 @@ async function stopEverythingAndRepaint(): Promise<void> {
 }
 
 async function makeActive(instanceId: string): Promise<void> {
-  try {
-    toast(`正在切换 active：${instanceId}（停旧 → 起新 → 探测）…`);
-    await switchActive(instanceId);
-    toast(`active 已切到 ${instanceId}`, "ok");
-  } catch (error) {
-    toast(`切换失败：${describeError(error)}`, "error");
+  const view = store.views.find((item) => item.instance.instance_id === instanceId);
+  if (view?.active) {
+    toast(`${instanceId} 已经是当前实例`, "ok");
+    return;
   }
-  await refreshModules();
+  confirmModal({
+    title: "设为当前实例？",
+    subtitle: instanceId,
+    confirmLabel: "切换",
+    bodyHtml: `
+      <div class="alert">
+        <b>会停掉当前实例，再启动它</b>
+        切换会停掉本角色当前的实例，启动这个实例，并通过健康与契约探测。
+        任何一步失败都会自动回滚到原实例。实例的数据目录不受影响。
+      </div>
+    `,
+    onConfirm: async () => {
+      try {
+        toast(`正在切换当前实例：${instanceId}（停旧 → 起新 → 探测）…`);
+        await switchActive(instanceId);
+        toast(`当前实例已切到 ${instanceId}`, "ok");
+      } catch (error) {
+        toast(`切换失败：${describeError(error)}`, "error");
+      }
+      await refreshModules();
+    },
+  });
 }
 
 async function confirmSource(instanceId: string): Promise<void> {
@@ -1008,7 +1034,7 @@ function showInstanceDetail(instanceId: string): void {
     ["来源", i.source_kind === "dir" ? `本地源码目录 ${i.source_path ?? ""}` : `zip 包`],
     ["验签判级", `${i.verdict}${i.verdict === "A" ? "（已验签）" : "（需确认）"}`],
     ["端口", view.port === null ? "无（shell/旁路）" : String(view.port)],
-    ["active", view.active ? "是" : "否"],
+    ["当前实例", view.active ? "是" : "否"],
     ["安装时间", i.installed_at],
     ["确认时间", i.confirmed_at],
     ["发布者指纹", i.publisher_fp ?? "—"],
