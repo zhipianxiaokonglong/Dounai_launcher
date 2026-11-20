@@ -45,6 +45,7 @@ const view = {
   sourceId: "all",
   role: "all",
   onlyAvailable: false,
+  sourcesOpen: false,
   loaded: false,
   busy: false,
 };
@@ -56,14 +57,17 @@ export interface DownloadFilter {
   onlyAvailable: boolean;
 }
 
-export interface DownloadGroup {
-  sourceId: string;
-  sourceName: string;
-  role: Role;
-  moduleId: string;
+export interface ModuleVariantGroup {
   variant: string;
-  /** 同一 module_id@variant 的多个版本并列，按版本降序。 */
+  /** 同一变体下各来源、各版本；跨源同名并列，不做隐式优选。 */
   entries: CatalogEntry[];
+}
+
+export interface ModuleGroup {
+  moduleId: string;
+  name: string;
+  role: Role;
+  variants: ModuleVariantGroup[];
 }
 
 /** 纯函数：筛选条件只影响展示，不改变缓存里到底有哪些条目。 */
@@ -97,33 +101,53 @@ function compareVersion(a: string, b: string): number {
   return a.localeCompare(b);
 }
 
-/** 纯函数：来源 → role → module_id → variant 分组，组内多版本并列。 */
-export function groupEntries(entries: CatalogEntry[]): DownloadGroup[] {
-  const groups = new Map<string, DownloadGroup>();
+/**
+ * 纯函数：按模块聚合，模块内按变体分组，变体内各来源与版本并列。
+ *
+ * 与旧的「来源优先」分组不同：同一个 module_id 的 stable 与 nightly
+ * 现在并排在同一张卡里，用户能直接比较；但变体内跨源同名仍各自保留，
+ * 不替用户做优选——优选等于偷偷替用户回答了「你信任哪个源」。
+ */
+export function groupModules(entries: CatalogEntry[]): ModuleGroup[] {
+  const modules = new Map<string, ModuleGroup>();
   for (const entry of entries) {
-    const key = [entry.source_id, entry.role, entry.module_id, entry.variant].join("|");
-    const group = groups.get(key);
-    if (group) group.entries.push(entry);
-    else
-      groups.set(key, {
-        sourceId: entry.source_id,
-        sourceName: entry.source_name,
-        role: entry.role,
+    let group = modules.get(entry.module_id);
+    if (!group) {
+      group = {
         moduleId: entry.module_id,
-        variant: entry.variant,
-        entries: [entry],
-      });
+        name: entry.name || entry.module_id,
+        role: entry.role,
+        variants: [],
+      };
+      modules.set(entry.module_id, group);
+    }
+    let variant = group.variants.find((v) => v.variant === entry.variant);
+    if (!variant) {
+      variant = { variant: entry.variant, entries: [] };
+      group.variants.push(variant);
+    }
+    variant.entries.push(entry);
   }
-  return [...groups.values()]
+  const variantRank = (v: string) => (v === "stable" ? 0 : v === "nightly" ? 1 : 2);
+  return [...modules.values()]
     .map((group) => ({
       ...group,
-      entries: [...group.entries].sort((a, b) => compareVersion(a.version, b.version)),
+      variants: group.variants
+        .map((v) => ({
+          ...v,
+          entries: [...v.entries].sort(
+            (a, b) =>
+              compareVersion(a.version, b.version) || a.source_id.localeCompare(b.source_id),
+          ),
+        }))
+        .sort(
+          (a, b) => variantRank(a.variant) - variantRank(b.variant) || a.variant.localeCompare(b.variant),
+        ),
     }))
-    .sort((a, b) =>
-      a.sourceId.localeCompare(b.sourceId) ||
-      a.role.localeCompare(b.role) ||
-      a.moduleId.localeCompare(b.moduleId) ||
-      a.variant.localeCompare(b.variant),
+    .sort(
+      (a, b) =>
+        ROLE_ORDER.indexOf(a.role) - ROLE_ORDER.indexOf(b.role) ||
+        a.moduleId.localeCompare(b.moduleId),
     );
 }
 
@@ -145,27 +169,42 @@ export async function renderDownload(slots: ViewSlots): Promise<void> {
 /* ------------------------------------------------------------------ */
 
 function renderHead(head: HTMLElement): void {
-  const count = view.catalog?.entries.length ?? 0;
-  const enabled = view.sources?.sources.filter((s) => s.enabled).length ?? 0;
+  const count = visibleEntries().length;
+  const sources = view.sources?.sources ?? [];
   const failed = failedSources(view.catalog?.sources ?? []);
   head.innerHTML = `
     <div>
       <h1>下载</h1>
-      <div class="sub">${enabled} 个启用源 · ${count} 个已验签条目${
-        failed.length ? ` · <span style="color:var(--danger)">${failed.length} 源拉取失败</span>` : ""
+      <div class="sub"><span id="dl-count">${sources.length} 个源 · ${count} 个已验签条目</span>${
+        failed.length ? ` · <span class="dl-fail-count">${failed.length} 源拉取失败</span>` : ""
       }${view.busy ? " · 处理中…" : ""}</div>
     </div>
     <div class="sp">
-      <button class="btn btn--sm" type="button" data-act="add-source">添加源</button>
-      <button class="btn btn--sm" type="button" data-act="refresh">刷新目录</button>
+      <button class="btn btn--sm" type="button" data-act="manage-sources">管理源${failed.length ? ` · ${failed.length} 失败` : ""}</button>
       <button class="btn btn--primary btn--sm" type="button" data-act="refresh-and-list">${view.catalog ? "重新拉取" : "拉取目录"}</button>
     </div>
+    <span id="dl-live" class="sr-only" role="status" aria-live="polite"></span>
   `;
   bindActions(head, [
-    { act: "add-source", run: () => openAddSource() },
-    { act: "refresh", run: () => void loadSources() },
+    { act: "manage-sources", run: () => toggleSources(bodyElement()) },
     { act: "refresh-and-list", run: () => void loadCatalog() },
   ]);
+}
+
+function bodyElement(): HTMLElement {
+  return document.getElementById("pbody") as HTMLElement;
+}
+
+/** 当前筛选条件下的条目，页头计数与结果区共用，避免两处数字对不上。 */
+function visibleEntries(): CatalogEntry[] {
+  const res = view.catalog;
+  if (!res || res.source === "unavailable") return [];
+  return filterEntries(res.entries, {
+    query: view.query,
+    sourceId: view.sourceId,
+    role: view.role,
+    onlyAvailable: view.onlyAvailable,
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -179,7 +218,7 @@ export function failedSources(sources: SourceStatusView[]): SourceStatusView[] {
   );
 }
 
-/** 逐源失败汇总。放在来源列表与筛选器之间，刷新目录后随 catalog 一起更新。 */
+/** 逐源失败汇总：role=alert 让读屏软件播报，重试触发整体重新拉取。 */
 function sourceFailuresHtml(): string {
   const failed = failedSources(view.catalog?.sources ?? []);
   if (!failed.length) return "";
@@ -191,10 +230,11 @@ function sourceFailuresHtml(): string {
         }${s.reason ? `：${esc(s.reason)}` : ""}</li>`,
     )
     .join("");
-  return `<div class="alert" style="margin:12px 0">
+  return `<div class="alert dl-failures" role="alert" style="margin:12px 0">
     <b>${failed.length} 个源拉取失败</b>
-    <p>下面这些源这次没能取到可用的已验签目录，界面只展示其余成功来源的条目。</p>
+    <p>这些源这次没能取到可用的已验签目录，下面只展示其余成功来源的条目。</p>
     <ul style="margin:6px 0 0;padding-left:20px">${rows}</ul>
+    <button class="btn btn--sm" type="button" data-act="retry-sources" style="margin-top:8px">重新拉取全部源</button>
   </div>`;
 }
 
@@ -210,7 +250,6 @@ function renderBody(body: HTMLElement): void {
   }
   body.innerHTML = `
     ${sourcesHtml()}
-    ${sourceFailuresHtml()}
     ${filtersHtml()}
     ${catalogHtml()}
   `;
@@ -221,19 +260,49 @@ function renderBody(body: HTMLElement): void {
 /** 每次重绘都装同一张动作表：bindActions 会替换旧表，不能只给半张。 */
 function bodyActions(body: HTMLElement): Array<{ act: string; run: (el: HTMLElement) => void | Promise<void> }> {
   return [
+    { act: "toggle-sources", run: () => toggleSources(body) },
+    { act: "add-source", run: () => openAddSource() },
     { act: "toggle-source", run: (el) => void toggleSource(el) },
     { act: "revoke-source", run: (el) => void askRevokeSource(el) },
     { act: "remove-source", run: (el) => void askRemoveSource(el) },
     { act: "install", run: (el) => void runInstall(el, false) },
     { act: "install-confirm", run: (el) => void runInstall(el, true) },
+    { act: "copy-fp", run: (el) => void copyFingerprint(el) },
+    { act: "retry-sources", run: () => void loadCatalog() },
     { act: "clear-filter", run: () => {
       view.query = "";
       view.sourceId = "all";
       view.role = "all";
       view.onlyAvailable = false;
-      renderBody(body);
+      const queryEl = body.querySelector<HTMLInputElement>("#dl-query");
+      const sourceEl = body.querySelector<HTMLSelectElement>("#dl-source");
+      const roleEl = body.querySelector<HTMLSelectElement>("#dl-role");
+      const availableEl = body.querySelector<HTMLInputElement>("#dl-available");
+      if (queryEl) queryEl.value = "";
+      if (sourceEl) sourceEl.value = "all";
+      if (roleEl) roleEl.value = "all";
+      if (availableEl) availableEl.checked = false;
+      repaintResults(body);
     } },
   ];
+}
+
+async function copyFingerprint(el: HTMLElement): Promise<void> {
+  const value = el.dataset.value ?? "";
+  try {
+    await navigator.clipboard.writeText(value);
+    toast("已复制指纹", "ok");
+  } catch (error) {
+    toast(`复制失败：${describeError(error)}`, "error");
+  }
+}
+
+function toggleSources(body: HTMLElement): void {
+  view.sourcesOpen = !view.sourcesOpen;
+  renderBody(body);
+  if (view.sourcesOpen) {
+    body.querySelector<HTMLElement>(".dl-sources")?.scrollIntoView({ block: "nearest" });
+  }
 }
 
 function sourcesHtml(): string {
@@ -241,8 +310,22 @@ function sourcesHtml(): string {
   if (sources.length === 0) {
     return `<p class="cap" style="margin:0 0 14px">正在读取源列表…</p>`;
   }
+  const enabled = sources.filter((s) => s.enabled).length;
+  const failed = failedSources(view.catalog?.sources ?? []).length;
+  const summary = `${sources.length} 个源 · ${enabled} 启用${failed ? ` · ${failed} 失败` : ""}`;
+  if (!view.sourcesOpen) {
+    return `<section class="dl-sources">
+      <button class="dl-sources-summary" type="button" data-act="toggle-sources" aria-expanded="false">
+        <b>下载源</b><span class="cap">${esc(summary)}</span><span class="cap">管理 ▾</span>
+      </button>
+    </section>`;
+  }
   return `<section class="dl-sources">
-    <div class="dl-section-head"><b>下载源</b><span class="cap">验 catalog 的公钥只在这里登记，与包信任表分开</span></div>
+    <button class="dl-sources-summary" type="button" data-act="toggle-sources" aria-expanded="true">
+      <b>下载源</b><span class="cap">${esc(summary)}</span><span class="cap">收起 ▴</span>
+    </button>
+    <p class="cap" style="margin:6px 0 8px">验 catalog 的公钥只在这里登记，与包信任表分开</p>
+    <button class="btn btn--sm" type="button" data-act="add-source" style="margin-bottom:8px">添加源</button>
     ${sources.map(sourceRow).join("")}
     <p class="cap dl-allowlist">允许访问的域名：${esc((view.sources?.allowlist ?? []).join("、") || "（空集，不会发出远程请求）")}</p>
   </section>`;
@@ -262,7 +345,7 @@ function sourceRow(source: SourceView): string {
     : `${source.enabled
         ? `<button class="btn btn--sm" type="button" data-act="toggle-source" data-id="${esc(source.id)}" data-enabled="false">禁用</button>`
         : `<button class="btn btn--sm btn--primary" type="button" data-act="toggle-source" data-id="${esc(source.id)}" data-enabled="true">启用</button>`}
-      <button class="btn btn--sm" type="button" data-act="revoke-source" data-id="${esc(source.id)}">撤销公钥</button>
+      <button class="btn btn--sm btn--danger" type="button" data-act="revoke-source" data-id="${esc(source.id)}">撤销公钥</button>
       ${source.deletable ? `<button class="btn btn--sm" type="button" data-act="remove-source" data-id="${esc(source.id)}">删除</button>` : ""}`;
   return `<div class="dl-source${source.enabled ? "" : " is-off"}">
     <div class="dl-source-main">
@@ -297,39 +380,37 @@ function filtersHtml(): string {
   </div>`;
 }
 
+/** 只重绘结果区，同时同步页头计数；不重建页头按钮，避免打断焦点。 */
+function repaintResults(body: HTMLElement): void {
+  const host = body.querySelector("#dl-results");
+  if (host) {
+    host.innerHTML = resultsHtml();
+    bindActions(body, bodyActions(body));
+  }
+  const sourceCount = view.sources?.sources.length ?? 0;
+  const countEl = document.getElementById("dl-count");
+  if (countEl) {
+    countEl.textContent = `${sourceCount} 个源 · ${visibleEntries().length} 个已验签条目`;
+  }
+}
+
 function wireFilters(body: HTMLElement): void {
   body.querySelector<HTMLInputElement>("#dl-query")?.addEventListener("input", (event) => {
     view.query = (event.target as HTMLInputElement).value;
     // 只重绘列表区，避免输入框在每次按键后失焦。
-    const host = body.querySelector("#dl-results");
-    if (host) {
-      host.innerHTML = resultsHtml();
-      bindActions(body, bodyActions(body));
-    }
+    repaintResults(body);
   });
   body.querySelector<HTMLSelectElement>("#dl-source")?.addEventListener("change", (event) => {
     view.sourceId = (event.target as HTMLSelectElement).value;
-    const host = body.querySelector("#dl-results");
-    if (host) {
-      host.innerHTML = resultsHtml();
-      bindActions(body, bodyActions(body));
-    }
+    repaintResults(body);
   });
   body.querySelector<HTMLSelectElement>("#dl-role")?.addEventListener("change", (event) => {
     view.role = (event.target as HTMLSelectElement).value;
-    const host = body.querySelector("#dl-results");
-    if (host) {
-      host.innerHTML = resultsHtml();
-      bindActions(body, bodyActions(body));
-    }
+    repaintResults(body);
   });
   body.querySelector<HTMLInputElement>("#dl-available")?.addEventListener("change", (event) => {
     view.onlyAvailable = (event.target as HTMLInputElement).checked;
-    const host = body.querySelector("#dl-results");
-    if (host) {
-      host.innerHTML = resultsHtml();
-      bindActions(body, bodyActions(body));
-    }
+    repaintResults(body);
   });
 }
 
@@ -340,9 +421,9 @@ function catalogHtml(): string {
 function resultsHtml(): string {
   const res = view.catalog;
   if (!res) return `<p class="cap" style="margin:10px 0 0">点右上「拉取目录」查看已验签条目。官方 catalog 尚未签发时，这里会如实显示不可用原因。</p>`;
-  const note = res.reason ? `<p class="cap" style="margin:10px 0">${esc(res.reason)}</p>` : "";
+  const failures = sourceFailuresHtml();
   if (res.source === "unavailable") {
-    return `${note}<div class="placeholder"><b>目录不可用</b><p>没有跳过验签或「仍然继续」的入口。允许访问的域名：${esc(res.allowlist.join("、") || "（空集）")}</p></div>`;
+    return `${failures}<div class="placeholder"><b>目录不可用</b><p>没有跳过验签或「仍然继续」的入口。允许访问的域名：${esc(res.allowlist.join("、") || "（空集）")}</p></div>`;
   }
   const entries = filterEntries(res.entries, {
     query: view.query,
@@ -350,19 +431,32 @@ function resultsHtml(): string {
     role: view.role,
     onlyAvailable: view.onlyAvailable,
   });
-  if (entries.length === 0) return `${note}<p class="cap" style="margin:10px 0 0">没有符合条件的条目。</p>`;
-  const groups = groupEntries(entries);
-  return `${note}<div class="dl-groups">${groups.map(groupHtml).join("")}</div>`;
+  const note = res.reason ? `<p class="cap" style="margin:10px 0">${esc(res.reason)}</p>` : "";
+  if (entries.length === 0) return `${failures}${note}<p class="cap" style="margin:10px 0 0">没有符合条件的条目。</p>`;
+  const groups = groupModules(entries);
+  return `${failures}${note}<div class="dl-groups">${groups.map(groupHtml).join("")}</div>`;
 }
 
-function groupHtml(group: DownloadGroup): string {
+/** 模块卡：卡头是模块名与角色，下面每个变体一段，stable 在前、nightly 在后。 */
+function groupHtml(group: ModuleGroup): string {
   return `<section class="dl-group">
     <div class="dl-group-head">
-      <b>${esc(group.sourceName)}</b>
-      <span class="cap">${esc(ROLE_TITLE[group.role] ?? group.role)} · ${esc(group.moduleId)}@${esc(group.variant)} · ${group.entries.length} 个版本</span>
+      <b>${esc(group.name)}</b>
+      <span class="chip">${esc(ROLE_TITLE[group.role] ?? group.role)}</span>
+      <span class="cap">${esc(group.moduleId)}</span>
     </div>
-    ${group.entries.map(entryRow).join("")}
+    ${group.variants.map(variantHtml).join("")}
   </section>`;
+}
+
+function variantHtml(variant: ModuleVariantGroup): string {
+  const tag = variant.variant === "nightly"
+    ? `<span class="chip chip--warn">每日构建</span>`
+    : `<span class="chip">${esc(variant.variant)}</span>`;
+  return `<div class="dl-variant">
+    <div class="dl-variant-head">${tag}<span class="cap">${variant.entries.length} 个版本</span></div>
+    ${variant.entries.map(entryRow).join("")}
+  </div>`;
 }
 
 function stateChip(entry: CatalogEntry): string {
@@ -374,6 +468,18 @@ function stateChip(entry: CatalogEntry): string {
   return "";
 }
 
+/** 指纹里的类型前缀与值分开：值单独成段，复制只取值本身。 */
+function fingerprintLine(label: string, value: string, short = false): string {
+  const text = esc(value);
+  const shown = short && value.length > 24 ? `${esc(value.slice(0, 12))}…${esc(value.slice(-8))}` : text;
+  return `<div class="dl-fp-row">
+    <span class="cap">${esc(label)}</span>
+    <code class="fp" title="${text}">${shown}</code>
+    <button class="btn btn--sm" type="button" data-act="copy-fp" data-value="${text}" aria-label="复制${esc(label)}">复制</button>
+  </div>`;
+}
+
+/** 条目行：默认只显示决策信息；三枚指纹收进原生 details，键盘可达、无需额外状态。 */
 function entryRow(entry: CatalogEntry): string {
   const blocked = entry.source_revoked || entry.revoked || entry.installed_state === "downgrade"
     || entry.installed_state === "incompatible";
@@ -382,12 +488,17 @@ function entryRow(entry: CatalogEntry): string {
     : entry.installed_state === "upgrade" ? "升级" : "安装";
   return `<div class="cat-row" data-key="${esc(entry.entry_key)}">
     <div class="cat-main">
-      <div><b>${esc(entry.name || entry.module_id)}</b> ${stateChip(entry)}</div>
-      <span class="cap">v${esc(entry.version)} · ${esc(entry.source_name)}（${entry.source_kind === "official" ? "官方" : "社区"}） · ${formatBytes(entry.size)}</span>
-      <code class="fp">catalog ${esc(entry.catalog_fingerprint)}</code>
-      <code class="fp">publisher ${esc(entry.publisher_fp)}</code>
-      <code class="fp">${esc(entry.sha256)}</code>
-      ${entry.note ? `<span class="cap">${esc(entry.note)}</span>` : ""}
+      <div><b>v${esc(entry.version)}</b> ${stateChip(entry)}</div>
+      <span class="cap">${esc(entry.source_name)}（${entry.source_kind === "official" ? "官方" : "社区"}） · ${formatBytes(entry.size)}${entry.note ? ` · ${esc(entry.note)}` : ""}</span>
+      <details class="dl-verify">
+        <summary>验签详情</summary>
+        <div class="dl-verify-body">
+          ${fingerprintLine("catalog 指纹", entry.catalog_fingerprint)}
+          ${fingerprintLine("发布者指纹", entry.publisher_fp)}
+          ${fingerprintLine("包 sha256", entry.sha256)}
+          <p class="cap">安装时按这三项逐条核验；信任下载位置不等于信任发布者签的任意包。</p>
+        </div>
+      </details>
     </div>
     <div class="cat-side">
       <button class="btn btn--sm${blocked ? "" : " btn--primary"}" type="button" data-act="install"${blocked ? " disabled" : ""}>${label}</button>
@@ -418,20 +529,33 @@ async function loadSources(): Promise<void> {
 async function loadCatalog(): Promise<void> {
   view.busy = true;
   refreshCurrent();
+  let announcement = "";
   try {
     view.catalog = await refreshCatalog();
     view.sources = await listSources();
+    const failed = failedSources(view.catalog.sources).length;
     if (view.catalog.source === "unavailable") {
-      toast(`目录不可用：${view.catalog.reason ?? "未知原因"}`, "error");
+      announcement = `目录不可用：${view.catalog.reason ?? "未知原因"}`;
+      toast(announcement, "error");
     } else {
+      announcement = `已拉取 ${view.catalog.entries.length} 条，${failed ? `${failed} 个源失败，` : ""}来源 ${view.catalog.source}`;
       toast(`已拉取 ${view.catalog.entries.length} 条（${view.catalog.source}）`, "ok");
     }
   } catch (error) {
-    toast(`拉取目录失败：${describeError(error)}`, "error");
+    announcement = `拉取目录失败：${describeError(error)}`;
+    toast(announcement, "error");
   } finally {
     view.busy = false;
     refreshCurrent();
+    announce(announcement);
   }
+}
+
+/** 拉取结果写进页头的 live region；节点可能刚被 refreshCurrent 重建，按 id 现查。 */
+function announce(message: string): void {
+  if (!message) return;
+  const el = document.getElementById("dl-live");
+  if (el) el.textContent = message;
 }
 
 function refreshCurrent(): void {

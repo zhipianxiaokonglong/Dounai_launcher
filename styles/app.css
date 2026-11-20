@@ -1622,6 +1622,119 @@ select.input:focus-visible {
   margin-bottom: 6px;
 }
 
+/* 视觉隐藏但对读屏软件可见：用于 aria-live 拉取结果播报。 */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.dl-fail-count {
+  color: var(--danger-fg);
+  font-weight: 600;
+}
+
+.dl-failures {
+  border-color: rgba(239, 68, 68, 0.4);
+}
+
+/* 源管理摘要条：默认折叠，点开才展开指纹与高危操作。 */
+.dl-sources-summary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 9px 12px;
+  margin: 0 0 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
+  background: var(--panel-2);
+  color: var(--fg-1);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.dl-sources-summary:hover {
+  border-color: var(--line-2);
+}
+
+.dl-sources-summary .cap:last-child {
+  margin-left: auto;
+}
+
+/* 变体分段：stable 与 nightly 在同一模块卡内上下并列。 */
+.dl-variant {
+  margin-top: 8px;
+}
+
+.dl-variant-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 5px;
+}
+
+.dl-variant-head .cap {
+  margin: 0;
+}
+
+/* 验签详情：原生 details，默认收起三行指纹，键盘可达。 */
+.dl-verify {
+  margin-top: 5px;
+  font-size: 11px;
+}
+
+.dl-verify summary {
+  cursor: pointer;
+  color: var(--fg-3);
+  width: fit-content;
+}
+
+.dl-verify summary:hover {
+  color: var(--fg-2);
+}
+
+.dl-verify-body {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 6px 0 2px;
+}
+
+.dl-verify-body .cap {
+  margin: 0;
+}
+
+.dl-fp-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dl-fp-row .cap {
+  flex: 0 0 82px;
+}
+
+.dl-fp-row .fp {
+  flex: 1;
+  padding: 3px 6px;
+  border-color: var(--line-2);
+  background: transparent;
+  font-size: 10px;
+}
+
+.dl-fp-row .btn {
+  flex: 0 0 auto;
+}
+
 /* ---------------- 链路（M6） ---------------- */
 
 .chain-card {
