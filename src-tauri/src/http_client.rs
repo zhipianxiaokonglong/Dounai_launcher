@@ -25,16 +25,31 @@ pub struct ReqwestClient {
 }
 
 impl ReqwestClient {
+    /// 默认按系统代理设置构造，保持既有调用与测试语义不变。
     pub fn new(timeout: Duration, host_suffixes: Vec<String>) -> Result<Self, String> {
+        Self::with_proxy(
+            timeout,
+            host_suffixes,
+            &crate::state_v2::ProxyConfig::System,
+        )
+    }
+
+    /// 按用户代理设置构造包下载客户端。
+    pub fn with_proxy(
+        timeout: Duration,
+        host_suffixes: Vec<String>,
+        proxy: &crate::state_v2::ProxyConfig,
+    ) -> Result<Self, String> {
         if host_suffixes.is_empty() {
             return Err("该源没有出网白名单，拒绝发起请求".into());
         }
         // 跳转由本文件手动跟随：自动跟随时中间跳不可见，无法逐跳校验。
-        let client = reqwest::blocking::Client::builder()
+        let builder = reqwest::blocking::Client::builder()
             .timeout(timeout)
             .connect_timeout(Duration::from_secs(10))
             .redirect(reqwest::redirect::Policy::none())
-            .user_agent("dounai-launcher/0.3.1")
+            .user_agent("dounai-launcher/0.3.1");
+        let client = crate::proxy::apply(builder, proxy)?
             .build()
             .map_err(|e| format!("创建 HTTP 客户端失败：{e}"))?;
         Ok(Self {
@@ -45,6 +60,14 @@ impl ReqwestClient {
 
     pub fn default_client(host_suffixes: Vec<String>) -> Result<Self, String> {
         Self::new(Duration::from_secs(60), host_suffixes)
+    }
+
+    /// 按用户代理设置构造默认超时的包下载客户端。
+    pub fn default_client_with_proxy(
+        host_suffixes: Vec<String>,
+        proxy: &crate::state_v2::ProxyConfig,
+    ) -> Result<Self, String> {
+        Self::with_proxy(Duration::from_secs(60), host_suffixes, proxy)
     }
 
     /// 校验一个待请求地址：https（或本机回环 http），且主机在本源白名单后缀内。

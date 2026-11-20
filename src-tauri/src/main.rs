@@ -173,6 +173,9 @@ fn main() {
             dounai_launcher::commands_v2::close_behavior,
             dounai_launcher::commands_v2::set_close_behavior,
             dounai_launcher::commands_v2::resolve_close,
+            // 启动器自身 HTTP 客户端的代理：关 / 系统 / 手动。
+            dounai_launcher::commands_v2::proxy_config,
+            dounai_launcher::commands_v2::set_proxy_config,
             dounai_launcher::commands_v2::storage_facts,
             dounai_launcher::commands_v2::reclaim_storage,
             dounai_launcher::commands_v2::onboarding_state,

@@ -145,6 +145,53 @@ pub struct ClosePolicyFile {
     pub behavior: CloseBehavior,
 }
 
+/// 启动器自身 HTTP 客户端的代理模式。
+///
+/// 只作用于目录拉取与包下载，不作用于本机实例的 health 探测，也不外溢到子进程
+/// （子进程的网络由它自己的环境决定，见 docs/SECURITY.md）。
+/// `Off` 显式关闭代理，避免环境变量里的全局代理偷偷生效；`System` 交给 reqwest
+/// 按平台约定读取；`Manual` 用用户填的单个代理 URL（http/https/socks5）。
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum ProxyConfig {
+    Off,
+    #[default]
+    System,
+    Manual {
+        #[serde(default)]
+        url: String,
+    },
+}
+
+impl ProxyConfig {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::System => "system",
+            Self::Manual { .. } => "manual",
+        }
+    }
+
+    /// 手动模式的代理 URL；Off/System 返回 None。
+    pub fn url(&self) -> Option<&str> {
+        match self {
+            Self::Manual { url } => Some(url),
+            _ => None,
+        }
+    }
+
+    pub fn parse(mode: &str, url: &str) -> Option<Self> {
+        match mode {
+            "off" => Some(Self::Off),
+            "system" => Some(Self::System),
+            "manual" => Some(Self::Manual {
+                url: url.trim().to_string(),
+            }),
+            _ => None,
+        }
+    }
+}
+
 /// 诊断设置：目前只有「是否捕获子进程输出」。
 ///
 /// 子进程的 stdout/stderr 里可能有用户的对话内容，默认丢弃；打开后新拉起的
@@ -210,6 +257,8 @@ pub struct AppStateV2 {
     diagnostics: Mutex<Diagnostics>,
     /// 关闭主窗口时的行为。落盘到 `state/close-behavior.json`。
     close_behavior: Mutex<CloseBehavior>,
+    /// 启动器自身 HTTP 客户端的代理模式。落盘到 `state/proxy.json`。
+    proxy: Mutex<ProxyConfig>,
     /// 已经决定退出。托盘「退出」与用户选「停止并退出」都会置位，
     /// 窗口关闭事件据此放行——否则「收进托盘」的拦截会把自己的退出也挡掉。
     pub quitting: AtomicBool,
@@ -317,6 +366,9 @@ impl AppStateV2 {
             Ok(ClosePolicyFile::default())
         })?
         .behavior;
+        let proxy = load_or(&paths.state_dir().join("proxy.json"), || {
+            Ok(ProxyConfig::default())
+        })?;
         Ok(Self {
             paths,
             installed: Mutex::new(installed),
@@ -331,6 +383,7 @@ impl AppStateV2 {
             diagnostics: Mutex::new(diagnostics),
             onboarding: Mutex::new(onboarding),
             close_behavior: Mutex::new(close_behavior),
+            proxy: Mutex::new(proxy),
             quitting: AtomicBool::new(false),
             tray_ready: AtomicBool::new(false),
             install_note,
@@ -484,6 +537,27 @@ impl AppStateV2 {
         .map_err(|e| format!("保存关闭行为失败：{e}"))?;
         *guard = behavior;
         Ok(behavior)
+    }
+
+    pub fn proxy_path(&self) -> PathBuf {
+        self.paths.state_dir().join("proxy.json")
+    }
+
+    pub fn proxy(&self) -> ProxyConfig {
+        lock(&self.proxy).clone()
+    }
+
+    pub fn set_proxy(&self, config: ProxyConfig) -> Result<ProxyConfig, String> {
+        // 手动模式的 URL 必须能在建 client 时被 reqwest 接受；在写盘前先校验，
+        // 避免存了一个坏 URL、每次启动都建 client 失败却改不回来。
+        if let Some(url) = config.url() {
+            reqwest::Proxy::all(url).map_err(|e| format!("代理地址不合法：{e}"))?;
+        }
+        let mut guard = lock(&self.proxy);
+        launcher_core::state::write_json(&self.proxy_path(), &config)
+            .map_err(|e| format!("保存代理设置失败：{e}"))?;
+        *guard = config.clone();
+        Ok(config)
     }
 
     pub fn is_quitting(&self) -> bool {

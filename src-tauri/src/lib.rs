@@ -14,6 +14,7 @@ pub mod lifecycle_ops;
 pub mod lifecycle_runtime;
 pub mod m2_http;
 pub mod process;
+pub mod proxy;
 pub mod release;
 pub mod state_v2;
 pub mod usage;

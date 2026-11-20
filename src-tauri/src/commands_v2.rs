@@ -2045,6 +2045,7 @@ pub fn refresh_catalog(state: State<'_, AppStateV2>) -> CatalogResponse {
 fn refresh_catalog_impl(state: &AppStateV2) -> CatalogResponse {
     let registry = state.sources();
     let allowlist = registry.allowlist();
+    let proxy = state.proxy();
     let enabled: Vec<SourceEntry> = registry.enabled().into_iter().cloned().collect();
     if enabled.is_empty() {
         return CatalogResponse {
@@ -2075,7 +2076,7 @@ fn refresh_catalog_impl(state: &AppStateV2) -> CatalogResponse {
         let previous = registry.watermark(OFFICIAL_GROUP);
         let mut candidates: Vec<(u32, Result<_, SourceError>)> = Vec::new();
         for source in &official {
-            match ReqwestCatalogFetcher::new(source.host_suffixes.clone()) {
+            match ReqwestCatalogFetcher::with_proxy(source.host_suffixes.clone(), &proxy) {
                 Ok(fetcher) => {
                     let result = match source_adapter(source, &registry, &fetcher).fetch_catalog() {
                         Ok(Some(doc)) => Ok(doc),
@@ -2123,7 +2124,8 @@ fn refresh_catalog_impl(state: &AppStateV2) -> CatalogResponse {
 
     // 社区源：每个发布者各自验签、各自裁决，不用官方组的序号压自己。
     for source in enabled.iter().filter(|s| s.kind != SourceClass::Official) {
-        let fetcher = match ReqwestCatalogFetcher::new(source.host_suffixes.clone()) {
+        let fetcher = match ReqwestCatalogFetcher::with_proxy(source.host_suffixes.clone(), &proxy)
+        {
             Ok(client) => client,
             Err(error) => {
                 statuses.push(source_status(source, "unavailable", Some(error)));
@@ -2204,14 +2206,13 @@ fn refresh_catalog_impl(state: &AppStateV2) -> CatalogResponse {
             *current = next;
             Ok(())
         });
-        unavailable(
-            &allowlist,
-            statuses
-                .iter()
-                .filter_map(|s| s.reason.as_ref().map(|r| format!("{}：{r}", s.name)))
-                .collect::<Vec<_>>()
-                .join("；"),
-        )
+        // 先把逐源原因拼进总提示，再把 statuses 原样交给前端渲染明细。
+        let reason = statuses
+            .iter()
+            .filter_map(|s| s.reason.as_ref().map(|r| format!("{}：{r}", s.name)))
+            .collect::<Vec<_>>()
+            .join("；");
+        unavailable_with_sources(&allowlist, statuses, reason)
     } else {
         CatalogResponse {
             source: "cache".into(),
@@ -2338,10 +2339,19 @@ fn catalog_entries(
 }
 
 fn unavailable(allowlist: &[String], reason: String) -> CatalogResponse {
+    unavailable_with_sources(allowlist, Vec::new(), reason)
+}
+
+/// 全源失败时的响应：保留逐源状态明细，前端才能显示"哪些源拉取失败"。
+fn unavailable_with_sources(
+    allowlist: &[String],
+    statuses: Vec<SourceStatusView>,
+    reason: String,
+) -> CatalogResponse {
     CatalogResponse {
         source: "unavailable".into(),
         entries: Vec::new(),
-        sources: Vec::new(),
+        sources: statuses,
         allowlist: allowlist.to_vec(),
         reason: Some(reason),
     }
@@ -3498,7 +3508,10 @@ fn install_from_catalog_impl(
         return Err(format!("非法的下载文件名：{file_name}"));
     }
     let dest = state.paths.data_root.join("downloads").join(&file_name);
-    let client = crate::http_client::ReqwestClient::default_client(cached.host_suffixes.clone())?;
+    let client = crate::http_client::ReqwestClient::default_client_with_proxy(
+        cached.host_suffixes.clone(),
+        &state.proxy(),
+    )?;
     let options = crate::download::DownloadOptions {
         retries: 2,
         backoff_ms: 150,
@@ -3572,6 +3585,23 @@ pub async fn install_from_catalog(
 /// 指纹全部用编译期内嵌值，界面不自行拼装字符串——指纹是必须一眼看出来
 /// 的东西，不能出现「界面显示 A、判定用 B」。catalog 公钥改由「下载」页
 /// 的源列表展示，每个源各有自己的指纹。
+/// 设置页回显用的代理配置。平铺成 mode + url 两个字段，前端不必处理
+/// serde 的 tagged enum 形状。
+#[derive(Debug, Serialize)]
+pub struct ProxyConfigView {
+    pub mode: String,
+    pub url: String,
+}
+
+impl From<&crate::state_v2::ProxyConfig> for ProxyConfigView {
+    fn from(config: &crate::state_v2::ProxyConfig) -> Self {
+        Self {
+            mode: config.as_str().to_string(),
+            url: config.url().unwrap_or_default().to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct SettingsSnapshot {
     pub trust: launcher_core::m2::trust::TrustStore,
@@ -3582,6 +3612,8 @@ pub struct SettingsSnapshot {
     pub install_note: Option<String>,
     /// 新拉起的实例是否捕获子进程 stdout/stderr。
     pub child_output: bool,
+    /// 启动器自身 HTTP 客户端的代理模式。
+    pub proxy: ProxyConfigView,
 }
 
 #[tauri::command]
@@ -3589,6 +3621,7 @@ pub fn settings_snapshot(state: State<'_, AppStateV2>) -> SettingsSnapshot {
     let trust = state.with_trust(|store| store.clone());
     let retention = state.with_retention(|policy| policy.clone());
     let k5_fingerprint = crate::state_v2::BUILTIN_K5_FINGERPRINT.to_string();
+    let proxy = state.proxy();
     SettingsSnapshot {
         trust,
         retention,
@@ -3596,6 +3629,7 @@ pub fn settings_snapshot(state: State<'_, AppStateV2>) -> SettingsSnapshot {
         k5_fingerprint,
         install_note: state.install_note.clone(),
         child_output: state.child_output(),
+        proxy: ProxyConfigView::from(&proxy),
     }
 }
 
@@ -3658,6 +3692,34 @@ pub fn resolve_close(
         let _ = window.hide();
     }
     Ok(())
+}
+
+/* ------------------------------------------------------------------ */
+/* 代理                                                                */
+/* ------------------------------------------------------------------ */
+
+/// 当前代理配置。设置页用它回显三态与手动 URL。
+#[tauri::command]
+pub fn proxy_config(state: State<'_, AppStateV2>) -> ProxyConfigView {
+    ProxyConfigView::from(&state.proxy())
+}
+
+/// 设置代理模式。mode 取 off / system / manual，manual 必须给合法 URL。
+#[tauri::command]
+pub fn set_proxy_config(
+    mode: String,
+    url: String,
+    state: State<'_, AppStateV2>,
+) -> Result<ProxyConfigView, String> {
+    let parsed = crate::state_v2::ProxyConfig::parse(&mode, &url)
+        .ok_or_else(|| format!("未知的代理模式：{mode}"))?;
+    if matches!(parsed, crate::state_v2::ProxyConfig::Manual { .. })
+        && parsed.url().is_none_or(|u| u.is_empty())
+    {
+        return Err("手动代理必须填写地址".into());
+    }
+    let next = state.set_proxy(parsed)?;
+    Ok(ProxyConfigView::from(&next))
 }
 
 /* ------------------------------------------------------------------ */

@@ -34,17 +34,26 @@ pub struct ReqwestCatalogFetcher {
 }
 
 impl ReqwestCatalogFetcher {
-    /// `host_suffixes` 来自 sources.json 的单个源，不含其它发布者的域名。
+    /// 默认按系统代理设置构造，保持既有调用与测试语义不变。
     pub fn new(host_suffixes: Vec<String>) -> Result<Self, String> {
+        Self::with_proxy(host_suffixes, &crate::state_v2::ProxyConfig::System)
+    }
+
+    /// 按用户代理设置构造 catalog 客户端。
+    pub fn with_proxy(
+        host_suffixes: Vec<String>,
+        proxy: &crate::state_v2::ProxyConfig,
+    ) -> Result<Self, String> {
         if host_suffixes.is_empty() {
             return Err("该源没有出网白名单，拒绝发起请求".into());
         }
-        let client = reqwest::blocking::Client::builder()
+        let builder = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(10))
             .connect_timeout(Duration::from_secs(5))
             // 跳转由本文件手动跟随：自动跟随看不到中间跳，等于绕过白名单。
             .redirect(reqwest::redirect::Policy::none())
-            .user_agent("dounai-launcher/0.3.1")
+            .user_agent("dounai-launcher/0.3.1");
+        let client = crate::proxy::apply(builder, proxy)?
             .build()
             .map_err(|e| format!("创建 HTTP 客户端失败：{e}"))?;
         Ok(Self {
