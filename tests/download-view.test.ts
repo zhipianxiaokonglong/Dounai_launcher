@@ -8,10 +8,13 @@
  *    「你信任哪个源」这件事偷偷替用户回答了。
  * 2. **同源多版本并列**。同一 module_id@variant 的多个版本要排在一起，
  *    按版本从新到旧排，用户能直接看出哪个是新的。
+ *
+ * 分组按模块聚合：同一模块的 stable 与 nightly 并排在同一张卡里比较，
+ * 但变体内仍按来源与版本逐条列出，语义不变。
  */
 
 import { describe, expect, it } from "vitest";
-import { failedSources, filterEntries, groupEntries } from "../src/ui/views/download.js";
+import { failedSources, filterEntries, groupModules } from "../src/ui/views/download.js";
 import type { CatalogEntry, SourceStatusView } from "../src/bridge.js";
 
 function entry(over: Partial<CatalogEntry> & Pick<CatalogEntry, "entry_key">): CatalogEntry {
@@ -53,6 +56,13 @@ const ENTRIES: CatalogEntry[] = [
     version: "0.9.0",
   }),
   entry({
+    entry_key: "nightly:dounai/input:nightly:2026.11.20",
+    source_id: "nightly-gh",
+    source_name: "官方 Nightly",
+    variant: "nightly",
+    version: "2026.11.20",
+  }),
+  entry({
     entry_key: "official:dounai/model:stable:2.0.0",
     module_id: "dounai/model",
     variant: "stable",
@@ -66,7 +76,7 @@ describe("filterEntries", () => {
   const all = { query: "", sourceId: "all", role: "all", onlyAvailable: false };
 
   it("不过滤时原样返回", () => {
-    expect(filterEntries(ENTRIES, all)).toHaveLength(4);
+    expect(filterEntries(ENTRIES, all)).toHaveLength(5);
   });
 
   it("按来源过滤", () => {
@@ -81,7 +91,7 @@ describe("filterEntries", () => {
 
   it("按关键词过滤名称、模块 ID、变体与来源名", () => {
     expect(filterEntries(ENTRIES, { ...all, query: "模型" })).toHaveLength(1);
-    expect(filterEntries(ENTRIES, { ...all, query: "dounai/input" })).toHaveLength(3);
+    expect(filterEntries(ENTRIES, { ...all, query: "dounai/input" })).toHaveLength(4);
     expect(filterEntries(ENTRIES, { ...all, query: "社区" })).toHaveLength(1);
     expect(filterEntries(ENTRIES, { ...all, query: "不存在的词" })).toHaveLength(0);
   });
@@ -109,35 +119,43 @@ describe("filterEntries", () => {
   });
 });
 
-describe("groupEntries", () => {
-  it("跨源同名分成两组，不做隐式优选", () => {
-    const groups = groupEntries(ENTRIES);
-    const inputGroups = groups.filter((g) => g.moduleId === "dounai/input");
-    expect(inputGroups).toHaveLength(2);
-    expect(inputGroups.map((g) => g.sourceId).sort()).toEqual(["community", "official"]);
+describe("groupModules", () => {
+  it("按模块聚合：同一模块的 stable 与 nightly 在同一张卡里", () => {
+    const groups = groupModules(ENTRIES);
+    const input = groups.find((g) => g.moduleId === "dounai/input");
+    expect(input).toBeDefined();
+    expect(input?.variants.map((v) => v.variant)).toEqual(["stable", "nightly"]);
+    expect(groups).toHaveLength(2);
   });
 
-  it("同一 module_id@variant 的多个版本并列，按版本从新到旧", () => {
-    const groups = groupEntries(ENTRIES);
-    const official = groups.find((g) => g.sourceId === "official" && g.moduleId === "dounai/input");
-    expect(official?.entries.map((e) => e.version)).toEqual(["1.2.0", "1.0.0"]);
+  it("跨源同名并列在同一变体内，不做隐式优选", () => {
+    const groups = groupModules(ENTRIES);
+    const stable = groups
+      .find((g) => g.moduleId === "dounai/input")
+      ?.variants.find((v) => v.variant === "stable");
+    // official 的两条版本与 community 的一条都在，三条并存。
+    expect(stable?.entries.map((e) => e.source_id).sort()).toEqual([
+      "community",
+      "official",
+      "official",
+    ]);
   });
 
-  it("组内版本排序不依赖传入顺序", () => {
-    const shuffled = [ENTRIES[1]!, ENTRIES[0]!, ENTRIES[3]!, ENTRIES[2]!];
-    const groups = groupEntries(shuffled);
-    const official = groups.find((g) => g.sourceId === "official" && g.moduleId === "dounai/input");
-    expect(official?.entries.map((e) => e.version)).toEqual(["1.2.0", "1.0.0"]);
+  it("同一变体的多个版本按新到旧排，不依赖传入顺序", () => {
+    const shuffled = [ENTRIES[1]!, ENTRIES[0]!, ENTRIES[2]!, ENTRIES[3]!, ENTRIES[4]!];
+    const stable = groupModules(shuffled)
+      .find((g) => g.moduleId === "dounai/input")
+      ?.variants.find((v) => v.variant === "stable");
+    expect(stable?.entries.map((e) => e.version)).toEqual(["1.2.0", "1.0.0", "0.9.0"]);
   });
 
-  it("组之间的顺序稳定：来源 → 角色 → 模块 ID → 变体", () => {
-    const groups = groupEntries(ENTRIES);
-    const keys = groups.map((g) => [g.sourceId, g.role, g.moduleId, g.variant].join("|"));
-    expect(keys).toEqual([...keys].sort());
+  it("模块之间按角色顺序排：输入模块在模型模块之前", () => {
+    const groups = groupModules(ENTRIES);
+    expect(groups.map((g) => g.moduleId)).toEqual(["dounai/input", "dounai/model"]);
   });
 
   it("空列表返回空分组", () => {
-    expect(groupEntries([])).toEqual([]);
+    expect(groupModules([])).toEqual([]);
   });
 });
 
