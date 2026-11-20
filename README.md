@@ -1,75 +1,116 @@
 # Dounai 启动器
 
-Dounai 启动器管理模块的安装、环境与进程生命周期。产品主体（悬浮窗与 UI 总装层）在 [Dounai](https://github.com/zhipianxiaokonglong/Dounai) 仓库。
+在 Windows 上管理 Dounai 模块的安装、环境与进程生命周期的桌面应用。产品主体（悬浮窗与界面总装层）在 [Dounai 仓库](https://github.com/zhipianxiaokonglong/Dounai)。
 
-## 当前状态
+[![CI](https://github.com/zhipianxiaokonglong/Dounai_launcher/actions/workflows/ci.yml/badge.svg)](https://github.com/zhipianxiaokonglong/Dounai_launcher/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/zhipianxiaokonglong/Dounai_launcher)](https://github.com/zhipianxiaokonglong/Dounai_launcher/releases/latest)
+[![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
+![Windows](https://img.shields.io/badge/platform-Windows%2010%2F11-blue.svg)
 
-本仓库处于 v2 重构期。`refactor/launcher-v2` 分支已冻结 M0 契约。M1 到 M3 的代码已提交到该分支，含环境引擎、双源包信任与生命周期命令面。v1 的进程管理、状态库与命令面已删除，Tauri 命令面由 `src-tauri/src/commands_v2.rs` 提供。界面在 M4 重写为深浅双主题与多视图，M8 加“下载”、M6 加“链路”后共八个视图；在线安装（SourceForge 签名目录）、首次向导与内嵌子 WebView 均已接通。
+## 快速开始
+
+### 下载与安装
+
+打开[最新版发布页](https://github.com/zhipianxiaokonglong/Dounai_launcher/releases/latest)，按用途下载一个文件。
+
+| 文件 | 用途 |
+|---|---|
+| NSIS 安装包 | 装到 `%LOCALAPPDATA%\Dounai Launcher`，带开始菜单入口 |
+| 便携 exe | 单文件运行，数据根落在程序目录旁 |
+| `SHA256SUMS.txt` | 两个 exe 的 SHA-256 |
+
+安装步骤：
+
+1. 下载 NSIS 安装包。
+2. 双击安装包。
+3. 按提示完成安装。
+4. 从开始菜单启动 Dounai 启动器。
+
+注意：安装器会索要管理员权限。实际安装模式写在 `state/install.json`，取值为 `current_user` 或 `per_machine`。便携 exe 写 `portable`。
+
+### 首次使用
+
+1. 打开左侧“下载”页。
+2. 拉取目录。
+3. 安装需要的模块。
+4. 打开“模块”页。
+5. 点击“一键启动”。
+
+说明：官方模块包与目录托管在 [SourceForge 的 dounai-releases 项目](https://sourceforge.net/projects/dounai-releases/)。代理可在“设置”页配置，支持关闭、使用系统代理和手动配置。
+
+## 功能
+
+- **多源下载**：官方源与社区源并存。每个源绑定自己的目录签名公钥，添加时必须确认完整指纹。跨源同名条目并列展示，安装目标由选中的条目决定。
+- **内置 Nightly 源**：`Tonyjh07/Dounai_nightly` 每天构建四个模块，按日期版本号发布。目标机器不用连接 GitHub API 也能拉取。
+- **当前实例**：同一角色只有一个当前实例占用规范端口。每个实例行都有“当前实例 / 设为当前”控件。切换前需确认，失败时自动回滚。
+<!-- stc-disable-next-line: 下一行含 M6 产品术语，STC G6 判为套话属误报 -->
+- **启动编排**：默认链路按角色拓扑从当前实例现算。启动步骤之间不等待健康结论。单步失败不中止其余步骤。也支持保存自定义链路。
+<!-- stc-disable-next-line: 下一行含 M6 产品术语，STC G6 判为套话属误报 -->
+- **链路管理**：自定义链路保存在 `state/chains.json`。删除实例后，链路保留原值并标出缺失步骤。
+- **资源采样**：概览页按实例显示 CPU 与内存。外部启动的实例没有进程句柄，恒显示 `—`。
+- **日志**：模块进程与装依赖细节写入 `instances/<key>/logs/`。启动器操作摘要写入 `logs/`，单文件超过 2 MiB 轮转，保留 3 份。
+- **签名验证**：K1 公钥验模块包，K5 公钥验目录。目录签名公钥与包信任表物理隔离，加源流程不会写包信任表。
+
+## 已知限制
 
 - 仅支持 Windows 10 与 Windows 11。
-- 不读取 v1 包格式，不设兼容层。v1 包格式从未打包分发。
-- `src-tauri/src/` 是 v2 命令面与进程托管，`src-tauri/core/` 是不依赖 Tauri 的独立 crate；`src/` 是 M4 重写的界面：`index.html` 只有骨架，视图与共享层在 `src/ui/`。
-- 在线安装已接通：K1 与 K5 于 2026-11-13 生成并内置，模块包与 K5 签名的 catalog 都托管在 [SourceForge 的 dounai-releases 项目](https://sourceforge.net/projects/dounai-releases/)，入口在左侧导航的“下载”页。catalog 有效期上限 7 天，过期后会明确报“已过期”，不降级放行。
-- 目录（catalog）已独立成“下载”页：可添加社区源，每个源绑定一把自己的 catalog 签名公钥并显式确认后才启用；跨源同名条目并列展示，安装目标由用户点选的那一行决定。目录签名公钥与包签名公钥物理隔离：前者在 `state/sources.json`，后者在 `state/trust.json`，加源流程不会写包信任表。
-  <!-- stc-disable-next-line: 下一行含 M6 产品术语，STC G6 判为套话属误报 -->
-- 链路编排（M6）：`state/chains.json` 只存用户自定义链路，默认链路不落盘，按 role 拓扑从当前 active 实例现算：每个角色只取 active 那一个，没有 active 槽的总装与辅助角色保留全部。切换 active 后一键启动不会把被替换的实例又拉起来。模块页“一键启动”即启动默认链路，与自定义链路共用一轮批量提交，步骤之间不等待健康结论；单步失败不中止其余步骤，卡片按“第 N 步”定位。
-- 日志分两类，写入数据根的 `instances/<key>/logs/`（模块进程与装依赖细节）和 `logs/`（启动器操作摘要）：启动器事件默认记录，单文件超过 2 MiB 轮转、保留 3 份。日志页的下拉第一项“启动器（全局操作）”读后者。子进程 stdout 与 stderr 默认丢弃，显式设置 `DOUNAI_LOG_CHILD_OUTPUT=1` 才接管管道。
-
-注意：安装程序启动时会索要管理员权限。安装模式定为 `both`，这一行为已接受并写进 M5 验收项。`both` 只是安装器的运行时选项；落盘到 `state/install.json` 时写成 `current_user` 或 `per_machine`，便携 exe 写 `portable`，`install-v1` 契约不收 `both`。
+- 不读取 v1 包格式。v1 包格式从未打包分发。
+- 官方目录有效期上限 7 天。过期后官方源报“已过期”，不降级放行。
+- 目录实例（本地源码）在源码变更后需要手动确认再启动。
+- 资源采样首轮没有 CPU 基准，启动后 1～2 秒内显示 `—`。
 
 ## 契约
 
-`contracts/` 是角色、包格式与本地状态的单一真源。Rust 类型定义、跨仓一致性 CI 与发布工具都以这里的文件为准。入口见 [contracts/README.md](contracts/README.md)。
+[contracts/](contracts/README.md) 是角色、包格式与本地状态的单一真源。Rust 类型、跨仓一致性检查与发布工具都以这里的文件为准。
 
 关键口径：
 
 - `role` 是五值封闭枚举：`input`、`llm`、`output`、`shell`、`auxiliary`。未知值硬拒，不降级成 `auxiliary`。
-- zip 包内的 manifest 自带 32 字节 Ed25519 公钥。签名覆盖 `files` 清单，信任单位是公钥，不是下载源。
-- 同一 `module_id` 可并存多个 `instance_id`。每个槽只有一个 active 实例占规范端口，其余实例使用 `18101` 起的备用端口。
-- `shell` 允许第三方模块填槽，但不能自动成为 active。
+- zip 包内的 manifest 自带 32 字节 Ed25519 公钥。签名覆盖 `files` 清单。信任单位是公钥，不是下载源。
+- 同一 `module_id` 可并存多个 `instance_id`。当前实例占规范端口，其余实例从 `18101` 起使用备用端口。
+- `shell` 允许第三方模块填槽，不能自动成为当前实例。
 - 目录与 Git 仓库可导入为源码工作区，固定按未验证处理。
 
-修改任一契约文件后，先运行校验，再同步依赖该文件的代码与样例。
+## 项目结构
 
-## 构建前置
+- `src-tauri/src/`：命令面与进程托管。
+- `src-tauri/core/`：不依赖 Tauri 的独立 crate。
+- `src/`：界面。视图与共享层在 `src/ui/`。
+- `contracts/`：契约与状态 schema。
 
-仓库不存随包的 `uv.exe`（31.8 MB，第三方二进制）。首次构建或重新克隆后先跑一次：
+## 开发
+
+### 构建前置
+
+仓库不存随包的 `uv.exe`（31.8 MB）。首次构建或重新克隆后运行：
 
 ```bash
 python scripts/fetch-uv.py
 ```
 
-脚本从 PyPI 镜像取指定版本的 wheel，校验 wheel 整体与解出的 `uv.exe` 两层 sha256，写到 `src-tauri/bin/uv.exe`。缺这个文件时开发构建仍能编译（运行时退到联网补齐），但 `cargo tauri build` 会因为缺 bundle 资源直接失败。哈希与来源见 `src-tauri/bin/README.md`。
+说明：`cargo tauri build` 需要 `uv.exe` 作为 bundle 资源。缺这个文件时发布构建会失败。哈希与来源见 [src-tauri/bin/README.md](src-tauri/bin/README.md)。
 
-## 校验
+### 校验
 
 ```bash
+npm run typecheck
+npm test
 node contracts/validate.mjs
-npm install --no-save --no-package-lock --prefix .ci ajv-cli@5 ajv-formats@3
-.ci/node_modules/.bin/ajv validate --spec=draft2020 --strict=false \
-  -c .ci/node_modules/ajv-formats \
-  -s contracts/module-v2.schema.json -d "contracts/examples/*.v2.json"
-.ci/node_modules/.bin/ajv validate --spec=draft2020 --strict=false \
-  -c .ci/node_modules/ajv-formats \
-  -s contracts/install-v1.schema.json -d contracts/examples/state/install.json
-.ci/node_modules/.bin/ajv validate --spec=draft2020 --strict=false \
-  -c .ci/node_modules/ajv-formats \
-  -s contracts/deps-v1.schema.json -d contracts/examples/state/deps.json
 ```
 
-命令与 [contracts.yml](.github/workflows/contracts.yml) 一致：ajv 编译六份状态 schema，并对 manifest 与状态样例做数据级校验；`-c ajv-formats` 让 `date-time` 生效。字段与时间格式断言写在 [contracts/README.md](contracts/README.md)。
+契约 schema 与样例的完整校验命令见 [contracts.yml](.github/workflows/contracts.yml) 与 [contracts/README.md](contracts/README.md)。
 
 ## 文档
 
 | 文档 | 内容 |
 |---|---|
 | [docs/DESIGN.md](docs/DESIGN.md) | 设计决策、架构与子系统行为约束 |
-| [contracts/README.md](contracts/README.md) | 契约入口，含角色、包格式与 M0、M1 的状态 schema |
-| [docs/ROADMAP.md](docs/ROADMAP.md) | M1 到 M5 的里程碑与实测验收 |
-| [SECURITY.md](docs/SECURITY.md) | 安全策略、信任模型与已知限制 |
+| [contracts/README.md](contracts/README.md) | 契约入口，含角色、包格式与状态 schema |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | 里程碑与实测验收 |
+| [docs/SECURITY.md](docs/SECURITY.md) | 安全策略、信任模型与已知限制 |
 | [docs/SIGNING.md](docs/SIGNING.md) | 模块签名方法、密钥生成保管与轮换规程 |
-| [docs/ADMIN_UI.md](docs/ADMIN_UI.md) | 模块如何声明自己的配置界面 |
-| [docs/TESTING.md](docs/TESTING.md) | 测试方法学、M1 到 M3 的验收记录与已知限制 |
+| [docs/ADMIN_UI.md](docs/ADMIN_UI.md) | 模块声明配置界面的方法 |
+| [docs/TESTING.md](docs/TESTING.md) | 测试方法与验收记录 |
 | [docs/TAURI_UPGRADE.md](docs/TAURI_UPGRADE.md) | Tauri 固定版本、unstable 使用面与升级复核步骤 |
 
 ## 许可证
