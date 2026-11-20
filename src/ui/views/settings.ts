@@ -14,8 +14,10 @@ import {
   setChildOutput,
   setCloseBehavior,
   setKeepVersions,
+  setProxyConfig,
   storageFacts,
   type CloseBehavior,
+  type ProxyMode,
   type StorageFacts,
 } from "../../bridge.js";
 import { confirmModal, esc, openModal, toast } from "../dom.js";
@@ -38,6 +40,9 @@ const SECTIONS: Array<{ id: SectionId; label: string }> = [
 ];
 
 let active: SectionId = "appearance";
+
+/** 代理模式的未保存草稿：切到 manual 展开输入框时用，保存成功后清空。 */
+let proxyDraft: ProxyMode | null = null;
 
 export async function renderSettings(slots: ViewSlots): Promise<void> {
   renderHead(slots.head);
@@ -291,7 +296,34 @@ function storageHtml(): string {
 /* ---------------- 网络 ---------------- */
 
 function networkHtml(): string {
+  const saved = store.settings?.proxy ?? { mode: "system" as ProxyMode, url: "" };
+  const proxy = proxyDraft
+    ? { mode: proxyDraft, url: saved.url }
+    : { mode: saved.mode, url: saved.url };
+  const seg = (value: ProxyMode, label: string) =>
+    `<button type="button" data-proxy-set="${value}" class="${proxy.mode === value ? "is-on" : ""}">${label}</button>`;
+  const modeLabel: Record<ProxyMode, string> = {
+    off: "不使用代理，直连下载源",
+    system: "跟随操作系统与环境变量的代理设置",
+    manual: "用下面填写的地址访问所有下载源",
+  };
   return (
+    row(
+      "代理",
+      "只作用于目录拉取与包下载",
+      `<div class="seg">${seg("off", "关")}${seg("system", "使用系统代理")}${seg("manual", "手动配置")}</div>
+       <p class="cap" style="margin:6px 0 0">${esc(modeLabel[proxy.mode])}。本机实例的探测与子进程不受影响。</p>
+       ${
+         proxy.mode === "manual"
+           ? `<div class="field" style="margin-top:8px;max-width:520px">
+                <label for="proxy-url">代理地址</label>
+                <input id="proxy-url" class="input" type="text" placeholder="http://127.0.0.1:7897" value="${esc(proxy.url)}" />
+              </div>
+              <button class="btn btn--sm" style="margin-top:8px" type="button" data-act="proxy-save">保存代理地址</button>
+              <p class="cap" style="margin:6px 0 0">支持 http / https / socks5，例如 <code>http://127.0.0.1:7897</code>。地址不合法时不会保存。</p>`
+           : ""
+       }`
+    ) +
     row(
       "下载源",
       "按源验签，不做全局优选",
@@ -396,6 +428,27 @@ function bindSection(form: Element): void {
         void saveCloseBehavior(value);
       }
     });
+  });
+
+  form.querySelectorAll<HTMLButtonElement>("[data-proxy-set]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const value = button.dataset.proxySet;
+      if (value !== "off" && value !== "system" && value !== "manual") return;
+      // manual 只展开输入框，不落盘（空 URL 会被后端拒绝）；等「保存代理地址」。
+      if (value === "manual") {
+        proxyDraft = "manual";
+        const body = document.getElementById("pbody");
+        if (body) renderBody(body);
+        return;
+      }
+      proxyDraft = null;
+      void saveProxy(value, "");
+    });
+  });
+
+  form.querySelector('[data-act="proxy-save"]')?.addEventListener("click", () => {
+    const input = form.querySelector<HTMLInputElement>("#proxy-url");
+    void saveProxy("manual", input?.value.trim() ?? "");
   });
 
   form.querySelector('[data-act="copy-fp"]')?.addEventListener("click", (event) => {
@@ -605,6 +658,24 @@ async function saveCloseBehavior(value: CloseBehavior): Promise<void> {
     store.closeBehavior = await setCloseBehavior(value);
     await reload();
     toast(CLOSE_LABEL[value], "ok");
+  } catch (error) {
+    toast(`保存失败：${describeError(error)}`, "error");
+  }
+}
+
+async function saveProxy(mode: ProxyMode, url: string): Promise<void> {
+  try {
+    const next = await setProxyConfig(mode, url);
+    proxyDraft = null;
+    await reload();
+    toast(
+      next.mode === "off"
+        ? "已关闭代理"
+        : next.mode === "system"
+          ? "代理已设为跟随系统"
+          : "代理地址已保存",
+      "ok",
+    );
   } catch (error) {
     toast(`保存失败：${describeError(error)}`, "error");
   }

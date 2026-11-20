@@ -1050,6 +1050,15 @@ export interface RetentionPolicy {
   last_cleanup_at?: string;
 }
 
+/** 启动器自身 HTTP 客户端的代理模式：关闭 / 跟随系统 / 手动地址。 */
+export type ProxyMode = "off" | "system" | "manual";
+
+export interface ProxyConfigView {
+  mode: ProxyMode;
+  /** 仅 manual 模式有值；其余模式为空串。 */
+  url: string;
+}
+
 export interface SettingsSnapshot {
   trust: TrustStore;
   retention: RetentionPolicy;
@@ -1059,10 +1068,32 @@ export interface SettingsSnapshot {
   install_note: string | null;
   /** 新拉起的实例是否捕获子进程 stdout/stderr。 */
   child_output: boolean;
+  /** 目录拉取与包下载使用的代理配置。 */
+  proxy: ProxyConfigView;
 }
 
 export async function settingsSnapshot(): Promise<SettingsSnapshot> {
   return call<SettingsSnapshot>("settings_snapshot");
+}
+
+export async function proxyConfig(): Promise<ProxyConfigView> {
+  const view = await call<ProxyConfigView>("proxy_config");
+  return normalizeProxyView(view);
+}
+
+/** 写代理设置。`manual` 模式必须给合法 URL，否则后端拒绝且不落盘。 */
+export async function setProxyConfig(
+  mode: ProxyMode,
+  url: string,
+): Promise<ProxyConfigView> {
+  const view = await call<ProxyConfigView>("set_proxy_config", { mode, url });
+  return normalizeProxyView(view);
+}
+
+function normalizeProxyView(view: ProxyConfigView): ProxyConfigView {
+  const mode: ProxyMode =
+    view.mode === "off" || view.mode === "manual" ? view.mode : "system";
+  return { mode, url: typeof view.url === "string" ? view.url : "" };
 }
 
 export interface KeyInfo {

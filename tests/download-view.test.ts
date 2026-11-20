@@ -11,8 +11,8 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { filterEntries, groupEntries } from "../src/ui/views/download.js";
-import type { CatalogEntry } from "../src/bridge.js";
+import { failedSources, filterEntries, groupEntries } from "../src/ui/views/download.js";
+import type { CatalogEntry, SourceStatusView } from "../src/bridge.js";
 
 function entry(over: Partial<CatalogEntry> & Pick<CatalogEntry, "entry_key">): CatalogEntry {
   return {
@@ -138,5 +138,27 @@ describe("groupEntries", () => {
 
   it("空列表返回空分组", () => {
     expect(groupEntries([])).toEqual([]);
+  });
+});
+
+describe("failedSources", () => {
+  const status = (
+    id: string,
+    state: SourceStatusView["state"],
+    reason: string | null = null,
+  ): SourceStatusView => ({ id, name: id, state, reason });
+
+  it("只挑出网络不可达与验签失败，放过成功与主动停用的源", () => {
+    const all = [
+      status("ok-source", "ok"),
+      status("off-source", "disabled"),
+      status("net-source", "unavailable", "连接超时"),
+      status("sig-source", "invalid", "签名不符"),
+    ];
+    expect(failedSources(all).map((s) => s.id)).toEqual(["net-source", "sig-source"]);
+  });
+
+  it("全部成功时没有失败项", () => {
+    expect(failedSources([status("a", "ok"), status("b", "disabled")])).toEqual([]);
   });
 });

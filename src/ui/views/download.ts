@@ -23,6 +23,7 @@ import {
   type Role,
   type SourcesView,
   type SourcePreview,
+  type SourceStatusView,
   type SourceView,
 } from "../../bridge.js";
 import {
@@ -146,10 +147,13 @@ export async function renderDownload(slots: ViewSlots): Promise<void> {
 function renderHead(head: HTMLElement): void {
   const count = view.catalog?.entries.length ?? 0;
   const enabled = view.sources?.sources.filter((s) => s.enabled).length ?? 0;
+  const failed = failedSources(view.catalog?.sources ?? []);
   head.innerHTML = `
     <div>
       <h1>下载</h1>
-      <div class="sub">${enabled} 个启用源 · ${count} 个已验签条目${view.busy ? " · 处理中…" : ""}</div>
+      <div class="sub">${enabled} 个启用源 · ${count} 个已验签条目${
+        failed.length ? ` · <span style="color:var(--danger)">${failed.length} 源拉取失败</span>` : ""
+      }${view.busy ? " · 处理中…" : ""}</div>
     </div>
     <div class="sp">
       <button class="btn btn--sm" type="button" data-act="add-source">添加源</button>
@@ -168,6 +172,32 @@ function renderHead(head: HTMLElement): void {
 /* 正文                                                                */
 /* ------------------------------------------------------------------ */
 
+/** 从逐源状态里筛出本次拉取失败的源。disabled 是用户主动停用，不算失败。 */
+export function failedSources(sources: SourceStatusView[]): SourceStatusView[] {
+  return sources.filter(
+    (s) => s.state === "unavailable" || s.state === "invalid",
+  );
+}
+
+/** 逐源失败汇总。放在来源列表与筛选器之间，刷新目录后随 catalog 一起更新。 */
+function sourceFailuresHtml(): string {
+  const failed = failedSources(view.catalog?.sources ?? []);
+  if (!failed.length) return "";
+  const rows = failed
+    .map(
+      (s) =>
+        `<li><b>${esc(s.name)}</b> · ${
+          s.state === "invalid" ? "目录验签失败" : "无法连接"
+        }${s.reason ? `：${esc(s.reason)}` : ""}</li>`,
+    )
+    .join("");
+  return `<div class="alert" style="margin:12px 0">
+    <b>${failed.length} 个源拉取失败</b>
+    <p>下面这些源这次没能取到可用的已验签目录，界面只展示其余成功来源的条目。</p>
+    <ul style="margin:6px 0 0;padding-left:20px">${rows}</ul>
+  </div>`;
+}
+
 function renderBody(body: HTMLElement): void {
   body.classList.remove("pbody--flush", "pbody--admin");
   if (!isDesktop()) {
@@ -180,6 +210,7 @@ function renderBody(body: HTMLElement): void {
   }
   body.innerHTML = `
     ${sourcesHtml()}
+    ${sourceFailuresHtml()}
     ${filtersHtml()}
     ${catalogHtml()}
   `;
